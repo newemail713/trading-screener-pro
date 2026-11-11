@@ -62,7 +62,7 @@
   </div>
 
   <script>
-    window.SN_CONFIG = { LOCAL_MODE: true };
+    window.SN_CONFIG = { LOCAL_MODE: true, SUPABASE_URL: "local", SUPABASE_ANON_KEY: "local" };
     window.snToggleTheme = function () {
       const html = document.documentElement;
       const next = html.getAttribute("data-theme") === "light" ? "dark" : "light";
