@@ -41,9 +41,29 @@ TICKERS = [
 INDICES = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
 SECTOR_ETFS = {
     "XLK": "Technology", "XLF": "Financials", "XLV": "Health Care", "XLE": "Energy",
-    "XLY": "Consumer Disc.", "XLC": "Communication", "XLI": "Industrials",
+    "XLY": "Consumer Discretionary", "XLC": "Communication Services", "XLI": "Industrials",
     "XLP": "Consumer Staples", "XLB": "Materials", "XLRE": "Real Estate", "XLU": "Utilities"
 }
+
+def get_sp500_meta():
+    meta = {}
+    try:
+        req = urllib.request.Request(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8")
+        tables = pd.read_html(html)
+        df_sp = tables[0]
+        for _, row in df_sp.iterrows():
+            sym = str(row["Symbol"]).strip().replace("-", ".")
+            meta[sym] = {
+                "sec": str(row.get("GICS Sector", "Technology")).strip(),
+                "ind": str(row.get("GICS Sub-Industry", "S&P 500")).strip()
+            }
+    except Exception:
+        pass
+    return meta
 
 def strat_bar(curr, prev):
     if prev is None:
@@ -58,28 +78,16 @@ def strat_bar(curr, prev):
     lo_brk = curr["Low"] < prev["Low"]
     t = "3" if (hi_brk and lo_brk) else ("2U" if hi_brk else ("2D" if lo_brk else "1"))
     c = "up" if curr["Close"] > curr["Open"] else ("down" if curr["Close"] < curr["Open"] else "doji")
-    br = ""
-    if t == "2D" and c == "up":
-        br = "up"
-    elif t == "2U" and c == "down":
-        br = "down"
-    ifc = ""
-    if curr["Close"] > prev["High"]:
-        ifc = "up"
-    elif curr["Close"] < prev["Low"]:
-        ifc = "down"
+    br = "up" if (t == "2D" and c == "up") else ("down" if (t == "2U" and c == "down") else "")
+    ifc = "up" if curr["Close"] > prev["High"] else ("down" if curr["Close"] < prev["Low"] else "")
     rng = curr["High"] - curr["Low"]
     body = abs(curr["Close"] - curr["Open"])
     sh = "normal"
     if rng > 0:
-        if body / rng < 0.12:
-            sh = "doji"
-        elif (min(curr["Open"], curr["Close"]) - curr["Low"]) / rng > 0.6:
-            sh = "hammer"
-        elif (curr["High"] - max(curr["Open"], curr["Close"])) / rng > 0.6:
-            sh = "shooter"
-        elif body / rng > 0.8:
-            sh = "marubozu"
+        if body / rng < 0.12: sh = "doji"
+        elif (min(curr["Open"], curr["Close"]) - curr["Low"]) / rng > 0.6: sh = "hammer"
+        elif (curr["High"] - max(curr["Open"], curr["Close"])) / rng > 0.6: sh = "shooter"
+        elif body / rng > 0.8: sh = "marubozu"
     return {
         "t": t, "c": c, "sh": sh, "br": br, "ifc": ifc,
         "o": round(float(curr["Open"]), 2),
@@ -106,8 +114,7 @@ def analyze_df(df):
 
     def resample_strat(rule):
         r = df.resample(rule).agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
-        if len(r) < 2:
-            return d_cell
+        if len(r) < 2: return d_cell
         return strat_bar(r.iloc[-1], r.iloc[-2])
 
     w_cell = resample_strat("W-FRI")
@@ -141,10 +148,12 @@ def analyze_df(df):
     dlo52 = round((px - lo52) / lo52 * 100, 2) if lo52 else 0.0
 
     dsma = {}
-    for p in [10, 20, 50, 100, 150, 200]:
+    above_ma = {}
+    for p in [20, 50, 100, 150, 200]:
         if len(df) >= p:
             ma = float(df["Close"].rolling(p).mean().iloc[-1])
             dsma[str(p)] = round((px - ma) / ma * 100, 2) if ma else None
+            above_ma[p] = px > ma
 
     c5 = round((px - float(df["Close"].iloc[-6])) / float(df["Close"].iloc[-6]) * 100, 2) if len(df) >= 6 else chg
     c20 = round((px - float(df["Close"].iloc[-21])) / float(df["Close"].iloc[-21]) * 100, 2) if len(df) >= 21 else chg
@@ -152,6 +161,7 @@ def analyze_df(df):
     return {
         "px": round(px, 2), "chg": chg, "ao": px >= float(d_curr["Open"]),
         "D": d_cell, "W": w_cell, "M": m_cell, "Q": q_cell, "Y": y_cell, "ftfc": ftfc,
+        "above_ma": above_ma,
         "tech": {
             "px": round(px, 2), "chg": chg, "rsi": calc_rsi(df["Close"]), "rvol": rvol,
             "vol": vol, "avol30": int(avol30), "atr": round(atr, 2), "atrp": atrp,
@@ -161,8 +171,29 @@ def analyze_df(df):
 
 def main():
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    sp_meta = get_sp500_meta()
     all_syms = list(set(TICKERS + INDICES + list(SECTOR_ETFS.keys())))
     raw = yf.download(all_syms, period="1y", interval="1d", group_by="ticker", threads=True, progress=False)
+
+    mc_map = {}
+    ext_map = {}
+    try:
+        t_objs = yf.Tickers(" ".join(TICKERS))
+        for sym in TICKERS:
+            clean_s = sym.replace("-", ".")
+            try:
+                fi = t_objs.tickers[sym].fast_info
+                mc = getattr(fi, "market_cap", None)
+                if mc and mc > 0:
+                    mc_map[clean_s] = round(float(mc) / 1e9, 2)
+                last_p = getattr(fi, "last_price", None)
+                reg_p = getattr(fi, "regular_market_previous_close", None)
+                if last_p and reg_p and reg_p > 0:
+                    ext_map[clean_s] = {"px": round(float(last_p), 2)}
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     indices_out = []
     vix_obj = None
@@ -177,41 +208,66 @@ def main():
                 ohlc = [[round(float(r["Open"]),2), round(float(r["High"]),2), round(float(r["Low"]),2), round(float(r["Close"]),2)] for _, r in df.dropna().tail(35).iterrows()]
                 indices_out.append({"sym": sym_clean, "price": res["px"], "chg": res["chg"], "D": res["D"], "ohlc": ohlc})
 
-    sectors_out = []
-    for etf, name in SECTOR_ETFS.items():
-        res = analyze_df(raw[etf] if etf in raw else None)
-        if res:
-            sectors_out.append({
-                "name": name, "etf": etf, "px": res["px"], "chg": res["chg"],
-                "chg5d": res["tech"]["c5"], "chg20d": res["tech"]["c20"],
-                "above": 1, "total": 1, "stocks": []
-            })
-
     scan_rows = []
     prices_map = {}
     above_cnt, below_cnt = 0, 0
+    ma_counts = {20: 0, 50: 0, 100: 0, 150: 0, 200: 0}
+    ma_totals = {20: 0, 50: 0, 100: 0, 150: 0, 200: 0}
+    sec_stocks = {v: [] for v in SECTOR_ETFS.values()}
+
     for sym in TICKERS:
         df = raw[sym] if sym in raw else None
         res = analyze_df(df)
         if not res:
             continue
         clean_sym = sym.replace("-", ".")
-        if res["ao"]:
-            above_cnt += 1
-        else:
-            below_cnt += 1
-        prices_map[clean_sym] = [res["px"], res["chg"]]
+        if res["ao"]: above_cnt += 1
+        else: below_cnt += 1
+
+        for p, is_ab in res["above_ma"].items():
+            ma_totals[p] += 1
+            if is_ab: ma_counts[p] += 1
+
+        m_info = sp_meta.get(clean_sym, {"sec": "Technology", "ind": "S&P 500"})
+        sec_name = m_info["sec"]
+        mc_val = mc_map.get(clean_sym, 25.0)
+        px_now = ext_map.get(clean_sym, {}).get("px", res["px"])
+        prices_map[clean_sym] = [px_now, res["chg"]]
+
+        if sec_name in sec_stocks:
+            sec_stocks[sec_name].append({"s": clean_sym, "c": res["chg"], "mc": mc_val, "ao": res["ao"]})
+
         scan_rows.append({
-            "s": clean_sym, "sec": "S&P 500", "ind": "S&P 500", "p": res["px"], "c": res["chg"],
-            "sp": True, "D": res["D"], "W": res["W"], "M": res["M"], "Q": res["Q"], "Y": res["Y"],
-            "ftfc": res["ftfc"], "tech": res["tech"], "ninja": 75 if res["ftfc"] else 50
+            "s": clean_sym,
+            "sec": sec_name,
+            "ind": m_info["ind"],
+            "p": px_now,
+            "c": res["chg"],
+            "mc": mc_val,
+            "sp": True,
+            "D": res["D"], "W": res["W"], "M": res["M"], "Q": res["Q"], "Y": res["Y"],
+            "ftfc": res["ftfc"],
+            "tech": res["tech"],
+            "ninja": 75 if res["ftfc"] else 50
         })
+
+    sectors_out = []
+    for etf, name in SECTOR_ETFS.items():
+        res = analyze_df(raw[etf] if etf in raw else None)
+        st_list = sorted(sec_stocks.get(name, []), key=lambda x: x["mc"], reverse=True)
+        ab_s = sum(1 for x in st_list if x["ao"])
+        if res:
+            sectors_out.append({
+                "name": name, "etf": etf, "px": res["px"], "chg": res["chg"],
+                "chg5d": res["tech"]["c5"], "chg20d": res["tech"]["c20"],
+                "above": ab_s, "total": max(len(st_list), 1), "stocks": st_list[:25]
+            })
 
     sorted_by_chg = sorted(scan_rows, key=lambda x: x["c"], reverse=True)
     leaders = [{"s": x["s"], "c": x["c"]} for x in sorted_by_chg[:10]]
     laggards = [{"s": x["s"], "c": x["c"]} for x in sorted_by_chg[-10:][::-1]]
-    gap_up = [{"s": x["s"], "gp": x["tech"]["gap"], "gd": round(x["p"] * x["tech"]["gap"] / 100, 2), "price": x["p"]} for x in scan_rows if x["tech"]["gap"] >= 2.5][:10]
-    gap_dn = [{"s": x["s"], "gp": x["tech"]["gap"], "gd": round(x["p"] * x["tech"]["gap"] / 100, 2), "price": x["p"]} for x in scan_rows if x["tech"]["gap"] <= -2.5][:10]
+    gap_up = [{"s": x["s"], "gp": x["tech"]["gap"], "gd": round(x["p"] * x["tech"]["gap"] / 100, 2), "price": x["p"]} for x in scan_rows if x["tech"]["gap"] >= 2.0][:10]
+    gap_dn = [{"s": x["s"], "gp": x["tech"]["gap"], "gd": round(x["p"] * x["tech"]["gap"] / 100, 2), "price": x["p"]} for x in scan_rows if x["tech"]["gap"] <= -2.0][:10]
 
     sec_sorted = sorted(sectors_out, key=lambda x: x["chg"], reverse=True)
     market_data = {
@@ -227,16 +283,25 @@ def main():
         "gappers": {"up": gap_up, "down": gap_dn}
     }
 
+    breadth_hist = {
+        "updated": now_iso,
+        "sp": {str(p): [round(ma_counts[p] / max(ma_totals[p], 1) * 100, 1)] for p in [20, 50, 100, 150, 200]},
+        "nq": {str(p): [round(ma_counts[p] / max(ma_totals[p], 1) * 100, 1)] for p in [20, 50, 100, 150, 200]},
+        "dates": [now_iso[:10]]
+    }
+
     with open("data/scanner.json", "w", encoding="utf-8") as f:
         json.dump({"updated": now_iso, "rows": scan_rows}, f, separators=(",", ":"))
     with open("data/market.json", "w", encoding="utf-8") as f:
         json.dump(market_data, f, separators=(",", ":"))
     with open("data/prices.json", "w", encoding="utf-8") as f:
         json.dump({"updated": now_iso, "prices": prices_map}, f, separators=(",", ":"))
+    with open("data/breadth.json", "w", encoding="utf-8") as f:
+        json.dump(breadth_hist, f, separators=(",", ":"))
 
     cards = []
     try:
-        req = urllib.request.Request("https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY,QQQ,AAPL,NVDA,TSLA&region=US&lang=en-US", headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request("https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY,QQQ,NVDA,AAPL,MSFT,TSLA&region=US&lang=en-US", headers={"User-Agent": "Mozilla/5.0"})
         xml_data = urllib.request.urlopen(req, timeout=10).read()
         root = ET.fromstring(xml_data)
         for item in root.findall(".//item")[:20]:
