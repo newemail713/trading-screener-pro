@@ -1,0 +1,1804 @@
+/* StratNinja — business/pro makeover (2026-09). Loaded AFTER app.css so it overrides for the new
+   "luxury / trading-terminal" look. Uses theme tokens (var(--*)) so light + dark both work; RTL-safe. */
+
+/* ---------- Journal: fit the calendar / equity curve on one screen (no scroll) ---------- */
+#journalContainer .page-head { margin: 2px 0 4px; }
+#journalContainer .page-head h1 { font-size: 22px; }
+#journalContainer .page-head .sub { font-size: 12px; }
+#journalContainer .tabs { margin: 5px 0; }
+/* trim the chrome above the tab content (CSV/account bar, privacy toggle, guide bar) */
+#journalContainer .bar { margin-bottom: 6px; }
+#journalContainer .jr-privbar { margin: 3px 0; }
+#journalContainer .guide-sec { margin: 3px 0 !important; }
+/* calendar grid: shorter cells + tighter fonts so all week-rows fit the viewport */
+#journalContainer .grid { gap: 5px; }
+#journalContainer .cell { min-height: 50px; padding: 3px 7px; }
+#journalContainer .cell .dnum { top: 3px; left: 7px; font-size: 11px; }
+#journalContainer .pnl { margin-top: 12px; font-size: 14px; }
+#journalContainer .tcount { font-size: 10px; margin-top: 0; }
+#journalContainer .sub { font-size: 9px; margin-top: 0; }
+#journalContainer .wk { min-height: 50px; padding: 4px 10px; }
+#journalContainer .wk .wval { font-size: 15px; margin: 2px 0 3px; }
+#journalContainer .wk .wlab, #journalContainer .wk .wdays { font-size: 10px; }
+#journalContainer .cal-head, #journalContainer .monthnav { margin-bottom: 5px; }
+/* equity curve: clearly bounded to the viewport height (no scroll) */
+#journalContainer .chartbox { padding: 10px 14px; margin-bottom: 8px; }
+#journalContainer .chartbox h3 { margin: 0 0 6px; }
+#journalContainer .eqsvg { max-height: 30vh; min-height: 150px; }
+#journalContainer .eq-wrap { width: 100%; }
+/* trade wizard step pills (פתיחה / סגירה) — clear green active state, like the CSV button (was too pale) */
+.wiz-steps .wiz-dot.on { color: #fff !important; background: linear-gradient(90deg, #0c9160, #17c08a) !important; border-color: transparent !important; box-shadow: 0 2px 10px rgba(23,192,138,.35); }
+.wiz-steps .wiz-dot.done { color: #22e39b !important; border-color: #17c08a !important; }
+
+/* PIVOT HIGH/LOW markers on the equity curve */
+.eq-piv circle { stroke: #0b0f14; stroke-width: 1.5; }
+.eq-piv text { font-size: 11px; font-weight: 800; }
+.eq-piv.hi circle { fill: #16b877; } .eq-piv.hi text { fill: #7fe8b8; }
+.eq-piv.lo circle { fill: #e0524f; } .eq-piv.lo text { fill: #ff9aa2; }
+@media (max-width: 820px) { #journalContainer .eqsvg { max-height: 34vh; } #journalContainer .cell { min-height: 46px; } }
+
+/* ---------- typography: larger, refined ---------- */
+body { font-family: 'Heebo', 'Rubik', 'Segoe UI', 'Assistant', Arial, sans-serif; letter-spacing: -0.1px; }
+.page-head { margin: 6px 0 30px; }
+.page-head h1 { font-size: 40px; font-weight: 800; letter-spacing: -1px; line-height: 1.15; }
+.page-head .sub { font-size: 16px; line-height: 1.9; max-width: 940px; color: var(--muted); }
+/* small uppercase eyebrow above page titles (added in render/JS as .page-eyebrow) */
+.page-eyebrow { font: 700 12px/1 var(--mono); letter-spacing: 3px; color: var(--muted); opacity: .8; margin-bottom: 12px; }
+
+/* ---------- sidebar: wider, grouped, clean (no colorful icons) ---------- */
+/* desktop only: the wider label sidebar. On mobile (≤820px) the app collapses to a 60px icon rail,
+   so we must NOT force a wide width there — and the emoji (kept in .nav-emoji) shows on that rail. */
+@media (min-width: 821px) {
+  .sidebar { width: 250px; padding: 28px 16px; }
+  .side-nav a .nav-emoji { display: none; }   /* clean, icon-free labels on desktop */
+}
+@media (max-width: 820px) {
+  .nav-group-label { display: none; }          /* group labels don't fit the narrow icon rail */
+}
+.side-brand { padding: 0 8px 22px; }
+.side-brand b { font-size: 23px; letter-spacing: -0.5px; }
+.side-brand .tag { font-size: 10.5px; letter-spacing: 3px; text-transform: uppercase; opacity: .7; }
+.side-nav { gap: 2px; }
+.side-nav a { min-height: 46px; font-size: 15.5px; font-weight: 500; border-radius: 11px; letter-spacing: -.2px; }
+.side-nav a.active { background: var(--accentbg); color: var(--accent); font-weight: 700; box-shadow: inset -3px 0 0 var(--accent); }
+.nav-group-label { font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase;
+  color: var(--muted); opacity: .6; margin: 20px 12px 7px; }
+.side-nav .nav-group-label:first-child { margin-top: 2px; }
+
+/* ---------- main breathing room (desktop; app handles mobile padding) ---------- */
+@media (min-width: 821px) { .main { padding: 26px 36px; } }
+
+/* ---------- panels as clean, premium cards ---------- */
+.panel { border-radius: 18px; padding: 22px; }
+.panel h3 { font-size: 17px; letter-spacing: -.2px; }
+
+/* ---------- data tables: spacious, business-grade ---------- */
+.scan-table { font-size: 16px; }
+.scan-table th { font-size: 12.5px; letter-spacing: .05em; color: var(--muted); font-weight: 700; padding: 13px 10px; }
+.scan-table td { padding: 15px 10px; }
+.scan-table td.sym .tsym { font-size: 16.5px; font-weight: 700; }
+
+/* ---------- filters / chips / inputs ---------- */
+.filters .fgrp > label { font-size: 14px; }
+#page .chip { border-radius: 9px; padding: 9px 13px; font-size: 13.5px; }
+.filters select, .filters input { min-height: 42px; font-size: 14px; }
+
+/* ---------- luxury emerald replaces the old Discord-violet on active toggles ---------- */
+/* one brand green for every "on" accent button, so the UI reads uniform + premium (no purple). */
+:root { --lux-g1:#2bc3b2; --lux-g2:#5fe0cf; --lux-gsoft:rgba(95,224,207,.5); }   /* teal — blue palette accent */
+html[data-theme="light"] { --lux-g1:#0b9c8c; --lux-g2:#14b7a6; --lux-gsoft:rgba(20,183,166,.5); }
+html[data-pal="green"] { --lux-g1:#2fc06f; --lux-g2:#5fe09a; --lux-gsoft:rgba(95,224,154,.5); }
+html[data-pal="green"][data-theme="light"] { --lux-g1:#0f9a6e; --lux-g2:#17b07f; --lux-gsoft:rgba(23,176,127,.5); }
+.uni-btn.on,
+.secftfc-btn.on,
+.flow-tf-btn.on {
+  background: linear-gradient(90deg, var(--lux-g1), var(--lux-g2));
+  border-color: transparent; color: #fff;
+}
+/* filled "selected/active" states were graphite (looked like a washed light-gray pill) → emerald */
+#page .chip.on, .chip.on,
+.btn.primary {
+  background: linear-gradient(90deg, var(--lux-g1), var(--lux-g2));
+  border-color: transparent; color: #fff;
+}
+.btn.primary:hover { filter: brightness(1.06); }
+
+/* NINJA REALM stays a touch richer/brighter so it still feels special */
+.secftfc-btn.secftfc-realm { border-color: var(--lux-gsoft); color: #8fe3c1; }
+.secftfc-btn.secftfc-realm.on {
+  background: linear-gradient(90deg, #0a7d52, #16c893);
+  border-color: transparent; color: #fff;
+}
+
+/* ---------- compact filter bar: each filter group collapses into a dropdown chip ---------- */
+.filters.fbar > .frow { display: flex; flex-wrap: wrap; gap: 9px; align-items: flex-start; }
+/* full-width flex break — pushes the universe/identity chips (יקום · סימבול · סקטור · תת-סקטור · מחיר · שווי שוק) onto their own row */
+.filters.fbar > .frow > .fbar-break { flex-basis: 100%; width: 100%; height: 0; margin: 0; padding: 0; border: 0; }
+/* merged "נר" filter — sub-rows (סוג · צבע · צורה) stacked inside one popover */
+.nrf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 9px; }
+.nrf-row:last-child { margin-bottom: 0; }
+.nrf-lbl { font-size: 11px; color: var(--muted); font-weight: 700; min-width: 34px; text-align: start; }
+/* ===== 🖼️ Market Overview MEGA share card — data overlaid on Market_Template.png ===== */
+.market-card { position: fixed; left: -9999px; top: 0; z-index: -1; width: 1184px; height: 1328px;
+  background: #0B1020 url("Market_Template.png?v=2") top center / 1184px 1328px no-repeat;
+  direction: rtl; font-family: 'Heebo', sans-serif; color: #eaf2ff; }
+.market-card > div { position: absolute; }
+/* NOTE: no CSS transforms for positioning — html2canvas mis-renders translate(). Use left-edge + width + text-align. */
+/* breadth — inside the small left box of the מדד רוחב שוק frame */
+.mkt-brd-num { top: 33.6%; left: 3%; width: 23%; text-align: center; font-size: 40px; font-weight: 900; color: #eafff8; white-space: nowrap; letter-spacing: -1px; }
+.mkt-brd-num span { font-size: 24px; color: #7f9ccb; font-weight: 700; }
+.mkt-brd-bar { top: 38.5%; left: 4.5%; width: 20%; height: 11px; border-radius: 6px; overflow: hidden; background: rgba(255,255,255,.07); display: flex; direction: ltr; }
+.mkt-brd-bar .r { background: linear-gradient(90deg,#ff5a6a,#e5384a); height: 100%; } .mkt-brd-bar .g { background: linear-gradient(90deg,#17c08a,#3fe0a0); height: 100%; }
+.mkt-brd-pct { top: 40.4%; left: 3%; width: 23%; text-align: center; font-size: 13px; font-weight: 800; color: #dbe6f7; white-space: nowrap; }
+.mkt-brd-pct .pos { color: #3fe0a0; } .mkt-brd-pct .neg { color: #ff6b7a; }
+/* CTA in the empty center of the top frame */
+.mkt-cta { top: 30.2%; left: 26.5%; width: 47.5%; text-align: center; font-size: 25px; font-weight: 700; line-height: 1.42;
+  color: #dbe8fb; text-shadow: 0 0 18px rgba(70,140,255,.35); }
+.mkt-cta b { color: #6ee7ff; font-weight: 900; }
+/* market state — inside the right box */
+.mkt-state { top: 33.8%; left: 74.6%; width: 21.5%; text-align: center; }
+.mkt-state-pill { display: inline-block; font-size: 20px; font-weight: 900; padding: 4px 14px; border-radius: 20px; white-space: nowrap; }
+.mkt-state.neg .mkt-state-pill { color: #ff6b7a; background: rgba(229,56,74,.16); } .mkt-state.pos .mkt-state-pill { color: #3fe0a0; background: rgba(22,184,119,.16); } .mkt-state.z .mkt-state-pill { color: #e0b341; background: rgba(224,179,65,.16); }
+.mkt-state-expl { display: block; font-size: 14.5px; font-weight: 600; color: #d3dcec; margin-top: 6px; line-height: 1.32; }
+/* index cards — overlay price/chg/sparkline into each card's lower empty box (sym+icon are baked) */
+.mkt-idx { top: 48.2%; width: 17.3%; text-align: center; }
+.mkt-idx-row { white-space: nowrap; direction: ltr; text-align: center; }
+.mkt-idx-px { font-size: 28px; font-weight: 900; color: #ffffff; }
+.mkt-idx-chg { font-size: 17px; font-weight: 900; margin-inline-start: 8px; } .mkt-idx-chg.pos { color: #3fe0a0; } .mkt-idx-chg.neg { color: #ff6b7a; } .mkt-idx-chg.z { color: #9fb0c8; }
+.mkt-idx-spk { display: block; width: 82%; height: 22px; margin: 4px auto 0; } .mkt-spark { width: 100%; height: 100%; display: block; }
+/* leaders (green, left box) + laggards (red, right box) — each column overlays the pill BAR (skips the square) */
+.mkt-list { display: flex; flex-direction: column; justify-content: space-between; height: 15.6%; }
+.mkt-lead-stocks { top: 68.9%; left: 3.5%; width: 21%; height: 14%; } .mkt-lead-secs { top: 68.9%; left: 28.2%; width: 19.8%; height: 14%; }
+.mkt-lag-stocks { top: 69%; left: 50%; width: 21%; height: 14%; } .mkt-lag-secs { top: 69%; left: 74%; width: 19.7%; height: 14%; }
+.mkt-lead-stocks .mkt-lrow { padding-inline-end: 8px; }
+.mkt-lead-secs .mkt-lrow { padding-inline-start: 16px; }
+.mkt-lag-stocks .mkt-lrow { padding-inline-end: 38px; }
+.mkt-lag-secs .mkt-lrow { padding-inline-end: 40px; }
+.mkt-lrow { display: flex; align-items: center; justify-content: space-between; direction: rtl; font-size: 18px; padding: 0 5px; }
+.mkt-lrow .mkt-lt { font-weight: 900; color: #f2f7ff; } .mkt-lrow .mkt-lt.muted { color: #6b7a92; }
+.mkt-lrow .mkt-lp { font-weight: 900; font-variant-numeric: tabular-nums; direction: ltr; } .mkt-lp.pos { color: #3fe0a0; } .mkt-lp.neg { color: #ff6b7a; } .mkt-lp.z { color: #9fb0c8; }
+/* Ninja Insight text + date */
+.mkt-insight { top: 88.4%; left: 20%; width: 63%; font-size: 30px; font-weight: 800; color: #eaf2ff; line-height: 1.3; text-align: start; }
+/* timestamp at the top (date + capture time) */
+.mkt-date { top: 2.3%; left: 2.5%; width: 34%; text-align: left; font-size: 21px; font-weight: 800; color: #d3e4ff; white-space: nowrap; text-shadow: 0 1px 8px rgba(0,0,0,.7); }
+/* bottom footer strip */
+.mkt-foot-right { top: 97.2%; left: 50%; width: 47%; text-align: right; font-size: 16px; font-weight: 700; color: #9fb3d4; white-space: nowrap; }
+.mkt-foot-right b { color: #eaf2ff; }
+.mkt-foot-left { top: 97.2%; left: 3%; width: 42%; text-align: left; font-size: 16px; font-weight: 700; color: #9fb3d4; white-space: nowrap; }
+
+/* ===== breadth "מעל הממוצעים" share card — overlay on Breath_Template.png (1254²) ===== */
+.breadth-card { width: 1254px; height: 1254px; position: relative; direction: rtl; overflow: hidden;
+  background: #0B1020 url("Breath_Template.png?v=3") top center / 1254px 1254px no-repeat;
+  font-family: 'Heebo','Rubik',sans-serif; color: #eaf2ff; }
+.breadth-card > div { position: absolute; }
+.brd-date { top: 1.6%; left: 2.2%; font-size: 20px; font-weight: 800; color: #d3e4ff; text-shadow: 0 1px 8px rgba(0,0,0,.7); }
+/* index state pill + description (per index header row) */
+.brd-sp-state, .brd-ndx-state { width: 28.5%; left: 29.5%; text-align: center; }
+.brd-sp-state { top: 32.45%; }
+.brd-ndx-state { top: 60.5%; width: 25%; left: 34.5%; }   /* neutral pill */
+/* pill fills the whole baked box, coloured by state (red/yellow/green), enlarged */
+.brd-state-pill { display: block; width: 100%; box-sizing: border-box; font-size: 23px; font-weight: 900; padding: 12px 8px; border-radius: 14px; white-space: nowrap; }
+.brd-state-arrow { font-size: 17px; vertical-align: middle; }
+.brd-sp-state.pos .brd-state-pill, .brd-ndx-state.pos .brd-state-pill { color: #6bf0bf; background: rgba(22,184,119,.30); }
+.brd-sp-state.neg .brd-state-pill, .brd-ndx-state.neg .brd-state-pill { color: #ff8a95; background: rgba(229,56,74,.32); }
+.brd-sp-state.zero .brd-state-pill, .brd-ndx-state.zero .brd-state-pill { color: #f0cc63; background: rgba(224,179,65,.26); }
+.brd-sp-desc, .brd-ndx-desc { width: 33%; left: 61%; text-align: start; font-size: 18px; font-weight: 600; line-height: 1.35; color: #dbe8fb; }
+.brd-sp-desc { top: 32.8%; } .brd-ndx-desc { top: 60.8%; }
+/* per-card nudges: 150-day % + badge right; 200/150/100 graphs shifted right */
+/* NOTE: these need higher specificity (.brd-card.brd-cN) than the base .brd-card .brd-spk below, else it wins */
+.brd-card.brd-c0 .brd-pct, .brd-card.brd-c1 .brd-pct, .brd-card.brd-c2 .brd-pct { left: 13%; }
+.brd-card.brd-c0 .brd-chg, .brd-card.brd-c1 .brd-chg, .brd-card.brd-c2 .brd-chg { left: 50%; }
+/* right edge LOCKED; left start pushed 2px LEFT for all except the 50-day */
+.brd-card.brd-c0 .brd-spk { left: 6.8%; right: 0.6%; }            /* 200 → more left (right edge anchored) */
+.brd-card.brd-c1 .brd-spk { left: 10.6%; right: 1.3%; }           /* 150 */
+.brd-card.brd-c2 .brd-spk { left: 8.2%; right: 4.4%; }            /* 100 */
+.brd-sp-card.brd-c3 .brd-spk { left: 5.5%; right: 6.5%; }         /* S&P 50 (unchanged) */
+.brd-ndx-card.brd-c3 .brd-spk { left: 5.8%; right: 6.2%; }        /* QQQ 50 (unchanged) */
+.brd-card.brd-c4 .brd-spk { left: 4.6%; right: 9%; }              /* 20 */
+.brd-card.brd-c3 .brd-pct, .brd-card.brd-c4 .brd-pct { left: 11%; }   /* 50/20 % right (were spilling) */
+/* per-MA card = one sparkline box (zones baked); % + change badge overlay its top strip */
+.brd-card { width: 18.8%; height: 13.8%; }
+.brd-sp-card { top: 43.4%; } .brd-ndx-card { top: 72%; }
+.brd-card .brd-spk { position: absolute; top: 0; left: 4%; right: 8%; height: 100%; }
+.brd-card .brd-pct { position: absolute; top: -3.5%; left: 9%; font-size: 30px; font-weight: 900; color: #ffffff; text-shadow: 0 1px 6px rgba(0,0,0,.75); }
+.brd-card .brd-chg { position: absolute; top: -0.5%; left: 46%; direction: ltr; font-size: 15px; font-weight: 800; padding: 2px 8px; border-radius: 8px; white-space: nowrap; }
+.brd-card .brd-chg.pos { color: #3fe0a0; background: rgba(22,184,119,.2); }
+.brd-card .brd-chg.neg { color: #ff6b7a; background: rgba(229,56,74,.2); }
+.brd-card .brd-chg.zero { color: #cdd7e6; background: rgba(150,160,180,.18); }
+.brd-insight { top: 90%; left: 26%; width: 62%; font-size: 30px; font-weight: 800; color: #eaf2ff; line-height: 1.3; text-align: start; }
+.brd-foot-left { top: 97%; left: 3%; font-size: 15px; font-weight: 700; color: #9fb3d4; white-space: nowrap; }
+.brd-foot-right { top: 97%; left: 55%; width: 42%; text-align: right; font-size: 15px; font-weight: 700; color: #9fb3d4; white-space: nowrap; }
+
+/* ===== breadth share card v2 — NO graphs, overlay on NEW Breath_Template.png (1122×1402 portrait) ===== */
+.breadth-card2 { width: 1122px; height: 1402px; position: relative; direction: rtl; overflow: hidden;
+  background: #0B1020 url("Breath_Template.png?v=4") top center / 1122px 1402px no-repeat;
+  font-family: 'Heebo','Rubik',sans-serif; color: #eaf7ff; }
+.breadth-card2 > div { position: absolute; }
+/* three top summary cards — RTL: מצב שוק (right) · רוחב שוק (center) · פוקוס יומי (left) */
+.b2-top { display: flex; align-items: center; justify-content: center; height: 5.2%; direction: ltr;
+  font-family: 'Rubik','Heebo',sans-serif; font-weight: 900; font-size: 46px; letter-spacing: -1px;
+  color: #eaf7ff; text-shadow: 0 2px 10px rgba(0,0,0,.45); }
+.b2-top.b2-state   { top: 33.6%; right: 6%;  width: 26%; }
+.b2-top.b2-breadth { top: 33.6%; left: 37%;  width: 26%; }
+.b2-top.b2-focus   { top: 33.6%; left: 6%;   width: 26%; }
+.b2-top.pos  { color: #22e39b; } .b2-top.neg { color: #ff5a6a; } .b2-top.zero { color: #f0cc63; }
+/* two MA-card rows (S&P / Nasdaq) — each holds 5 absolutely-placed % readouts */
+.b2-sp, .b2-ndx { left: 4%; width: 92%; height: 9.5%; }
+.b2-sp  { top: 51.5%; }
+.b2-ndx { top: 66.5%; }
+.b2-ma { position: absolute; bottom: 0; width: 18%; height: 100%;
+  display: flex; align-items: center; justify-content: center; }
+.b2-ma-pct { font-family: 'Rubik','Heebo',sans-serif; font-weight: 900; font-size: 40px; direction: ltr;
+  color: #eaf7ff; text-shadow: 0 2px 8px rgba(0,0,0,.5); }
+.b2-ma.pos  .b2-ma-pct { color: #22e39b; }
+.b2-ma.neg  .b2-ma-pct { color: #ff5a6a; }
+.b2-ma.zero .b2-ma-pct { color: #f0cc63; }
+.b2-insight { top: 83.5%; left: 7%; width: 78%; height: 11%; display: flex; align-items: center;
+  text-align: start; font-size: 27px; font-weight: 700; line-height: 1.4; color: #eaf7ff; }
+
+/* ===== FTFC "המשכיות זמנית" share card — overlay on Ftfc_Template.png ===== */
+/* NEW portrait template (1122×1402) — same structure as the breadth card */
+.ftfc-card { width: 1122px; height: 1402px; position: relative; direction: rtl; overflow: hidden;
+  background: #0B1020 url("Ftfc_Template.png?v=3") top center / 1122px 1402px no-repeat;
+  font-family: 'Heebo','Rubik',sans-serif; color: #eaf2ff; }   /* reverted from Varela Round (400-only) → Heebo so 900 weight is actually BOLD (Adi) */
+.ftfc-card > div { position: absolute; }
+.ftc-date { top: 1.1%; left: 2.6%; font-size: 17px; font-weight: 800; color: #cfe0ff; text-shadow: 0 1px 8px rgba(0,0,0,.8); }
+/* which continuity timeframes the card reflects (M·Q·Y etc.) — top-right, mirrors the date */
+.ftc-tf { top: 1.1%; right: 2.6%; left: auto; font-size: 17px; font-weight: 900; color: #7fe9ff; letter-spacing: .3px; text-shadow: 0 1px 8px rgba(0,0,0,.85); }
+.ftc-tf b { color: #eaf2ff; }
+/* three top value boxes — labels baked (מצב שוק right · כיוון מוביל center · פוקוס יומי left); emit VALUE only. +5px lower (locked) */
+.ftc-box { display: flex; align-items: center; justify-content: center; text-align: center; top: 32.16%; height: 5.6%; }
+.ftc-tone  { left: 3.5%; width: 29%; }     /* פוקוס יומי (leftmost) */
+.ftc-range { left: 36%;  width: 26%; }      /* כיוון מוביל (center) */
+.ftc-key   { left: 65%;  width: 30%; }      /* מצב שוק (rightmost) */
+.ftc-bval { font-size: 25px; font-weight: 900; color: #eaf2ff; line-height: 1.1; max-width: 100%;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ftc-bval.pos { color: #2fe08a; } .ftc-bval.neg { color: #ff6b7a; } .ftc-bval.zero { color: #f0cc63; }
+/* the four data columns (sectors red/green · sub-sectors red/green) — 3 rows each, stacked */
+.ftc-col { display: flex; flex-direction: column; justify-content: space-between; }
+/* +27px lower than the original (rows were sitting above the baked pills) — Adi locked this */
+.ftc-sec-red   { left: 3.5%; width: 45.3%; top: 47.7%; height: 12.3%; }
+.ftc-sec-green { left: 51.2%; width: 45.3%; top: 47.7%; height: 12.3%; }
+.ftc-sub-red   { left: 3.5%; width: 45.3%; top: 67.7%; height: 12.3%; }
+.ftc-sub-green { left: 51.2%; width: 45.3%; top: 67.7%; height: 12.3%; }
+/* FIXED-grid row: [name · right, fills the pill] [% · fixed] [ETF · left, in the small accent box] */
+.ftc-row { display: flex; align-items: center; direction: rtl; height: 30%; }
+.ftc-row.ftc-empty { visibility: hidden; }
+.ftc-name { order: 1; flex: 1 1 auto; min-width: 0; text-align: start; padding-inline-start: 3%; padding-inline-end: 4%;
+  font-size: 22px; font-weight: 800; color: #eaf2ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ftc-pct { order: 2; flex: 0 0 22%; text-align: end; direction: ltr; font-size: 23px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.ftc-pct.pos { color: #2fe08a; } .ftc-pct.neg { color: #ff6b7a; } .ftc-pct.zero { color: #cdd7e6; }
+.ftc-etf { order: 3; flex: 0 0 15%; text-align: center; font-size: 20px; font-weight: 900; color: #eaf2ff; letter-spacing: .3px; }
+/* fine per-element nudges (Adi) — absolute offsets summed from all his requests. position:relative (html2canvas-safe; NOT transform) */
+/* SECTORS */
+.ftc-sec-red .ftc-etf,  .ftc-sec-green .ftc-etf  { position: relative; left: 3px; top: -3px; }     /* ticker: right 3, up 3 */
+.ftc-sec-red .ftc-pct,  .ftc-sec-green .ftc-pct  { position: relative; top: -3px; }                 /* % : up 3 */
+.ftc-sec-red .ftc-name, .ftc-sec-green .ftc-name { position: relative; left: -5px; top: -3px; }     /* name: up 3, left 5 */
+.ftc-sec-red .ftc-row:nth-child(3) .ftc-pct,  .ftc-sec-green .ftc-row:nth-child(3) .ftc-pct  { top: -6px; }   /* 37% / 29% (row 3): up 3 more */
+.ftc-sec-red .ftc-row:nth-child(3) .ftc-name, .ftc-sec-green .ftc-row:nth-child(3) .ftc-name { top: -6px; }   /* their names follow */
+/* SUB-SECTORS */
+.ftc-sub-red .ftc-etf,  .ftc-sub-green .ftc-etf  { position: relative; left: 3px; top: 3px; }      /* ticker: right 3, down 3 */
+.ftc-sub-red .ftc-pct,  .ftc-sub-green .ftc-pct  { position: relative; left: -3px; top: 6px; }     /* % : down 6, left 3 */
+.ftc-sub-red .ftc-name, .ftc-sub-green .ftc-name { position: relative; left: -7px; top: 6px; }     /* name: down 6, left 7 */
+.ftc-sub-red .ftc-row:nth-child(1) .ftc-pct,  .ftc-sub-green .ftc-row:nth-child(1) .ftc-pct  { top: 9px; }    /* 76% / 62% (row 1): down 3 more */
+.ftc-sub-red .ftc-row:nth-child(1) .ftc-name, .ftc-sub-green .ftc-row:nth-child(1) .ftc-name { top: 9px; }    /* their names follow */
+/* ninja insight (bulb + label baked → overlay text below it) — max 2 lines, inside the box */
+.ftc-insight { top: 87.5%; left: 6%; width: 86%; height: 6.5%; font-size: 24px; font-weight: 700; color: #eaf2ff;
+  line-height: 1.32; text-align: start; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+/* ===== alert share card — overlay data on ShareAlert_Template.png (1254×1254). Header/labels/icons/footer baked ===== */
+.alert-card { width: 1254px; height: 1254px; position: relative; direction: rtl; overflow: hidden;
+  background: #0B1020 url("ShareAlert_Template.png?v=1") top center / 1254px 1254px no-repeat;
+  font-family: 'Heebo','Rubik',sans-serif; color: #eaf2ff; }
+.alert-card > div { position: absolute; }
+.alc-ticker { top: 24.5%; left: 16%; width: 42%; text-align: left; direction: ltr; font-family: 'Rubik',sans-serif; font-weight: 900; line-height: 1; color: #fff; text-shadow: 0 2px 14px rgba(0,0,0,.5); }  /* ×1.5 via inline font-size, shifted right (Adi) */
+.alc-price { top: 36.2%; left: 14%; font-size: 62px; font-weight: 900; direction: ltr; color: #fff; }   /* ×1.3 */
+.alc-chg { top: 42.16%; left: 14.5%; font-size: 58px; font-weight: 900; direction: ltr; }   /* ×0.8, lowered 3px */
+.alc-chg.pos { color: #22e39b; } .alc-chg.neg { color: #ff6b7a; }
+.alc-ftfc { top: 52.74%; left: 13%; width: 36%; text-align: center; font-size: 56px; font-weight: 900; color: #eaf2ff; }   /* raised +22px total */
+.alc-sector { top: 53.06%; right: 6%; width: 37%; text-align: center; font-size: 46px; font-weight: 800; color: #eaf2ff; white-space: nowrap; overflow: hidden; }   /* raised +18px total (lowered 2px) */
+.alc-etf { color: #7fe9ff; margin-inline-start: 6px; }
+/* presets — 3 fixed slots */
+.alc-preset { top: 66.1%; height: 5.2%; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 25px; font-weight: 800; color: #eaf2ff; white-space: normal; line-height: 1.12; overflow: hidden; }   /* raised 11px; long names wrap to 2 lines */
+.alc-p1 { right: 11%; width: 25%; } .alc-p2 { right: 38.5%; width: 24%; } .alc-p3 { left: 11%; width: 25%; }
+.alc-pempty { display: none; }
+.alc-dots { display: none; }   /* the empty template has no dots indicator — preset boxes already show the count */
+/* D W M Q Y cells — Hebrew TF name on top + candle type below (raised 5px, font +20%) */
+.alc-tf { top: 72.6%; width: 15%; height: 9.6%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }   /* raised +5px */
+.alc-tfk { font-size: 23px; font-weight: 800; color: #9fb6d8; position: relative; top: 3px; }   /* labels lowered 3px */
+.alc-tfv { font-size: 55px; font-weight: 900; direction: ltr; }   /* candle font ×1.44 (1.2²) */
+.alc-tfv.up { color: #22e39b; } .alc-tfv.down { color: #ff6b7a; } .alc-tfv.n { color: #9fb0c8; }
+.alc-tf0 { right: 8.32%; } .alc-tf1 { right: 26.5%; } .alc-tf2 { right: 43.32%; } .alc-tf3 { left: 26.78%; } .alc-tf4 { left: 8.84%; }   /* יומי(tf0)+רבעוני(tf3) 4px left; חודשי(tf2) 6px right; שנתי(tf4) 3px right */
+.alc-time { top: 86.0%; left: 10%; width: 32%; text-align: center; font-size: 32px; font-weight: 900; direction: ltr; color: #eaf2ff; }   /* ×1.2, raised 6px */
+/* community CTA text inside the baked green bar — white, bigger, may wrap to 2 lines */
+.alc-cta { top: 82.9%; right: 9%; width: 43%; height: 7.4%; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 28px; font-weight: 900; color: #ffffff; line-height: 1.18; text-shadow: 0 1px 4px rgba(0,0,0,.45); }   /* raised +18px total */
+/* "new alert" text — placed INSIDE the baked red neon pill (top-left), no own pill decoration */
+.alc-title { top: 14.64%; left: 7.68%; width: 36%; height: 6%; display: flex; align-items: center; justify-content: center; }   /* +23px down, +21px right total */
+.alc-title-pill { font-size: 40px; font-weight: 900; color: #fff; white-space: nowrap; letter-spacing: .5px;
+  text-shadow: 0 0 12px rgba(255,45,69,.95), 0 2px 6px rgba(0,0,0,.6); }
+
+/* ===== premium Trade-Share (journal performance) card — overlay data on Tradeshare_Template.png (1254²). Header/labels/icons/CTA/footer baked ===== */
+.trade-card { width: 1254px; height: 1254px; position: relative; direction: rtl; overflow: hidden;
+  background: #070a12 url("Tradeshare_Template.png?v=1") top center / 1254px 1254px no-repeat;
+  font-family: 'Heebo','Rubik',sans-serif; color: #eaf2ff; }
+.trade-card > div { position: absolute; }
+.tsc-pos { color: #22e39b; } .tsc-neg { color: #ff6b7a; } .tsc-z { color: #cdd8ea; }
+/* header */
+.tsc-upd { top: 5.0%; left: 5.5%; width: 12%; height: 3.0%; display: flex; align-items: center; justify-content: center; font-size: 21px; font-weight: 800; color: #d7ffe9; }
+.tsc-pertag { top: 14.2%; right: 5.5%; width: 13%; height: 3.6%; display: flex; align-items: center; justify-content: center; font-size: 23px; font-weight: 800; color: #ff9aa6; }
+.tsc-date { top: 14.2%; right: 20.18%; width: 29%; height: 3.6%; display: flex; align-items: center; justify-content: center; font-size: 25px; font-weight: 800; color: #eaf2ff; direction: ltr; }   /* +4px right */
+/* subline split into the two baked slots under the title */
+.tsc-sub-a { top: 24.9%; right: 3.8%; width: 30%; text-align: center; font-size: 24px; font-weight: 700; color: #bcd3f0; }   /* +15px right more, +2px up */
+.tsc-sub-b { top: 24.9%; right: 36.2%; width: 19%; text-align: center; font-size: 24px; font-weight: 700; color: #bcd3f0; }   /* +10px right more, +2px up */
+/* hero net P&L (top-left) */
+.tsc-hero { top: 18.04%; left: 1.16%; width: 40%; height: 8.6%; display: flex; align-items: center; justify-content: center; font-size: 75px; font-weight: 900; direction: ltr; line-height: 1; }   /* font ×0.72, +17px left total (fits big numbers) */
+.tsc-herolbl { top: 26.52%; left: 1.96%; width: 40%; text-align: center; font-size: 23px; font-weight: 700; color: #9fb6d8; }   /* +3px up more */
+/* shared row y-offsets (left panel values + right panel trade rows align) */
+.tsc-row0 { top: 34.7%; } .tsc-row1 { top: 39.75%; } .tsc-row2 { top: 44.8%; } .tsc-row3 { top: 49.85%; } .tsc-row4 { top: 54.9%; }
+/* left panel: 5 characteristic value chips */
+.tsc-cv { left: 6%; width: 11%; height: 3.9%; margin-top: -2px; display: flex; align-items: center; justify-content: center; font-size: 25px; font-weight: 800; border-radius: 10px; direction: ltr; }   /* all chips +2px up */
+.tsc-cv.tsc-pos { background: rgba(34,227,155,.12); } .tsc-cv.tsc-neg { background: rgba(255,107,122,.12); }
+.tsc-cv.tsc-row0, .tsc-cv.tsc-row1, .tsc-cv.tsc-row3 { width: 9.2%; height: 3.52%; left: 6.4%; }   /* avgWin + avgLoss + managed chips shrunk + nudged right */
+/* right panel: P&L + ticker + direction per row */
+.tsc-rp { left: 53.46%; width: 12%; height: 3.9%; display: flex; align-items: center; justify-content: center; font-size: 26px; font-weight: 800; direction: ltr; }   /* moved +25px right into its proper cell */
+.tsc-rt { right: 15.5%; width: 12%; height: 3.9%; margin-top: -1px; display: flex; align-items: center; justify-content: center; font-size: 27px; font-weight: 900; color: #fff; direction: ltr; }   /* tickers locked */
+.tsc-rd { right: 7.44%; width: 8.5%; height: 3.9%; margin-top: -2px; display: flex; align-items: center; justify-content: center; }   /* לונג/שורט +2px up, +2px right */
+.tsc-dir { padding: 3px 11px; border-radius: 7px; font-size: 18px; font-weight: 800; white-space: nowrap; }
+.tsc-dir.tsc-lo { background: rgba(34,227,155,.16); color: #22e39b; }
+.tsc-dir.tsc-sh { background: rgba(255,107,122,.16); color: #ff6b7a; }
+/* distribution bar (dynamic) + 3 labels */
+.tsc-bar { top: 64.46%; left: 3.3%; width: 93.4%; height: 2.35%; border-radius: 999px; overflow: hidden; display: flex; direction: rtl; }   /* aligned onto the baked track, +3px up more */
+.tsc-bar .tsc-bg { background: #12e070; } .tsc-bar .tsc-br { background: #ff5a6a; } .tsc-bar .tsc-bn { background: #596b86; }
+.tsc-dl { top: 70.0%; width: 28%; height: 5.6%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; }   /* count above % — taller block so count clears the baked dot */
+.tsc-dl0 { right: 5%; } .tsc-dl1 { right: 36%; } .tsc-dl2 { left: 5%; }
+.tsc-dpct { font-size: 28px; font-weight: 900; }
+.tsc-dsub { font-size: 15px; font-weight: 600; color: #9fb6d8; }
+/* 4 bottom tiles (icons baked at the tile's right edge; value+label fill the left area) */
+.tsc-tile { top: 76.62%; height: 7.2%; width: 18%; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; }   /* +2px down more */
+.tsc-tile0 { left: 9.02%; } .tsc-tile1 { left: 32%; } .tsc-tile2 { left: 55.36%; } .tsc-tile3 { left: 77.7%; }   /* best +6px, avg +8px, win-rate +10px left */
+.tsc-tv { font-size: 34px; font-weight: 900; direction: ltr; line-height: 1.05; }
+.tsc-tl { font-size: 18px; font-weight: 600; color: #9fb6d8; margin-top: 2px; }
+/* ninja insight (bottom-right) */
+.tsc-insight { top: 86.4%; right: 19.5%; width: 34%; height: 5.4%; display: flex; align-items: center; justify-content: flex-start; text-align: right; white-space: nowrap; font-size: 18px; font-weight: 600; color: #cdd8ea; }   /* single short line, left of the baked label */
+.tsc-insight b { color: #eaf2ff; }
+/* blue community CTA button (bottom-left) — text overlay (arrow baked) */
+.tsc-cta { top: 86.0%; left: 2.5%; width: 41%; height: 5.4%; display: flex; align-items: center; justify-content: center; font-size: 34px; font-weight: 800; color: #eaf2ff; }   /* font ×1.38 total */
+
+/* ===== wide/compact Candle Map at the bottom of the continuity tab (transposed: TFs × bucket types) ===== */
+.cmap-wide { margin-top: 16px; }
+.cmap-table-wide { border-spacing: 5px 5px; table-layout: fixed; }
+.cmap-table-wide .cmw-corner { width: 42px; }
+.cmap-table-wide .cmw-bh { font-size: 12px; font-weight: 800; color: var(--muted); white-space: nowrap; }
+.cmap-table-wide .cm-type { width: 42px; font-size: 14px; }
+.cmap-table-wide .cm-pill { min-width: 0; width: 100%; padding: 8px 0; font-size: 14px; }
+.cmw-verdict { margin-top: 10px; padding: 11px 16px; }
+
+/* ===== continuity tab 2026-10-01 redesign: candle-map (narrow, left) + sectors grid (right); sub-sectors in a drawer ===== */
+.cont-layout { display: flex; gap: 12px; align-items: stretch; margin-top: 10px; }   /* stretch: both columns share one height; the candle map drives it */
+.cont-left { flex: 0 0 clamp(320px, 36%, 470px); min-width: 0; }   /* Adi 2026-10-30: Candle Map רחב יותר, עוצמת-סקטורים צרה יותר */
+.cont-right { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.cont-right .td-flow { margin: 0; }
+/* sectors panel GROWS to fill the empty space; composites strip keeps its natural height at the bottom */
+body[data-page="sectors"] .cont-right > .td-flow { flex: 0 0 auto; }
+body[data-page="sectors"] .cont-right > .td-flow:first-child { flex: 1 1 auto; display: flex; flex-direction: column; }
+/* auto-fit → tiles STRETCH to fill the whole row (no empty space on the left), per Adi.
+   !important: the generic `.td-flow .bcell-list` rule (auto-fill 150px, same specificity, later in file) was winning. */
+body[data-page="sectors"] .cont-right .cont-secgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(158px, 1fr)) !important; gap: 10px; }
+body[data-page="sectors"] .cont-right > .td-flow:first-child .cont-secgrid { flex: 1 1 auto; align-content: space-between; }
+.cont-comp .cont-secgrid { grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)) !important; }
+/* bigger tiles (Adi 2026-10-04) — thicker bars + larger name; rows spread out to fill the height */
+body[data-page="sectors"] .cont-secgrid .bc-card { min-height: 124px; justify-content: flex-start; gap: 6px; padding: 16px 14px; }   /* Adi 2026-10-30: +10% גובה, ממלא יותר מהמסך */
+/* Adi 2026-10-30: רוחב סקטוריאלי + תזרים סקטוריאלי — אריחים גבוהים יותר וזהים בין שני הטאבים (ניצול הנדל"ן האנכי) */
+body[data-page="today"] .td-flow2 .bc-card,
+body[data-page="sp500"] .td-flow2 .bc-card { min-height: 84px; justify-content: center; gap: 9px; padding: 14px 13px; }
+body[data-page="today"] .td-flow2 .bc-card .bcc-pct,
+body[data-page="sp500"] .td-flow2 .bc-card .bcc-pct { font-size: 21px; }
+body[data-page="today"] .td-flow2 .bc-card .bcc-name,
+body[data-page="sp500"] .td-flow2 .bc-card .bcc-name { font-size: 14px; }
+body[data-page="sectors"] .cont-secgrid .bcc-name { font-size: 16px; }
+body[data-page="sectors"] .cont-secgrid .ftt-bars { gap: 10px; margin-top: 12px; }
+body[data-page="sectors"] .cont-secgrid .ftt-bar { height: 15px; }
+body[data-page="sectors"] .cont-secgrid .ftt-ic { width: 11px; height: 11px; }
+/* narrow candle map on the left (candle types across the top × 5 TFs) — fills the column height */
+.cmap-side { margin: 0; padding: 14px 14px 16px; display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+.cmap-side .cmap-head { font-size: 16px; }
+.cmap-side .cms-note { font-size: 11.5px; margin: -2px 0 10px; }
+.cmap-side .tablewrap { flex: 1 1 auto; display: flex; }
+.cmap-table-side { width: 100%; height: 100%; border-spacing: 3px 4px; table-layout: fixed; }
+.cmap-table-side .cmw-corner { width: 26px; font-size: 9.5px; color: var(--muted); font-weight: 800; }
+.cmap-table-side .cmw-bh { font-size: 10.5px; font-weight: 800; color: var(--muted); padding: 0 0 3px; white-space: nowrap; }
+.cmap-table-side .cm-type { width: 26px; font-size: 12px; font-weight: 800; }
+.cmap-table-side .cm-pill { min-width: 0; width: 100%; height: 100%; box-sizing: border-box; display: flex; align-items: center; justify-content: center; padding: 11px 0; font-size: 13px; }
+.cms-verdict { margin-top: 12px; padding: 11px 13px; flex-direction: column; gap: 7px; align-items: stretch; }
+.cms-verdict .cmv-item { justify-content: space-between; }
+/* sub-sector drawer (inside the modal) — same two-bar tiles, wraps nicely */
+.cont-drawer-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-top: 4px; }
+@media (max-width: 860px) {
+  .cont-layout { flex-direction: column; }
+  .cont-left { flex: none; width: 100%; }
+  .cmap-table-side .cm-pill { padding: 7px 0; }
+}
+
+/* sticky footer: anchor the footer to the bottom of the viewport on short pages, so it stays put across pages */
+.scanner-app .main { display: flex; flex-direction: column; }
+.scanner-app .main > .site-footer-mount { margin-top: auto; }
+
+/* ===== RISK ON/OFF heat map (volatile-stock map) — inline verdict chip + controls ===== */
+.risk-head .risk-head-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.risk-head .risk-head-row h1 { margin: 0; }
+.risk-verdict-chip { display: inline-flex; align-items: center; gap: 10px; padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel2); }
+.risk-verdict-chip .risk-v-val { font-family: 'Rubik', sans-serif; font-weight: 900; font-size: 18px; direction: ltr; line-height: 1; }
+.risk-verdict-chip .risk-v-sub { font-size: 12px; font-weight: 700; color: var(--muted); }
+.risk-verdict-chip.risk-on  { border-color: rgba(34,227,155,.55); background: rgba(34,227,155,.10); } .risk-verdict-chip.risk-on  .risk-v-val { color: #22e39b; }
+.risk-verdict-chip.risk-off { border-color: rgba(255,90,106,.55); background: rgba(229,56,74,.10); } .risk-verdict-chip.risk-off .risk-v-val { color: #ff5a6a; }
+.risk-verdict-chip.risk-mid { border-color: rgba(230,190,90,.50); background: rgba(230,190,90,.10); } .risk-verdict-chip.risk-mid .risk-v-val { color: #e6c05a; }
+.risk-controls .risk-atr-field { display: flex; align-items: center; gap: 8px; }
+.risk-controls .risk-atr-field input { width: 66px; }
+
+/* ===== FTFC bull/bear share cards (overlay on FTFC_GREEN.png / FTFC_RED.png, 1254²) ===== */
+.ftf-card { width: 1254px; height: 1254px; position: relative; direction: rtl; overflow: hidden; font-family: 'Heebo','Rubik',sans-serif; color: #eaf2ff; }
+.ftf-card > div { position: absolute; }
+.ftf-bull { background: #0a1420 url("FTFC_GREEN.png?v=1") top center / 1254px 1254px no-repeat; }
+.ftf-bear { background: #0a1420 url("FTFC_RED.png?v=1") top center / 1254px 1254px no-repeat; }
+/* dominant-direction block */
+.ftf-dir { top: 30.6%; left: 37%; width: 26%; text-align: center; font-size: 54px; font-weight: 900; }
+.ftf-bull .ftf-dir { color: #2fe08a; } .ftf-bear .ftf-dir { color: #ff5a6a; }
+.ftf-strong { top: 37.6%; left: 37.3%; width: 6.5%; text-align: center; font-size: 26px; font-weight: 900; }
+.ftf-bull .ftf-strong { color: #8affc8; } .ftf-bear .ftf-strong { color: #ff9aa4; }
+.ftf-support { top: 34.4%; left: 78.5%; width: 11%; text-align: center; font-size: 46px; font-weight: 900; color: #dcebff; }
+/* direction per timeframe (W M Q Y) — value next to the baked arrow */
+.ftf-tf { top: 51%; width: 11%; text-align: center; font-size: 44px; font-weight: 900; }
+.ftf-bull .ftf-tf { color: #2fe08a; } .ftf-bear .ftf-tf { color: #ff5a6a; }
+.ftf-tf0 { left: 13%; } .ftf-tf1 { left: 36.5%; } .ftf-tf2 { left: 60%; } .ftf-tf3 { left: 83.5%; }
+/* where is the most FTFC (Y Q M W) — fill bar + count */
+.ftf-most { top: 63.2%; height: 3.4%; width: 17.5%; display: flex; align-items: center; gap: 7px; direction: ltr; }
+.ftf-most0 { left: 7%; } .ftf-most1 { left: 30.5%; } .ftf-most2 { left: 54%; } .ftf-most3 { left: 77.5%; }
+.ftf-most-bar { flex: 1 1 auto; height: 38%; border-radius: 6px; background: rgba(255,255,255,.08); overflow: hidden; }
+.ftf-most-bar > span { display: block; height: 100%; border-radius: 6px; }
+.ftf-bull .ftf-most-bar > span { background: linear-gradient(90deg,#0c9160,#22e39b); }
+.ftf-bear .ftf-most-bar > span { background: linear-gradient(90deg,#e5384a,#ff8b8b); }
+.ftf-most-n { flex: 0 0 auto; font-size: 26px; font-weight: 900; min-width: 1.1em; text-align: center; }
+.ftf-bull .ftf-most-n { color: #8affc8; } .ftf-bear .ftf-most-n { color: #ff9aa4; }
+/* leading sectors (4) — leader[0] leftmost */
+.ftf-sec { top: 74%; width: 23%; height: 11%; }
+.ftf-sec0 { left: 2.5%; } .ftf-sec1 { left: 26.5%; } .ftf-sec2 { left: 50.5%; } .ftf-sec3 { left: 74.5%; }
+.ftf-sec-ico { position: absolute; top: 2%; left: 6%; font-size: 34px; }
+.ftf-sec-etf { position: absolute; top: 4%; right: 5%; font-size: 30px; font-weight: 900; color: #eaf2ff; }
+.ftf-sec-name { position: absolute; top: 36%; right: 5%; font-size: 17px; font-weight: 700; color: #bcd0ea; white-space: nowrap; }
+.ftf-sec-str { position: absolute; bottom: 7%; left: 10%; right: 10%; text-align: center; font-size: 18px; font-weight: 800; }
+.ftf-bull .ftf-sec-str { color: #8affc8; } .ftf-bear .ftf-sec-str { color: #ff9aa4; }
+/* ninja insight */
+.ftf-insight { top: 89.3%; left: 24%; width: 72%; font-size: 25px; font-weight: 800; line-height: 1.3; color: #eaf2ff;
+  text-align: start; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+/* bull/bear chooser */
+.ftf-chooser { display: flex; gap: 16px; padding: 12px 4px; }
+.ftf-ch-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 24px 14px; border-radius: 16px;
+  cursor: pointer; font-size: 34px; border: 2px solid var(--line); background: var(--panel2); color: var(--ink); transition: .15s; }
+.ftf-ch-btn b { font-size: 26px; } .ftf-ch-btn span { font-size: 13px; color: var(--muted); font-weight: 600; }
+.ftf-ch-bull:hover { border-color: #22e39b; box-shadow: 0 0 0 2px rgba(34,227,155,.3); }
+.ftf-ch-bear:hover { border-color: #ff6b7a; box-shadow: 0 0 0 2px rgba(255,107,122,.3); }
+
+/* ===== המשכיות tiles — ETF ticker in a FIXED dedicated top row, Hebrew name centered below it (Adi) ===== */
+.ftfc-tile { position: relative; }
+.ftfc-tile .bcc-top { display: flex; justify-content: center; align-items: center; margin-bottom: 3px; }
+/* name: centered, full (up to 2 lines, no "…"); reserve 2 lines so all tiles' bars align */
+.ftfc-tile .bcc-name { font-size: 12.5px; line-height: 1.2; white-space: normal; text-overflow: clip; text-align: center; width: 100%;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.4em; }
+/* >50% flag → centered UNDER the sector name (Adi); a fixed-height slot in EVERY tile keeps the bars aligned */
+.ftfc-tile .ftt-flag { min-height: 22px; display: flex; align-items: center; justify-content: center; }
+.ftfc-tile .ftt-50 { position: static; margin: 0; }
+.ftt-bars { display: flex; flex-direction: column; gap: 5px; margin-top: 7px; }
+.ftt-row { display: flex; align-items: center; gap: 6px; }
+.ftt-ic { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
+.ftt-ic-green { background: #22e39b; } .ftt-ic-red { background: #ff6b7a; }
+.ftt-bar { flex: 1 1 auto; height: 9px; border-radius: 5px; background: rgba(255,255,255,.07); overflow: hidden; direction: ltr; }
+.ftt-bar > span { display: block; height: 100%; border-radius: 5px; transition: width .3s ease; }
+.ftt-green > span { background: linear-gradient(90deg,#0c9160,#22e39b); }
+.ftt-red > span { background: linear-gradient(90deg,#e5384a,#ff8b8b); }
+/* composites (single ETF) → one clear directional pill instead of two bars */
+.ftt-cpill { margin-top: 8px; padding: 8px 8px; border-radius: 9px; font-size: 12.5px; font-weight: 800;
+  text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ftt-cpill.ftt-c-up { color: #2fe08a; background: rgba(22,184,119,.15); }
+.ftt-cpill.ftt-c-dn { color: #ff6b7a; background: rgba(229,56,74,.15); }
+.ftt-cpill.ftt-c-mix { color: #9fb0c8; background: rgba(150,160,180,.12); }
+/* >50% of the asset's stocks share ONE FTFC direction → glowing frame + % flag (spot the interesting sector) */
+.ftfc-tile.ftfc-strong { position: relative; }
+.ftfc-tile.ftfc-strong-green { border-color: rgba(34,227,155,.9) !important; box-shadow: 0 0 0 1px rgba(34,227,155,.65), 0 0 16px rgba(34,227,155,.42); }
+.ftfc-tile.ftfc-strong-red   { border-color: rgba(255,107,122,.9) !important; box-shadow: 0 0 0 1px rgba(255,107,122,.65), 0 0 16px rgba(255,107,122,.38); }
+.ftt-50 { margin-inline-start: auto; flex: 0 0 auto; direction: ltr; font-family: 'Rubik', sans-serif;
+  font-size: 12px; font-weight: 900; padding: 2px 7px; border-radius: 7px; white-space: nowrap; }
+.ftt-50-green { color: #22e39b; background: rgba(34,227,155,.16); }
+.ftt-50-red   { color: #ff6b7a; background: rgba(255,107,122,.16); }
+/* EXTERNAL hint on a sector tile that one of its SUB-sectors is >50% one-direction (drill in to find it) */
+.ftt-substrong { margin-top: 10px; font-family: 'Rubik', sans-serif; font-size: 13.5px; font-weight: 800;
+  padding: 6px 10px; border-radius: 9px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; }
+.ftt-substrong-green { color: #a8f7d6; background: rgba(34,227,155,.17); border: 1px solid rgba(34,227,155,.5); box-shadow: 0 0 10px rgba(34,227,155,.18) inset; }
+.ftt-substrong-red   { color: #ffc2c9; background: rgba(255,107,122,.17); border: 1px solid rgba(255,107,122,.46); box-shadow: 0 0 10px rgba(255,107,122,.16) inset; }
+
+/* option current-price source tag (auto CBOE vs manually typed) */
+.opt-src { display: inline-block; font-size: 9.5px; font-weight: 800; padding: 1px 5px; border-radius: 5px; white-space: nowrap; vertical-align: middle; letter-spacing: .2px; }
+.opt-src.auto { color: #7ee2b8; background: rgba(23,192,138,.14); }
+.opt-src.manual { color: #e0b341; background: rgba(224,179,65,.14); }
+.opt-src.none { color: var(--muted); background: transparent; padding: 0; }
+.filters.fbar .fpop { position: relative; }
+.filters.fbar .fpop-btn { display: inline-flex; align-items: center; gap: 8px; min-height: 40px;
+  padding: 8px 14px; border-radius: 11px; background: var(--panel2); border: 1px solid var(--line);
+  color: var(--ink); font-size: 13.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: .15s; }
+.filters.fbar .fpop-btn:hover { border-color: var(--muted); }
+.filters.fbar .fpop-caret { color: var(--muted); font-size: 10px; margin-inline-start: 2px; }
+.filters.fbar .fpop-dot { width: 7px; height: 7px; border-radius: 50%; background: transparent; }
+.filters.fbar .fpop.active .fpop-dot { background: var(--lux-g2); box-shadow: 0 0 0 3px rgba(23,192,138,.18); }
+.filters.fbar .fpop.active .fpop-btn { border-color: var(--lux-g2); color: var(--ink); }
+.filters.fbar .fpop.open .fpop-btn { border-color: var(--lux-g2); box-shadow: 0 0 0 2px rgba(23,192,138,.22); }
+.filters.fbar .fpop.open .fpop-caret { transform: rotate(180deg); }
+.filters.fbar .fpop-body { position: absolute; z-index: 70; top: calc(100% + 7px); inset-inline-start: 0;
+  min-width: 240px; max-width: min(94vw, 380px); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 14px; padding: 15px; box-shadow: 0 12px 40px rgba(0,0,0,.5); display: none; }
+.filters.fbar .fpop.fpop-wide .fpop-body { max-width: min(94vw, 620px); }
+.filters.fbar .fpop.open .fpop-body { display: block; }
+.filters.fbar .fpop-body > .fgrp { min-width: 0; margin: 0; }
+.filters.fbar .fpop-body > .fgrp > label { display: block; font-size: 12.5px; color: var(--muted); font-weight: 700; margin-bottom: 9px; }
+/* the seq builder details, inside its popover, is already expanded — hide its redundant summary caret hint */
+.filters.fbar .fpop-body .seq-summary { list-style: none; }
+/* wide popovers that hold whole panels (MTF / technical / indicators) */
+/* overflow-y only: a filter form should never scroll sideways. A child overflowing by a few px made
+   overflow:auto show a horizontal scrollbar at the bottom of the popover (Adi). Clip X, scroll Y. */
+.filters.fbar .fpop.fpop-panel .fpop-body { max-width: min(94vw, 660px); max-height: min(74vh, 600px); overflow-x: hidden; overflow-y: auto; }
+.filters.fbar .fpop-panel .fpop-body .frow.tech-row { display: flex; flex-wrap: wrap; gap: 14px; }
+.filters.fbar .fpop-panel .fpop-body .frow.tech-row > .fgrp { min-width: 150px; max-width: 100%; }
+.filters.fbar .fpop-panel .fpop-body .mtf-rows { display: flex; flex-direction: column; gap: 8px; }
+.filters.fbar .fpop-panel .fpop-body .note { margin-top: 10px; overflow-wrap: anywhere; }
+@media (max-width: 700px) {
+  .filters.fbar .fpop-body { position: fixed; inset-inline: 12px auto; left: 12px; right: 12px; min-width: 0; max-width: none; }
+  .filters.fbar .fpop.fpop-panel .fpop-body { max-width: none; }
+}
+
+/* ---------- favorites alert cell: truncate long preset names + collapse many into 🔔 N ---------- */
+.fav-alert-chip { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-flex; align-items: center; vertical-align: middle; }
+.fav-alert-multi { position: relative; display: inline-block; vertical-align: middle; cursor: default; outline: none; }
+.fav-alert-count { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700;
+  padding: 3px 10px; border-radius: 8px; white-space: nowrap;
+  background: rgba(23,192,138,.16); color: var(--ink); border: 1px solid rgba(23,192,138,.4); }
+.fav-alert-multi:hover .fav-alert-count, .fav-alert-multi:focus-within .fav-alert-count { border-color: var(--lux-g2); }
+.fav-alert-pop { display: none; position: absolute; z-index: 60; top: calc(100% + 5px); inset-inline-start: 0;
+  min-width: 170px; max-width: 280px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 11px; padding: 8px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+.fav-alert-multi:hover .fav-alert-pop, .fav-alert-multi:focus-within .fav-alert-pop { display: flex; flex-direction: column; gap: 5px; }
+.fav-alert-pop .fav-alert-chip { max-width: none; }
+
+/* ---------- 'דופק השוק' internal tabs (stock map / sector flow / continuity / breadth) ---------- */
+.pulse-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 2px 0 12px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+.pulse-tab { font-size: 14px; font-weight: 700; padding: 8px 16px; border-radius: 10px 10px 0 0; cursor: pointer;
+  background: transparent; color: var(--muted); border: 1px solid transparent; border-bottom: none; transition: .15s; }
+.pulse-tab:hover { color: var(--ink); background: var(--panel2); }
+.pulse-tab.on { color: var(--ink); background: var(--panel2); border-color: var(--line); box-shadow: inset 0 -3px 0 var(--lux-g2); }
+body[data-page] .pulse-tabs + .page-head { margin-top: 2px; }
+
+/* ---------- alerts center: wider modal, two columns (scans right · recent alerts left) ---------- */
+/* .modal.al-modal (0,2,0) so it beats .modal.wide from app.css (redesign.css loads last) */
+.modal.al-modal { max-width: min(97vw, 1480px); width: min(97vw, 1480px); padding: 26px 30px 30px; }
+.al-modal { max-width: min(97vw, 1480px); width: min(97vw, 1480px); }
+/* FIXED frame size in every tab (Adi): the window stays large & constant — only #hubBody scrolls inside */
+.modal.al-modal { height: 86vh; max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; }
+.modal.al-modal > h2, .modal.al-modal > .hub-tabs { flex: 0 0 auto; }
+.modal.al-modal > #hubBody { flex: 1 1 auto; min-height: 0; overflow-y: auto; margin: 0 -30px -30px; padding: 0 30px 30px; }
+/* feed/list fills the hub and scrolls with the whole body (no tiny inner 230px box) */
+#hubBody .al-flist, #hubBody .al-plist { max-height: none; overflow: visible; }
+/* two roomy columns — presets ("הסריקות שלי") and recent alerts both get real width */
+.al-cols { display: grid; grid-template-columns: minmax(460px, 1.55fr) minmax(0, 1fr); gap: 22px; margin-top: 6px; }
+.al-cols .al-col { min-width: 0; }
+.al-cols .al-plist { max-height: 58vh; overflow: auto; padding-inline-end: 6px; }
+.al-cols .al-flist { max-height: 58vh; overflow: auto; padding-inline-end: 6px; }
+/* preset rows ("my scans"): comfortable, name on the start, toggle pinned to the end */
+.al-prow { padding: 8px 13px; gap: 12px; align-items: center; }
+.al-prow > span:first-child { flex: 1 1 auto; min-width: 0; font-weight: 700; line-height: 1.35; }
+.al-prow > .ios-switch, .al-prow > label { flex: none; margin-inline-start: auto; }
+/* single-line alert rows: [ticker] [scan name … ellipsis] [date time] */
+.al-frow { padding: 5px 11px; margin: 4px 0; gap: 10px; flex-wrap: nowrap; align-items: center; }
+.al-frow .tsym { flex: none; font-weight: 800; font-size: 13px; min-width: 44px; }
+.al-frow .al-fname { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12.5px; }
+.al-frow .al-time { flex: none; white-space: nowrap; font-size: 11px; opacity: .8; margin-inline-start: auto; font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) { .al-cols { grid-template-columns: 1fr; } .al-cols .al-plist { max-height: 30vh; } .al-cols .al-flist { max-height: 42vh; } }
+
+/* ---------- movers widget: proportional green/red bar per row ---------- */
+.gm-row { display: flex; align-items: center; gap: 8px; }
+.gm-row .tsym { flex: none; }
+.gm-row .pct, .gm-row .pos, .gm-row .neg, .gm-row .zero { flex: none; font-variant-numeric: tabular-nums; }
+.gm-bar { flex: 1 1 auto; min-width: 30px; height: 8px; border-radius: 5px; background: var(--line); overflow: hidden; }
+.gm-bar > span { display: block; height: 100%; border-radius: 5px; }
+.gm-bar.up > span { background: var(--green); margin-inline-start: auto; }
+.gm-bar.down > span { background: var(--red); }
+
+/* ---------- top strip: live ticker + action dock (theme / density / share / draw) on the left ---------- */
+.top-strip { display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 33; margin-bottom: 6px; }
+.top-strip #liveTicker { flex: 1 1 auto; margin-bottom: 0; position: static; top: auto; z-index: auto; min-width: 0; }
+/* dock now lives inline inside the top strip (was a bottom-left floating dock) */
+.sn-dock { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; direction: ltr;
+  padding: 5px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+/* overflow VISIBLE when expanded so the round buttons aren't clipped at top/bottom; only clip while collapsing */
+.sn-dock .snd-icons { display: flex; align-items: center; gap: 7px; overflow: visible; max-width: 340px; opacity: 1;
+  transition: max-width .25s ease, opacity .18s ease; }   /* Adi: 220px היה צר מדי → הפעמון גלש מחוץ לפאנל */
+.sn-dock.collapsed .snd-icons { max-width: 0; opacity: 0; overflow: hidden; pointer-events: none; }
+.snd-btn { width: 34px; height: 34px; border-radius: 50%; border: 1px solid var(--line); background: var(--bg, transparent);
+  color: var(--ink); font-size: 16px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  transition: transform .12s, border-color .12s, background .12s; flex: none; line-height: 1; }
+.snd-btn:hover { transform: translateY(-1px); border-color: var(--lux-g2); }
+.snd-toggle { width: 24px; height: 24px; font-size: 14px; opacity: .7; border-color: transparent; }
+.snd-toggle:hover { opacity: 1; }
+/* alerts bell in the dock, with a red unread-count badge (replaces the top-right indicator) */
+#alBadgeSide { display: none !important; }   /* retired: unread count now shows only in the dock bell */
+.snd-bell { position: relative; overflow: visible; }
+.snd-badge { position: absolute; top: -5px; right: -5px; min-width: 17px; height: 17px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 9px; background: #e5384a; color: #fff; font-size: 10px; font-weight: 800; line-height: 1;
+  display: none; align-items: center; justify-content: center; box-shadow: 0 0 0 2px var(--panel); }
+@media (max-width: 640px) { .sn-dock { padding: 3px 7px; gap: 5px; } .snd-btn { width: 30px; height: 30px; font-size: 15px; } }
+/* merged request/suggest chooser */
+.req-chooser { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.req-chooser .btn { width: 100%; justify-content: center; padding: 12px; font-size: 14px; }
+
+/* ---------- display density (user-selectable): comfortable (default look) / compact / dense ---------- */
+/* !important so the user's choice wins over any per-page spacing. comfortable = no overrides. */
+html[data-density="compact"] .main { padding: 16px 24px !important; }
+html[data-density="dense"]   .main { padding: 10px 18px !important; }
+html[data-density="compact"] .panel { padding: 12px 15px !important; }
+html[data-density="dense"]   .panel { padding: 9px 12px !important; }
+html[data-density="compact"] .page-head { margin: 4px 0 12px !important; }
+html[data-density="dense"]   .page-head { margin: 2px 0 8px !important; }
+html[data-density="dense"]   .page-head h1 { font-size: 26px !important; }
+html[data-density="dense"]   .page-head .sub { font-size: 12px !important; line-height: 1.5 !important; }
+html[data-density="compact"] .scan-table td { padding: 10px 9px !important; }
+html[data-density="dense"]   .scan-table td { padding: 6px 8px !important; font-size: 14px !important; }
+html[data-density="dense"]   .scan-table th { padding: 8px 8px !important; }
+html[data-density="compact"] .bc-cell { min-height: 40px !important; }
+html[data-density="dense"]   .bc-cell { min-height: 34px !important; }
+html[data-density="compact"] .bc-cell.ftfc-cell { min-height: 27px !important; }
+html[data-density="dense"]   .bc-cell.ftfc-cell { min-height: 23px !important; }
+html[data-density="compact"] .brd-svg { height: 150px !important; }
+html[data-density="dense"]   .brd-svg { height: 120px !important; }
+html[data-density="compact"] .rank .rk { padding: 3px 0 !important; }
+html[data-density="dense"]   .rank .rk { padding: 2px 0 !important; font-size: 12.5px !important; }
+html[data-density="dense"]   .gm-row { padding: 2px 0 !important; font-size: 12.5px !important; }
+html[data-density="dense"]   .idx-card { padding: 5px 10px !important; }
+html[data-density="dense"]   .mkt-sec-title { margin: 5px 0 4px !important; }
+html[data-density="dense"]   .cockpit { padding: 8px 14px !important; }
+
+/* ---------- column picker: base + optional groups ---------- */
+.col-picker .col-grp-lbl { font-size: 11px; font-weight: 700; opacity: .7; margin-inline-start: 4px; }
+.col-picker .col-sep { display: inline-block; width: 1px; height: 18px; background: var(--line); margin: 0 6px; vertical-align: middle; }
+
+/* ---------- Koyfin-style tick flash: a value flashes green/red then fades (~1s) ---------- */
+@keyframes snFlickUp { 0% { background: rgba(22,184,119,.5); } 100% { background: transparent; } }
+@keyframes snFlickDn { 0% { background: rgba(224,82,79,.5); } 100% { background: transparent; } }
+.flick-up { animation: snFlickUp 1s ease-out; border-radius: 5px; }
+.flick-dn { animation: snFlickDn 1s ease-out; border-radius: 5px; }
+@media (prefers-reduced-motion: reduce) { .flick-up, .flick-dn { animation: none; } }
+
+/* ---------- המשכיות זמנית: proportion bar + daily move (no net %) ---------- */
+.bc-cell.ftfc-cell { background: var(--cell) !important; color: var(--ink); border: 1px solid var(--line); gap: 12px; }
+.bc-cell.ftfc-cell:hover { filter: none; border-color: var(--muted); }
+.bc-cell.ftfc-cell .bc-left { flex: 0 0 auto; min-width: 168px; max-width: 168px; }
+.bc-cell.ftfc-cell .bc-name { color: var(--ink); }
+.bc-cell.ftfc-cell .bc-etf { background: var(--accentbg); color: var(--accent); }
+.bc-cell.ftfc-cell .bc-etf:hover { filter: brightness(1.15); }
+.ftfc-bar { position: relative; flex: 1 1 auto; height: 12px; min-width: 70px; border-radius: 7px;
+  background: var(--line); overflow: hidden; }
+.ftfc-bar-up { position: absolute; inset-block: 0; inset-inline-start: 0; background: var(--green); }
+.ftfc-bar-dn { position: absolute; inset-block: 0; inset-inline-end: 0; background: var(--red); }
+.bc-cell.ftfc-cell .bc-right { flex: 0 0 auto; min-width: 66px; justify-content: flex-end; }
+.bc-chg { font-size: 15.5px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.bc-chg.pos { color: var(--green); } .bc-chg.neg { color: var(--red); } .bc-chg.zero { color: var(--muted); }
+@media (max-width: 560px) { .bc-cell.ftfc-cell .bc-left { min-width: 128px; max-width: 128px; } }
+
+/* ---------- 'המשכיות זמנית' (sectors): compact so both columns fit one screen, no scroll ---------- */
+body[data-page="sectors"] .guide-sec { display: none; }                      /* free the vertical space */
+body[data-page="sectors"] .page-head { margin: 2px 0 10px; }
+body[data-page="sectors"] .page-head h1 { font-size: 24px; }
+body[data-page="sectors"] .page-head .sub { font-size: 11.5px; line-height: 1.5; max-width: none; }
+body[data-page="sectors"] .sec-ftfc-switch { margin: 0 0 8px; }
+body[data-page="sectors"] .td-flow { padding: 12px 14px; }
+body[data-page="sectors"] .td-flow .tdf-head { margin: 0 0 2px; }
+body[data-page="sectors"] .td-flow .tdf-sub { font-size: 10.5px; margin-bottom: 4px; }
+body[data-page="sectors"] .td-flow .bcell-list { gap: 3px; margin-top: 6px; }
+body[data-page="sectors"] .bc-cell.ftfc-cell { min-height: 30px; padding: 0 10px; gap: 10px; }
+body[data-page="sectors"] .bc-cell.ftfc-cell .bc-left { min-width: 150px; max-width: 150px; }
+body[data-page="sectors"] .bc-cell.ftfc-cell .bc-name { font-size: 12.5px; }
+body[data-page="sectors"] .bc-cell.ftfc-cell .bc-etf { font-size: 10.5px; padding: 2px 6px; }
+body[data-page="sectors"] .ftfc-bar { height: 9px; }
+body[data-page="sectors"] .bc-chg { font-size: 13px; }
+@media (max-width: 900px) { body[data-page="sectors"] .guide-sec { display: block; } }  /* on mobile it scrolls anyway */
+
+/* ---------- market page: SPY vs QQQ live charts (side by side) ---------- */
+.idx-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 4px; }
+.idx-chart { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.idx-chart-lbl { font-size: 13px; font-weight: 700; color: var(--muted); letter-spacing: .3px; }
+.idx-chart-lbl .idx-chart-sym { color: var(--ink); font-weight: 800; margin-inline-start: 4px; }
+.tvchart { position: relative; height: 430px; border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--line); background: var(--panel2); }
+.tvchart iframe { border-radius: 12px; }
+.tvfallback { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 13px; }
+@media (max-width: 900px) { .idx-charts { grid-template-columns: 1fr; } .tvchart { height: 340px; } }
+
+/* ---------- dense overview pages (market / sectors / money-flow): reclaim vertical space ---------- */
+/* NOTE: the community-cta (Discord join banner) stays visible on EVERY page — Adi wants it always
+   pinned at the top to keep pulling traders into the community. Only the guide bar is folded here. */
+body[data-page="sectors"] .guide-sec, body[data-page="today"] .guide-sec { display: none; }
+/* money-flow ('לאן הכסף הולך') compaction */
+body[data-page="today"] .page-head { margin: 2px 0 6px; }
+body[data-page="today"] .page-head h1 { font-size: 25px; }
+body[data-page="today"] .page-head .sub { font-size: 12px; line-height: 1.5; max-width: none; }
+body[data-page="today"] .panel { padding: 11px 14px; }
+body[data-page="today"] .panel h3 { margin: 0 0 5px; }
+body[data-page="today"] .td-flow .bcell-list, body[data-page="today"] .bcell-list { gap: 3px; margin-top: 6px; }
+body[data-page="today"] .bc-cell { min-height: 25px; padding: 0 11px; }   /* tightened to absorb the always-on Discord banner */
+body[data-page="today"] .bc-cell .bc-name { font-size: 13px; }
+body[data-page="today"] .bc-cell .bc-pct { font-size: 14px; }
+body[data-page="today"] .flow-mode, body[data-page="today"] .flow-controls, body[data-page="today"] .sec-ftfc-switch, body[data-page="today"] .flow-ctrl { margin-bottom: 6px; }
+body[data-page="today"] .flow-ctrl { padding: 7px 12px; }
+/* "📈 מדדים ראשיים" cards — removed: the top index strip already shows the same VIX/DIA/IWM/QQQ/SPY, so this row was redundant and ate vertical space (Adi 2026-09-30) */
+.td-indices { display: none; }
+/* top index strip — bigger & bolder (now the primary indices readout) */
+.live-ticker { padding: 8px 16px; gap: 22px; }
+.live-ticker .lt-item { font-size: 15px; }
+.live-ticker .lt-sym { font-size: 13px; }
+.live-ticker .lt-px, .live-ticker .lt-item .pos, .live-ticker .lt-item .neg { font-weight: 800; }
+body[data-page="today"] .td-flow2 { gap: 10px; margin-bottom: 6px; }
+body[data-page="today"] .td-market-row { padding: 7px 14px; }
+body[data-page="today"] .bc-cell { min-height: 23px; }
+body[data-page="today"] .page-head h1 { font-size: 23px; }
+body[data-page="today"] .note { font-size: 11px; margin: 4px 0 !important; padding: 6px 10px; }
+body[data-page="today"] .td-breadth { margin: 2px 0; }
+@media (max-width: 900px) {
+  body[data-page="sectors"] .guide-sec, body[data-page="today"] .guide-sec { display: block; }
+}
+
+/* ---------- S&P 500 map ('מפת מניות'): fit the sectors ladder + heat map in one screen ---------- */
+body[data-page="sp500"] .guide-sec { display: none; }
+body[data-page="sp500"] .page-head { margin: 2px 0 6px; }
+body[data-page="sp500"] .page-head h1 { font-size: 24px; }
+body[data-page="sp500"] .page-head .sub { font-size: 12px; line-height: 1.5; max-width: none; }
+body[data-page="sp500"] .sp-view-row, body[data-page="sp500"] .sp-view-switch { margin-bottom: 6px; }
+body[data-page="sp500"] .cm-insight { margin: 6px 0; padding: 7px 10px; }
+body[data-page="sp500"] .panel { padding: 10px 14px; }
+body[data-page="sp500"] .panel h3 { margin: 0 0 5px; }
+body[data-page="sp500"] .breadth-panel { padding: 9px 14px; }
+body[data-page="sp500"] .td-flow { padding: 10px 14px; }
+body[data-page="sp500"] .td-flow .tdf-head { margin: 0 0 2px; }
+body[data-page="sp500"] .td-flow .tdf-sub { font-size: 10.5px; margin-bottom: 4px; }
+body[data-page="sp500"] .td-flow2 { gap: 10px; margin-bottom: 8px; }
+body[data-page="sp500"] .bcell-list { gap: 3px; margin-top: 6px; }
+body[data-page="sp500"] .bc-cell { min-height: 26px; padding: 0 11px; }
+body[data-page="sp500"] .bc-cell .bc-name { font-size: 13px; }
+body[data-page="sp500"] .bc-cell .bc-pct { font-size: 14px; }
+body[data-page="sp500"] .bc-cell .bc-usd { font-size: 11px; }
+@media (max-width: 900px) { body[data-page="sp500"] .guide-sec { display: block; } }
+
+/* ---------- 'סקירת שוק' (market): compact so the whole cockpit fits one screen ---------- */
+body[data-page="market"] .guide-sec { display: none; }
+body[data-page="market"] .page-head { margin: 2px 0 6px; }
+body[data-page="market"] .page-head h1 { font-size: 25px; }
+body[data-page="market"] .page-head .sub { font-size: 12px; line-height: 1.5; max-width: none; }
+body[data-page="market"] .uni-switch { margin-bottom: 6px; }
+body[data-page="market"] .mkt-sec-title { margin: 6px 0 4px; font-size: 13px; }
+body[data-page="market"] .mkt-rank-grid { gap: 10px; grid-template-columns: repeat(4, 1fr); }   /* one row on wide screens → big height saving */
+@media (max-width: 1200px) { body[data-page="market"] .mkt-rank-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 640px) { body[data-page="market"] .mkt-rank-grid { grid-template-columns: 1fr; } }
+body[data-page="market"] .panel { padding: 11px 14px; }
+body[data-page="market"] .panel h3 { margin: 0 0 5px; font-size: 14px; }
+body[data-page="market"] .rank .rk { padding: 2px 0; font-size: 13px; min-height: 0; }
+body[data-page="market"] .gm-row { padding: 2px 0; font-size: 13px; }
+body[data-page="market"] .cockpit { padding: 9px 14px; }
+body[data-page="market"] .mkt-dash { gap: 8px; }
+body[data-page="market"] .breadth-panel { padding: 9px 14px; }
+body[data-page="market"] .breadth-panel h3 { margin-bottom: 4px; }
+body[data-page="market"] .idx-row { margin: 2px 0; }
+@media (max-width: 900px) { body[data-page="market"] .guide-sec { display: block; } }
+
+/* ---------- S&P 500 HEAT MAP (finviz-style sector treemap) ---------- */
+.sp-heat-panel { padding: 6px; margin-bottom: 0; }
+/* height fitted to the viewport so the WHOLE heat-map page fits with NO scroll; the squarified
+   treemap adapts tile aspect to whatever box it gets, so a fixed height keeps tiles near-square. */
+.sp-heat { position: relative; width: 100%; height: calc(100vh - 248px); min-height: 260px; max-height: 1000px;
+  background: #0a0d12; border-radius: 10px; overflow: hidden; }
+@media (max-width: 720px) { .sp-heat { height: 72vh; } }
+/* trim the heat-map chrome so the map gets maximum height without pushing the page into a scroll */
+body[data-page="sp500"] .hm-head { margin: 0 0 2px; }
+body[data-page="sp500"] .hm-head h1 { font-size: 20px; margin: 0; }
+body[data-page="sp500"] .hm-head .sub { display: none; }   /* description not needed every time — reclaim height */
+body[data-page="sp500"] .sp-view-row { margin-bottom: 3px; }
+body[data-page="sp500"] .sp-heat-panel { padding: 4px; }
+/* TF buttons + 52w counts share ONE row (counts pushed to the end) — reclaims a row, kills the scroll */
+.hm-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 14px; margin: 3px 0 5px; }
+.hm-controls .hm-tfbar { margin: 0; }
+.hm-controls .hm-counts { margin: 0; }
+/* sector tab: Hebrew + small English + ETF chip */
+.hm-sec-en { font-size: 10px; font-weight: 600; color: #9fb0c0; }
+.hm-sec-etf { font-size: 10px; font-weight: 800; color: #22e39b; letter-spacing: .3px; }
+.hm-sec { position: absolute; display: flex; flex-direction: column; box-sizing: border-box; border: 2px solid #fff; overflow: hidden; }
+.hm-sec-tab { flex: 0 0 auto; background: #000; color: #fff; font-size: 11px; font-weight: 800; line-height: 1.45;
+  padding: 1px 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: .2px; }
+.hm-sec-zoom { cursor: pointer; }
+.hm-sec-zoom:hover { background: #14181f; }
+.hm-sec-pct { color: #9fb0c0; font-weight: 700; font-size: 10px; }
+.hm-sec-body { position: relative; flex: 1 1 auto; min-height: 0; }
+.hm-tile { position: absolute; box-sizing: border-box; border: 1px solid rgba(0,0,0,.4); display: flex; flex-direction: column;
+  align-items: center; justify-content: center; overflow: hidden; cursor: pointer; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6);
+  background: var(--bg, #2a2e3a); }
+.hm-tile:hover { filter: brightness(1.2); outline: 1px solid #fff; z-index: 4; }
+/* move filter — tiles outside the % range fade out so the movers pop */
+.hm-tile.hm-dim { opacity: .08; filter: grayscale(.6); }
+.hm-tile.hm-dim:hover { opacity: .5; }
+.hm-movefilter { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; border-radius: 10px;
+  background: var(--panel2); border: 1px solid var(--line); }
+.hm-movefilter.on { border-color: var(--lux-g2, #17c08a); box-shadow: 0 0 0 1px rgba(23,192,138,.25); }
+.hm-mf-lbl { font-size: 12px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+.hm-mf-field { display: inline-flex; align-items: center; gap: 4px; }
+.hm-mf-ico { font-size: 11px; } .hm-mf-up .hm-mf-ico { color: #22e39b; } .hm-mf-down .hm-mf-ico { color: #ff6b7a; }
+.hm-mf-field input { width: 74px; padding: 4px 7px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink); font-size: 13px; font-weight: 700; text-align: center; }
+.hm-mf-field input:focus { outline: none; border-color: var(--lux-g2, #17c08a); }
+.hm-mf-clear { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; padding: 2px 5px; border-radius: 6px; }
+.hm-mf-clear:hover { background: rgba(255,255,255,.08); color: var(--ink); }
+.hm-t-sym { font-size: 14px; font-weight: 800; line-height: 1.05; }   /* Adi: טיקרים גדולים/קריאים יותר */
+.hm-t-chg { font-size: 11px; font-weight: 600; opacity: .92; }
+.hm-tile-sm .hm-t-sm { font-size: 10.5px; font-weight: 700; line-height: 1; letter-spacing: -.2px; }   /* Adi: טיקרים קריאים גם באריח קטן */
+/* "מיצוע" mode: whole-sector single color + big average % */
+.hm-sec-body.hm-avg { display: flex; align-items: center; justify-content: center; }
+.hm-avg-pct { color: #fff; font-weight: 800; font-size: clamp(13px, 1.8vw, 30px); text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+.hm-avg-toggle { display: inline-flex; align-items: center; gap: 4px; }
+
+/* ===== NEON / GLOW heat-map style (toggle: ✨ אפי) — tuned for PERFORMANCE =====
+   Keep the look cheap: depth gradient on tiles (paint once), STATIC glow only on real movers
+   (fewer box-shadows), NO per-tile filter, NO continuous animation, and a GPU-only hover (scale). */
+.hm-style-toggle { display: inline-flex; align-items: center; gap: 4px; }
+.sp-heat-panel.hm-neon { background: radial-gradient(120% 90% at 50% 0%, #10151f 0%, #070a0e 72%); }
+.hm-neon .sp-heat { background: radial-gradient(135% 100% at 50% 0%, #0d1320 0%, #05070b 78%); }
+/* glass sector frames (only ~11 elements — cheap) */
+.hm-neon .hm-sec { border: 1px solid rgba(255,255,255,.10); border-radius: 12px; background: rgba(10,15,22,.42);
+  box-shadow: 0 6px 20px rgba(0,0,0,.45); }
+.hm-neon .hm-sec-tab { background: linear-gradient(90deg, rgba(34,227,155,.17), rgba(10,15,22,.14)); color: #eaf7ff;
+  border-bottom: 1px solid rgba(255,255,255,.08); border-radius: 11px 11px 0 0; }
+.hm-neon .hm-sec-zoom:hover { background: linear-gradient(90deg, rgba(34,227,155,.3), rgba(10,15,22,.2)); }
+.hm-neon .hm-sec-etf { color: #2bf29f; }
+/* tiles: depth gradient (painted once); no per-tile filter/transition-on-shadow (that was the lag) */
+.hm-neon .hm-tile { border: 1px solid rgba(0,0,0,.35); border-radius: 4px;
+  background: linear-gradient(170deg, rgba(255,255,255,.13), rgba(0,0,0,.24)), var(--bg, #2a2e3a);
+  transition: transform .1s ease; }
+/* STATIC glow only on tiles that actually moved (≥2%) — no animation, no transition on shadow */
+.hm-neon .hm-tile.hm-glow { box-shadow: 0 0 calc(3px + var(--gi,0) * 12px) var(--gc, transparent); }
+.hm-neon .hm-tile:hover { transform: scale(1.06); outline: 1px solid rgba(255,255,255,.55); z-index: 6; filter: none; }
+.hm-neon .hm-t-sym { text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+
+/* ===== 🔥 HEAT MAP share card (overlay on HeatMap_Template.png, 1122×1402) ===== */
+.hmsh-card { position: relative; width: 1122px; height: 1402px; direction: rtl; overflow: hidden;
+  font-family: 'Heebo','Rubik',sans-serif; color: #eaf7ff;
+  background: url("HeatMap_Template.png?v=1") center/100% 100% no-repeat; }
+/* top line inside the panel header: S&P 500 · date + short insight (left of the baked HEATMAP tab) */
+/* top: anchored to the RIGHT edge (~15px gap) → row of [S&P 500·date tag][breadth insight], then a legend note */
+.hmsh-top { position: absolute; top: 33.2%; right: 4.5%; left: auto; width: auto; max-width: 74%; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.hmsh-toprow { display: flex; align-items: center; gap: 14px; }
+.hmsh-note { font-size: 16px; font-weight: 700; color: #bcd0e0; white-space: nowrap; }
+.hmsh-badge { flex: 0 0 auto; font-size: 20px; font-weight: 800; color: #07130d; direction: ltr; white-space: nowrap;
+  background: linear-gradient(90deg,#22e39b,#12c07f); padding: 6px 16px; border-radius: 999px; }
+.hmsh-insight { font-size: 19px; font-weight: 700; color: #cfe8df; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the live treemap inside the big panel */
+.hmsh-map { position: absolute; top: 38.5%; left: 3.4%; width: 93.2%; height: 36.4%; border-radius: 14px; overflow: hidden; }
+.hmsh-map .sp-heat { position: absolute; inset: 0; width: 100%; height: 100% !important; min-height: 0; max-height: none; border-radius: 0; background: transparent; }
+/* fewer, bigger tiles on the share card → bump the text so it's readable */
+.hmsh-map .hm-sec-tab { font-size: 16px; line-height: 1.5; padding: 2px 10px; }
+.hmsh-map .hm-sec-en { font-size: 13px; } .hmsh-map .hm-sec-etf { font-size: 13px; } .hmsh-map .hm-sec-pct { font-size: 13px; }
+.hmsh-map .hm-t-sym { font-size: 21px; line-height: 1.1; }
+.hmsh-map .hm-t-chg { font-size: 15px; }
+.hmsh-map .hm-tile-sm .hm-t-sm { font-size: 16px; }
+/* UNIFORM grid body (share card) — equal cells */
+.hm-gridbody { display: grid; direction: ltr; gap: 3px; width: 100%; height: 100%; padding: 3px; box-sizing: border-box; grid-auto-rows: 1fr; }
+.hm-gridbody .hm-tile { position: static; width: auto; height: auto; min-height: 0; border-radius: 4px; }
+/* red count badge on the "מניות קהילה · ניהול" sidebar item = pending approvals */
+#commAdminBadge { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 5px;
+  margin-inline-start: 8px; border-radius: 9px; background: #e5384a; color: #fff; font-size: 11px; font-weight: 800; vertical-align: middle;
+  box-shadow: 0 0 8px rgba(229,56,74,.5); }
+/* 3 stat boxes at the panel bottom — RIGHT=standout sub · MIDDLE=weak · LEFT=strong (RTL order) */
+.hmsh-boxes { position: absolute; top: 75.9%; left: 3.4%; width: 93.2%; height: 4.77%; display: flex; align-items: stretch; gap: 12px; }
+/* all 3 boxes IDENTICAL; words (label + name) on ONE line, with a BIG % below (scaled down, ratio kept) */
+.hmsh-box { flex: 1 1 0; min-width: 0; align-self: stretch; box-sizing: border-box; border-radius: 11px; padding: 4px 14px; display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  background: rgba(8,13,20,.72); border: 1px solid rgba(255,255,255,.14); box-shadow: none; }
+.hmsh-bx-cap { font-size: 22px; font-weight: 900; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.08; }
+.hmsh-bx-lbl { font-size: 14px; font-weight: 700; color: #9fb3c7; }
+.hmsh-bx-ch { font-size: 32px; font-weight: 900; direction: ltr; line-height: 1; color: #eaf2ff; }
+.hmsh-bx-ch.hmsh-pos { color: #2bf29f; }
+.hmsh-bx-ch.hmsh-neg { color: #ff5a6a; }
+.hmsh-box.strong .hmsh-bx-ch { color: #2bf29f; }
+.hmsh-box.weak .hmsh-bx-ch { color: #ff5a6a; }
+.hmsh-box.sub .hmsh-bx-ch { color: #8fe3ff; }
+/* heat-map timeframe bar */
+.hm-tfbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 8px; }
+.hm-tf { font-size: 12px; font-weight: 700; }
+.hm-tf-soon { opacity: .38; cursor: not-allowed; }
+/* divider before the fixed calendar-range TFs (date filter) */
+.hm-tf-sep { display: inline-flex; align-items: center; padding: 0 4px; font-size: 13px; opacity: .7;
+  border-inline-start: 1px solid var(--line); margin-inline-start: 4px; align-self: stretch; }
+.hm-counts .clickable { cursor: pointer; border-radius: 7px; padding: 2px 8px; transition: background .12s; }
+.hm-counts .clickable:hover { background: rgba(255,255,255,.08); }
+/* collapsing the floating dock also hides the 52-week-high celebration badge */
+body.dock-collapsed #athCeleb { display: none !important; }
+.hm-counts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 8px 0 10px; font-size: 13px; }
+.hm-counts .be-hi b { color: var(--green); } .hm-counts .be-lo b { color: var(--red); }
+.hm-legend { color: var(--muted); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.hml { display: inline-block; width: 14px; height: 10px; border-radius: 2px; vertical-align: middle; margin-inline-start: 4px; }
+.hml.pos { background: rgb(20,168,110); } .hml.neg { background: rgb(222,55,55); } .hml.zero { background: rgb(40,46,58); }
+.hm-zoom-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.hm-zoom-title { font-size: 13px; color: var(--muted); font-weight: 600; }
+
+/* ================= NINJA TRADE SHARE CARD (1080×1350) ================= */
+.ninja-card { position: fixed; left: -9999px; top: 0; width: 1122px; height: 1402px; z-index: -1;
+  box-sizing: border-box; overflow: hidden; font-family: 'Heebo','Rubik',Arial,sans-serif; color: #eafff3;
+  background: #05100b url("ninja-card.png?v=4") center center / 1122px 1402px no-repeat; }
+.ninja-card * { box-sizing: border-box; }
+/* data overlays positioned into the template's empty slots (calibrated to the 1122×1402 art) */
+.njt { position: absolute; direction: ltr; font-family: 'Rubik','Heebo',Arial,sans-serif; }
+/* --- positions calibrated to the NEW template (left panel: ticker / side · qty / ROI / entry · exit) --- */
+.njt-sym  { top: 37%;   left: 8.5%;  transform: translate(0,-50%);   font-size: 52px; font-weight: 900; color: #ffffff; letter-spacing: .5px; white-space: nowrap; }
+.njt-sym .njt-atype { font-size: 30px; font-weight: 600; color: #9fc9b2; margin-inline-start: 8px; }
+.njt-side { top: 42%;   left: 16%;   transform: translate(-50%,-50%); font-size: 34px; font-weight: 900; white-space: nowrap; }
+.njt-side.long { color: #22e39b; } .njt-side.short { color: #ff5a6a; }
+/* date now lives in the right sub-slot (where qty/leverage was) */
+.njt-date { top: 41.8%; left: 45%;   transform: translate(-50%,-50%); font-size: 28px; font-weight: 800; color: #eafff3; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.njt-status { top: 47.8%; left: 35%; transform: translate(-50%,-50%); font-size: 23px; font-weight: 800; letter-spacing: .3px; white-space: nowrap; }
+.njt-status.open { color: #f2c14a; } .njt-status.closed { color: #7ee2b8; }
+.njt-roi  { top: 54.5%; left: 35%;   transform: translate(-50%,-50%); font-size: 118px; font-weight: 900; letter-spacing: -3px; white-space: nowrap; }
+.njt-roi.pos { color: #2bf29f; text-shadow: 0 0 55px rgba(43,242,159,.6); } .njt-roi.neg { color: #ff5a6a; text-shadow: 0 0 55px rgba(255,90,106,.55); }
+.njt-elbl, .njt-xlbl { top: 67.3%; transform: translate(-50%,-50%); font-size: 22px; font-weight: 600; color: #9fc9b2; letter-spacing: 1px; white-space: nowrap; }
+.njt-elbl { left: 24%; } .njt-xlbl { left: 53%; }
+.njt-entry { top: 71.5%; left: 24%; transform: translate(-50%,-50%); font-size: 54px; font-weight: 900; color: #ffffff; }
+.njt-exit  { top: 71.5%; left: 53%; transform: translate(-50%,-50%); font-size: 54px; font-weight: 900; color: #ffffff; }
+.nj-kanji { position: absolute; top: 40px; left: 44px; font-size: 300px; font-weight: 900; line-height: .8;
+  color: rgba(34,227,155,.10); font-family: 'Noto Sans Hebrew',serif; pointer-events: none; user-select: none; }
+.nj-glowbar { position: absolute; right: -120px; top: -80px; width: 520px; height: 1500px; transform: rotate(18deg);
+  background: linear-gradient(180deg, rgba(34,227,155,.10), rgba(124,252,0,.05) 50%, transparent);
+  filter: blur(30px); pointer-events: none; }
+.nj-inner { position: relative; z-index: 2; height: 100%; padding: 64px 60px 54px; display: flex; flex-direction: column; }
+.nj-head { display: flex; align-items: center; gap: 22px; }
+.nj-logo { width: 108px; height: 108px; border-radius: 50%; flex: none;
+  box-shadow: 0 0 0 3px rgba(34,227,155,.5), 0 0 42px rgba(34,227,155,.35); }
+.nj-brand { line-height: 1; }
+/* solid colors (NOT gradient-clipped text) — html2canvas can't render background-clip:text */
+.nj-brand .nj-b1 { font-family: 'Rubik',sans-serif; font-weight: 900; font-size: 58px; letter-spacing: 1px; color: #ffffff; }
+.nj-brand .nj-b2 { font-family: 'Rubik',sans-serif; font-weight: 900; font-size: 58px; letter-spacing: 1px; margin-top: 2px; color: #22e39b; }
+.nj-tagline { margin-top: 12px; font-size: 20px; letter-spacing: 8px; font-weight: 700; color: #7fe8b8; text-transform: uppercase; }
+.nj-date { margin-top: 40px; display: inline-flex; align-items: center; gap: 14px; align-self: flex-start;
+  background: rgba(6,20,14,.72); border: 1px solid rgba(34,227,155,.35); border-radius: 16px; padding: 16px 26px;
+  font-size: 30px; font-weight: 700; color: #d6ffe9; font-variant-numeric: tabular-nums; direction: ltr; }
+.nj-ticker { margin-top: 34px; display: flex; align-items: center; gap: 24px; }
+.nj-ticker .nj-tk-ic { width: 92px; height: 92px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center;
+  font-size: 46px; background: radial-gradient(circle at 35% 30%, #23324a, #0d1320); box-shadow: 0 0 0 2px rgba(34,227,155,.4); }
+.nj-ticker .nj-sym { font-family: 'Rubik',sans-serif; font-weight: 900; font-size: 82px; line-height: .95; letter-spacing: 1px; direction: ltr; }
+.nj-ticker .nj-atype { font-size: 30px; font-weight: 600; color: #8fb9a6; margin-top: 6px; }
+.nj-side { margin-top: 30px; display: flex; align-items: center; gap: 20px; }
+.nj-pill { display: inline-flex; align-items: center; gap: 12px; font-family: 'Rubik',sans-serif; font-weight: 900; font-size: 44px;
+  padding: 14px 34px; border-radius: 18px; direction: ltr; }
+.nj-pill.long { color: #22e39b; background: rgba(34,227,155,.12); border: 2px solid rgba(34,227,155,.6); }
+.nj-pill.short { color: #ff5a6a; background: rgba(229,56,74,.12); border: 2px solid rgba(255,90,106,.6); }
+.nj-lev { font-family: 'Rubik',sans-serif; font-weight: 800; font-size: 40px; color: #d6ffe9; opacity: .9; direction: ltr; }
+.nj-roi { margin: 34px 0 8px; font-family: 'Rubik',sans-serif; font-weight: 900; font-size: 200px; line-height: .9; letter-spacing: -4px; direction: ltr; }
+.nj-roi.pos { color: #2bf29f; text-shadow: 0 0 60px rgba(43,242,159,.55), 0 6px 0 rgba(4,40,25,.4); }
+.nj-roi.neg { color: #ff5a6a; text-shadow: 0 0 60px rgba(255,90,106,.5), 0 6px 0 rgba(40,4,10,.4); }
+.nj-roi-lbl { font-size: 26px; letter-spacing: 6px; font-weight: 700; color: #8fb9a6; text-transform: uppercase; direction: ltr; }
+.nj-prices { margin-top: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; direction: ltr; }
+.nj-pbox { background: rgba(6,20,14,.66); border: 1px solid rgba(34,227,155,.28); border-radius: 20px; padding: 26px 30px; }
+.nj-pbox .nj-pl { font-size: 26px; color: #8fb9a6; font-weight: 600; margin-bottom: 8px; }
+.nj-pbox .nj-pv { font-family: 'Rubik',sans-serif; font-weight: 900; font-size: 56px; direction: ltr; }
+.nj-foot { margin-top: 30px; display: flex; align-items: center; justify-content: space-between; }
+.nj-foot .nj-slog { font-size: 24px; letter-spacing: 5px; font-weight: 700; color: #7fe8b8; text-transform: uppercase; }
+.nj-foot .nj-site { font-size: 26px; font-weight: 800; color: #d6ffe9; direction: ltr; }
+
+/* ---------- money-flow "sector board": dashboard grid of cards (dark bg + colored bar/number) ---------- */
+/* card grid on the money-flow, S&P-500 'לפי סקטור' breadth ladders, and 'המשכיות' FTFC ladders */
+body[data-page="today"] .td-flow .bcell-list,
+body[data-page="sp500"] .td-flow .bcell-list,
+body[data-page="sectors"] .td-flow .bcell-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.bc-card.bc-clickable { cursor: pointer; }
+/* make both money-flow / breadth / continuity panels equal height: the shorter grid fills its
+   (stretched) panel and spreads its rows, so the two tables line up at the bottom */
+.td-flow2 .td-flow .bcell-list { flex: 1 1 auto; align-content: space-between; }
+/* 52-week-high sidebar item — permanent, right below 🔔 מרכז התראות; count updates each minute.
+   When live, styled like the old floating pill: dark chip, green border + glow, ticker highlighted. */
+#sideAth52 .ath52-badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-inline-start: 6px; border-radius: 9px;
+  background: linear-gradient(90deg, #0c9160, #22e39b); color: #04140d; font-size: 11px; font-weight: 900; text-align: center; vertical-align: middle; }
+#sideAth52.ath52-live { background: linear-gradient(180deg, rgba(34,227,155,.12), rgba(12,20,18,.55));
+  border: 1px solid rgba(34,227,155,.55); border-radius: 11px; box-shadow: 0 0 14px rgba(34,227,155,.18); }
+#sideAth52.ath52-live .ath52-ico { filter: drop-shadow(0 0 6px rgba(34,227,155,.5)); }
+#sideAth52.ath52-live .lbl { color: #ffffff; }
+#sideAth52.ath52-live .ath52-t { color: #22e39b; font-weight: 900; letter-spacing: .3px; }
+#sideAth52.ath52-live:hover { border-color: rgba(34,227,155,.85); box-shadow: 0 0 18px rgba(34,227,155,.3); }
+
+/* alerts-center preset row: name + separate desktop (🔔) / phone (📱) toggles */
+.al-prow .al-pname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.al-prow .al-ptgls { display: flex; align-items: center; gap: 6px; flex: none; }
+.al-prow .al-tgl-ico { font-size: 13px; opacity: .85; }
+/* full-width divider inside a battery grid → separates the 11 GICS sectors from the broad-market composites */
+.bcell-div { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; margin: 7px 2px 3px; }
+.bcell-div::before, .bcell-div::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--line, #2a3340), transparent); }
+.bcell-div span { font-size: 11px; font-weight: 800; letter-spacing: .4px; color: #8fa1bd; white-space: nowrap; }
+/* single-ETF composite cards (crypto / commodities / indices / MAGS / miners) — subtly set apart */
+.bc-card.single-card { background: linear-gradient(180deg, rgba(110,231,255,.05), var(--panel2, #12171f)); border-style: dashed; }
+.bc-card.single-card .bc-etf { background: rgba(110,231,255,.16); }
+/* המשכיות: two-sided FTFC proportion bar (green up on the left · red down on the right) */
+.bc-card .bcc-bar.ftfc { position: relative; direction: ltr; }
+.bc-card .bcc-bar.ftfc .ftfc-bar-up { position: absolute; left: 0; top: 0; bottom: 0; background: linear-gradient(90deg, #0c9160, #22e39b); border-radius: 4px 0 0 4px; }
+.bc-card .bcc-bar.ftfc .ftfc-bar-dn { position: absolute; right: 0; top: 0; bottom: 0; background: linear-gradient(270deg, #e5384a, #ff8b8b); border-radius: 0 4px 4px 0; }
+.bc-card { background: var(--panel2, #12171f); border: 1px solid var(--line); border-radius: 11px; padding: 9px 11px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; transition: border-color .12s, transform .12s; }
+.bc-card:hover { border-color: var(--lux-g2, #17c08a); }
+.bc-card .bcc-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.bc-card .bcc-name { font-family: 'Rubik', sans-serif; font-weight: 800; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bc-card .bcc-mid { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; direction: ltr; }
+.bc-card .bcc-pct { font-family: 'Inter', sans-serif; font-weight: 800; font-size: 19px; font-variant-numeric: tabular-nums; line-height: 1; }
+.bc-card .bcc-usd { font-size: 11px; font-weight: 700; opacity: .78; font-variant-numeric: tabular-nums; }
+.bc-card .bcc-bar { height: 6px; border-radius: 4px; background: rgba(255,255,255,.07); overflow: hidden; direction: ltr; }
+.bc-card .bcc-fill { display: block; height: 100%; border-radius: 4px; }
+.bc-card .bc-etf { font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: .3px; direction: ltr;
+  background: rgba(255,255,255,.14); border-radius: 6px; padding: 2px 7px; cursor: pointer; white-space: nowrap; flex: none; transition: background .15s; }
+.bc-card .bc-etf:hover { background: rgba(255,255,255,.28); }
+/* tier colors */
+.bc-card.t-vg .bcc-pct { color: #22e39b; } .bc-card.t-vg .bcc-fill { background: linear-gradient(90deg, #0c9160, #22e39b); }
+.bc-card.t-mg .bcc-pct { color: #56c78d; } .bc-card.t-mg .bcc-fill { background: #2e7d54; }
+.bc-card.t-n  .bcc-pct { color: #9aa3b0; } .bc-card.t-n  .bcc-fill { background: #565d69; }
+.bc-card.t-mr .bcc-pct { color: #e08787; } .bc-card.t-mr .bcc-fill { background: #8f3b42; }
+.bc-card.t-vr .bcc-pct { color: #ff5a6a; } .bc-card.t-vr .bcc-fill { background: linear-gradient(90deg, #e5384a, #ff8b8b); }
+@media (max-width: 560px) { body[data-page="today"] .td-flow .bcell-list, body[data-page="sp500"] .td-flow .bcell-list, body[data-page="sectors"] .td-flow .bcell-list { grid-template-columns: repeat(2, 1fr); } }
+
+/* S&P-500 'לפי סקטור': breadth bar sits beside the insight + live-data boxes (one row, less scroll) */
+.sp-toprow { display: grid; grid-template-columns: minmax(280px, 350px) 1fr; gap: 12px; align-items: stretch; margin-bottom: 10px; }
+.sp-toprow .sp-topside { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sp-toprow .sp-topside > * { margin: 0 !important; }
+.sp-toprow .breadth-panel { margin: 0; height: 100%; }
+@media (max-width: 900px) { .sp-toprow { grid-template-columns: 1fr; } }
+
+/* ---------- market breadth page: 5 % -above-MA charts across the width ---------- */
+.brd-charts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 10px; }
+.brd-chart { position: relative; min-width: 0; background: var(--panel2); border: 1px solid var(--line); border-radius: 12px; padding: 10px 10px 6px; transition: border-color .15s, box-shadow .15s; }
+/* ── breadth zone badges: 🟢 BUY ZONE · 🧊 OVERSOLD · ⚡ BOUNCE (corner pill + card glow) ── */
+.brd-badge { position: absolute; top: -9px; left: 50%; transform: translateX(-50%); z-index: 3; font-size: 11px; font-weight: 900; letter-spacing: .3px; padding: 3px 11px; border-radius: 999px; white-space: nowrap; direction: ltr; }
+.brd-badge.bz-buy-b { background: linear-gradient(90deg,#0c9160,#22e39b); color: #04140d; box-shadow: 0 0 12px rgba(34,227,155,.55); }
+.brd-badge.bz-os-b { background: linear-gradient(90deg,#1f6fd0,#38b6ff); color: #04121f; box-shadow: 0 0 12px rgba(56,182,255,.55); }
+.brd-badge.bz-bounce-b { background: linear-gradient(90deg,#b8860b,#ffcf4a); color: #1a1200; box-shadow: 0 0 12px rgba(255,207,74,.55); }
+.brd-chart.bz-buy { border-color: rgba(34,227,155,.6); box-shadow: 0 0 18px rgba(34,227,155,.2); }
+.brd-chart.bz-os { border-color: rgba(56,182,255,.6); box-shadow: 0 0 18px rgba(56,182,255,.2); }
+.brd-chart.bz-bounce { border-color: rgba(255,207,74,.55); box-shadow: 0 0 16px rgba(255,207,74,.18); }
+.brd-chart .idx-chart-lbl { display: flex; align-items: center; gap: 6px; font-size: 12.5px; margin-bottom: 6px; }
+.brd-chart .idx-chart-sym { color: var(--ink); font-weight: 800; }
+.brd-cur { margin-inline-start: auto; font-weight: 800; font-size: 14px; }
+/* daily change of the breadth reading (today vs yesterday, in percentage points) */
+.brd-dchg { font-weight: 800; font-size: 11px; font-variant-numeric: tabular-nums; padding: 1px 6px; border-radius: 6px; margin-inline-start: 6px; }
+.brd-dchg.pos { color: var(--green); background: rgba(23,192,138,.12); }
+.brd-dchg.neg { color: var(--red); background: rgba(224,82,79,.12); }
+.brd-dchg.zero { color: var(--muted); background: rgba(255,255,255,.05); }
+.brd-cur.pos { color: var(--green); } .brd-cur.neg { color: var(--red); } .brd-cur.zero { color: #e6b800; }
+.brd-svg { width: 100%; height: 170px; display: block; }
+/* stacked sections (S&P above Nasdaq) */
+.brd-section { margin-bottom: 20px; }
+.brd-sec-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 14px 0 6px; }
+.brd-sec-head h2 { font-size: 18px; font-weight: 800; margin: 0; }
+.brd-extremes { display: inline-flex; align-items: center; gap: 12px; font-size: 12.5px; font-weight: 600; }
+/* hover zones: highlight + range label */
+.brd-plot { position: relative; }
+.brd-hz { position: absolute; left: 0; right: 0; cursor: default; transition: background .12s; }
+.brd-hz-red { top: 0; height: 25%; }
+.brd-hz-yel { top: 44%; height: 12%; }
+.brd-hz-grn { top: 75%; bottom: 0; }
+.brd-hz-red:hover { background: rgba(224,82,79,.14); }
+.brd-hz-yel:hover { background: rgba(230,184,0,.14); }
+.brd-hz-grn:hover { background: rgba(23,192,138,.14); }
+.brd-hz:hover::after { content: attr(data-r); position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 7px; padding: 3px 10px; font-size: 12px;
+  font-weight: 800; white-space: nowrap; pointer-events: none; box-shadow: 0 4px 14px rgba(0,0,0,.4);
+  direction: ltr; unicode-bidi: isolate; }
+.brd-hz-red:hover::after { color: var(--red); }
+.brd-hz-yel:hover::after { color: #e6b800; }
+.brd-hz-grn:hover::after { color: var(--green); }
+.brd-chart .tvchart { height: 300px; }   /* TradingView fallback */
+.brd-top { align-items: center; flex-wrap: wrap; }
+.brd-state { margin-inline-start: 12px; font-weight: 800; font-size: 13px; padding: 5px 13px; border-radius: 10px;
+  background: var(--panel2); border: 1px solid var(--line); }
+.brd-state.pos { color: var(--green); border-color: var(--greenbd); }
+.brd-state.neg { color: var(--red); border-color: var(--redbd); }
+.brd-state.zero { color: #e6b800; border-color: rgba(230,184,0,.5); }
+.brd-extremes { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 8px 0 2px; font-size: 13.5px; font-weight: 600; }
+.brd-extremes .be-hi b { color: var(--green); font-size: 15px; }
+.brd-extremes .be-lo b { color: var(--red); font-size: 15px; }
+.brd-extremes .be-ob b { color: #f0a53a; font-size: 15px; }   /* MFI overbought (>80) — חם */
+.brd-extremes .be-os b { color: #5cc6e8; font-size: 15px; }   /* MFI oversold (<20) — קר */
+.brd-mfi { padding-inline-start: 4px; border-inline-start: 1px solid var(--line); }
+@media (max-width: 1200px) { .brd-charts { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 760px) { .brd-charts { grid-template-columns: 1fr; } .brd-chart .tvchart { height: 260px; } }
+
+/* ---------- broadcast mode (larger, for live streaming / screen-share) ---------- */
+body.sn-broadcast .scan-table { font-size: 20px; }
+body.sn-broadcast .scan-table td { padding: 19px 12px; }
+body.sn-broadcast .scan-table td.sym .tsym { font-size: 21px; }
+body.sn-broadcast .page-head h1 { font-size: 46px; }
+
+@media (min-width: 821px) and (max-width: 1000px) {
+  .sidebar { width: 205px; padding: 18px 10px; }
+  .main { padding: 18px; }
+}
+@media (max-width: 1000px) { .page-head h1 { font-size: 30px; } }
+
+/* ===== professional pass (2026-10-25) — calmer & more serious, aligned with Strat School ===== */
+.confetti { display: none !important; }                 /* no falling confetti in the community banner */
+.cta-trophy { animation: none !important; }             /* static trophy — no bounce */
+.community-cta .cta-arrow { background: var(--lux-g2); color: var(--accent-ink); }   /* mint accent, on-brand */
+
+/* ===== premium depth + hierarchy (2026-10-25) — "next level" polish ===== */
+/* floating, lit cards — subtle inset top highlight + a softer, deeper shadow */
+.panel { box-shadow: 0 1px 0 rgba(255,255,255,.05) inset, 0 16px 40px rgba(0,0,0,.42); }
+html[data-theme="light"] .panel { box-shadow: 0 1px 2px rgba(29,23,38,.07), 0 12px 28px rgba(29,23,38,.07); }
+/* commanding page titles + a mint brand accent marker before each */
+.page-head h1 { font-weight: 800; letter-spacing: -.015em; line-height: 1.15; position: relative; padding-inline-start: 15px; }
+.page-head h1::before { content: ""; position: absolute; inset-inline-start: 0; top: 50%; transform: translateY(-50%); height: .8em; width: 4px; border-radius: 3px; background: linear-gradient(var(--lux-g1), var(--lux-g2)); }
+.page-head:not(.compact) h1 { font-size: 27px; }
+.page-head .sub { font-size: 14.5px; }
+
+/* ===== phase-2 global polish (redesign-blue, 2026-10-26) — color discipline + calmer chrome ===== */
+/* color discipline: neutral sector/ETF tags, so data green/red + the teal accent lead the eye */
+.etf-chip { background: var(--soft) !important; color: var(--muted) !important; border: 1px solid var(--line) !important; box-shadow: none !important; text-shadow: none !important; font-weight: 700; }
+/* index strip: calmer, framed; symbols recede so the live numbers lead */
+.live-ticker { border: 1px solid var(--line); border-radius: 14px; }
+.live-ticker .lt-sym { color: var(--muted); letter-spacing: .03em; opacity: .85; }
+/* column-toggle chips: clean teal "on" state consistent with the accent */
+.chip.col-chip.on { background: var(--accentbg); border-color: var(--accent); color: var(--accent); }
+/* scan/journal table rows: subtle hover lift */
+.scan-table tbody tr, table tbody tr { transition: background .12s; }
+
+/* ===== Command Center home (redesign) ===== */
+.cc-quick { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0 4px; }
+.cc-qa { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--panelsh); transition: transform .14s, border-color .14s; cursor: pointer; text-decoration: none; color: var(--ink); }
+.cc-qa:hover { transform: translateY(-2px); border-color: var(--accent); }
+.cc-qa.feat { background: linear-gradient(135deg, var(--accentbg), transparent); border-color: var(--accent); }
+.cc-qi { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; font-size: 21px; background: var(--accentbg); flex: 0 0 auto; }
+.cc-qx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.cc-qx b { font-size: 15px; } .cc-qx span { color: var(--muted); font-size: 12.5px; }
+.cc-qar { color: var(--muted); font-size: 22px; font-weight: 700; }
+.cc-qa:hover .cc-qar { color: var(--accent); }
+.cc-zone { margin-top: 24px; }
+.cc-zhead { display: flex; align-items: baseline; gap: 10px; margin: 0 2px 12px; }
+.cc-zhead h2 { font-size: 16px; font-weight: 800; margin: 0; }
+.cc-zsub { color: var(--muted); font-size: 12.5px; }
+.cc-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.cc-tile { display: flex; flex-direction: column; gap: 8px; padding: 16px; border-radius: 14px; background: var(--panel); border: 1px solid var(--line); box-shadow: var(--panelsh); min-height: 120px; transition: transform .14s, border-color .14s; cursor: pointer; text-decoration: none; color: var(--ink); }
+.cc-tile:hover { transform: translateY(-3px); border-color: var(--accent); }
+.cc-ic { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; font-size: 20px; background: var(--accentbg); }
+.cc-tt { font-weight: 700; font-size: 15px; }
+.cc-ds { color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+.cc-snap { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
+.cc-admin { padding: 16px 18px; border-radius: 16px; background: linear-gradient(180deg, rgba(244,182,78,.06), transparent); border: 1px solid rgba(244,182,78,.28); }
+.cc-admin .cc-zhead { margin-top: 0; }
+.cc-admin .cc-ic { background: rgba(244,182,78,.12); }
+.cc-admin .cc-zsub { color: #e0a73a; font-weight: 800; background: rgba(244,182,78,.14); padding: 2px 9px; border-radius: 999px; font-size: 11px; }
+@media (max-width: 820px) { .cc-quick { grid-template-columns: 1fr; } .cc-tiles { grid-template-columns: repeat(2, 1fr); } .cc-snap { grid-template-columns: 1fr; } }
+
+/* ===== Command Center dashboard — hot opportunities + market read ===== */
+.cc-dash { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-top: 14px; align-items: stretch; }
+.cc-dash > .panel { margin: 0; }
+.cc-readp, .cc-heatp, .cc-leadp { display: flex; flex-direction: column; }
+.cc-hot { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accentbg); }
+.cc-hot h3, .cc-readp h3, .cc-heatp h3 { display: flex; align-items: center; justify-content: space-between; }
+.cc-more { font-size: 12.5px; color: var(--accent); font-weight: 700; cursor: pointer; }
+.cc-op { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--line); cursor: pointer; transition: background .12s; }
+.cc-op:last-child { border-bottom: 0; }
+.cc-op:hover { background: var(--accentbg); border-radius: 8px; }
+.cc-op-sym { font-weight: 800; font-size: 15.5px; min-width: 52px; }
+.cc-op-setup { font-size: 12px; font-weight: 800; padding: 2px 8px; border-radius: 7px; white-space: nowrap; }
+.cc-op-setup.bull { background: rgba(23,192,138,.15); color: var(--green); }
+.cc-op-setup.bear { background: rgba(240,91,107,.15); color: var(--red); }
+.cc-op-meta { flex: 1; min-width: 0; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-op-badge { font-size: 10px; font-weight: 800; color: var(--accent); border: 1px solid var(--accent); border-radius: 5px; padding: 0 5px; margin-inline-start: 7px; }
+.cc-op-px { font-weight: 800; font-size: 13.5px; }
+.cc-op-px.pos { color: var(--green); } .cc-op-px.neg { color: var(--red); }
+.cc-op-go { color: var(--muted); font-size: 18px; font-weight: 700; }
+/* market read — bigger, bolder, and spread to fill the hot-opps height */
+.cc-read { flex: 1; display: flex; flex-direction: column; justify-content: space-between; gap: 2px; }
+.cc-ri { font-size: 14.5px; font-weight: 600; line-height: 1.5; padding: 11px 2px; border-bottom: 1px solid var(--line); }
+.cc-ri:last-child { border-bottom: 0; }
+.cc-read b { color: var(--accent); font-weight: 800; }
+/* sector / indices / MAGS heat — fill the leaders height */
+.cc-heat-body { flex: 1; display: flex; flex-direction: column; justify-content: space-between; gap: 6px; }
+.cc-heat-lbl { font-size: 12px; font-weight: 800; color: var(--muted); letter-spacing: .02em; margin: 10px 2px 6px; }
+.cc-heat-body .mh-grid:first-child { margin-top: 2px; }
+.cc-heatp .mh-tile { min-height: 58px; }
+@media (max-width: 820px) { .cc-dash { grid-template-columns: 1fr; } }
+
+/* ===== Scanner Strategy Launcher (redesign) ===== */
+.scan-launch { padding: 14px 16px; }
+.scan-launch .sl-head { display: flex; align-items: baseline; gap: 9px; margin-bottom: 11px; flex-wrap: wrap; }
+.scan-launch .sl-h-ic { color: var(--accent); }
+.scan-launch .sl-head h3 { margin: 0; font-size: 15px; }
+.scan-launch .sl-h-sub { font-size: 12px; }
+.sl-row { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 3px; }
+.sl-card { flex: 0 0 auto; width: 168px; text-align: start; display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; border-radius: 13px; background: var(--panel2); border: 1px solid var(--line); cursor: pointer; transition: transform .14s, border-color .14s; font-family: inherit; color: var(--ink); }
+.sl-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.sl-ico { font-size: 20px; }
+.sl-nm { font-weight: 800; font-size: 14px; }
+.sl-ds { color: var(--muted); font-size: 11.5px; line-height: 1.35; }
+.sl-custom { width: 128px; align-items: center; justify-content: center; text-align: center; border-style: dashed; color: var(--muted); }
+.sl-custom .sl-nm { font-weight: 700; }
+
+/* ===== Scanner workbench: results main + filter rail (redesign) ===== */
+.scan-wb { display: grid; grid-template-columns: 312px 1fr; gap: 16px; align-items: start; margin-top: 16px; }
+.scan-wb .scan-layout { display: block; }            /* results full-width in main; insights stacks below */
+.scan-wb-main { min-width: 0; }
+.scan-wb-rail > .panel { margin-bottom: 12px; }
+.scan-wb-rail .filters h3 { font-size: 14px; }
+.scan-wb-rail .filters.fbar .frow, .scan-wb-rail .filters .frow { flex-direction: column; align-items: stretch; gap: 8px; }
+.scan-wb-rail .filters.fbar .fpop { width: 100%; }
+/* Rail as an INLINE accordion (like the mockup): each filter section expands in place with its
+   controls visible, instead of a floating popover. Header = full-width row; body pushes content down. */
+.scan-wb-rail .filters.fbar .fpop { position: static; border-top: 1px solid var(--line); }
+.scan-wb-rail .filters.fbar .frow > .fpop:first-child { border-top: none; }
+.scan-wb-rail .filters.fbar .fpop-btn { width: 100%; justify-content: flex-start; min-height: 44px; border: none; background: transparent; border-radius: 10px; padding: 11px 10px; font-weight: 700; }
+.scan-wb-rail .filters.fbar .fpop-btn:hover { background: var(--soft); border-color: transparent; }
+.scan-wb-rail .filters.fbar .fpop.open .fpop-btn { box-shadow: none; border-color: transparent; background: var(--soft); }
+.scan-wb-rail .filters.fbar .fpop-caret { margin-inline-start: auto; font-size: 13px; }
+.scan-wb-rail .filters.fbar .fpop-body { position: static; z-index: auto; top: auto; inset-inline-start: auto; margin: 2px 2px 10px; padding: 4px 8px 10px; box-shadow: none; border: none; background: transparent; width: auto; max-width: none; }
+.scan-wb-rail .filters.fbar .fpop.fpop-panel .fpop-body, .scan-wb-rail .filters.fbar .fpop.fpop-wide .fpop-body { max-width: none; max-height: none; overflow: visible; }
+.scan-wb-rail .filters.fbar .fbar-break { display: none; }
+/* Timeframes exposed at the top of the rail (D/W/M/Q/Y + ➕ for extra), not collapsed into an accordion */
+.scan-wb-rail .filters.fbar .fpop[data-fname="טיימפריימים"] { border-top: none; }
+.scan-wb-rail .filters.fbar .fpop[data-fname="טיימפריימים"] .fpop-btn { display: none; }
+.scan-wb-rail .filters.fbar .fpop[data-fname="טיימפריימים"] .fpop-body { display: block; margin-top: 0; padding-top: 2px; }
+/* keep D/W/M/Q/Y + the ➕ on a single row (no wrap) */
+.scan-wb-rail .filters.fbar .fpop[data-fname="טיימפריימים"] .chips { flex-wrap: nowrap; gap: 5px; }
+.scan-wb-rail .filters.fbar .fpop[data-fname="טיימפריימים"] .chips .chip { flex: 1 1 0; min-width: 0; padding-inline: 0; justify-content: center; text-align: center; }
+.scan-wb-rail .filters.fbar .fpop[data-fname="טיימפריימים"] .chips .tf-addbtn { flex: 0 0 auto; min-width: 30px; }
+
+/* === יומן מסחר: premium stat cards + tabs (makeover, not touch-up) === */
+#journalContainer .jr-scope-lbl { color: var(--accent); }
+/* tabs → pill-style with accent-filled active tab */
+#journalContainer .tabs { gap: 4px; }
+#journalContainer .tab { border-radius: 10px 10px 0 0; transition: background .14s, color .14s; }
+#journalContainer .tab:hover { color: var(--ink); background: var(--chip, rgba(255,255,255,.05)); }
+#journalContainer .tab.active { background: var(--accentbg); color: var(--accent); font-weight: 800; border-bottom-color: var(--accent); }
+/* KPI stat cards — elevated, accent top-strip, bold value, hover lift */
+#journalContainer .cards .card { position: relative; border-radius: 15px; background: linear-gradient(180deg, var(--panel2), var(--panel)); box-shadow: var(--panelsh); overflow: hidden; transition: transform .14s, border-color .14s, box-shadow .14s; }
+#journalContainer .cards .card::before { content: ""; position: absolute; top: 0; inset-inline: 0; height: 3px; background: linear-gradient(90deg, var(--accent), transparent); opacity: .75; }
+#journalContainer .cards .card:hover { transform: translateY(-3px); border-color: var(--accent); box-shadow: 0 18px 44px rgba(0,0,0,.5); }
+#journalContainer .cards .card .lbl { font-weight: 700; letter-spacing: .02em; }
+#journalContainer .cards .card .val { font-size: 26px; font-weight: 900; letter-spacing: -.02em; }
+#journalContainer .cards .card .val.pos { color: var(--green); }
+#journalContainer .cards .card .val.neg { color: var(--red); }
+#journalContainer .cards .card .sub { color: var(--muted); font-size: 11.5px; margin-top: 4px; }
+/* === 🧠 אנליטיקות (טאב stats): כותרות, פילוח טיקרים, תובנות === */
+#journalContainer .jr-stats-h { font-weight: 900; font-size: 15px; letter-spacing: .01em; margin: 22px 0 10px; color: var(--ink); }
+#journalContainer .jr-tcols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+#journalContainer .jr-tcol { border-radius: 14px; background: linear-gradient(180deg, var(--panel2), var(--panel)); box-shadow: var(--panelsh); border: 1px solid var(--line); padding: 10px 12px; }
+#journalContainer .jr-tcol-h { font-weight: 800; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+#journalContainer .jr-trow { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 8px; padding: 6px 2px; border-top: 1px solid var(--line); }
+#journalContainer .jr-trow:first-of-type { border-top: 0; }
+#journalContainer .jr-tsym { font-weight: 800; font-size: 13px; }
+#journalContainer .jr-twr { color: var(--muted); font-size: 11px; white-space: nowrap; }
+#journalContainer .jr-tnet { font-weight: 900; font-size: 13px; text-align: end; min-width: 68px; }
+#journalContainer .jr-tnet.pos { color: var(--green); }
+#journalContainer .jr-tnet.neg { color: var(--red); }
+#journalContainer .jr-insights { display: flex; flex-direction: column; gap: 8px; }
+#journalContainer .jr-insight { border-radius: 12px; background: var(--panel2); border: 1px solid var(--line); border-inline-start: 3px solid var(--accent); padding: 10px 13px; font-size: 13.5px; line-height: 1.55; }
+@media (max-width: 640px) { #journalContainer .jr-tcols { grid-template-columns: 1fr; } }
+
+/* equity curve + yearly box + calendar depth */
+#journalContainer .chartbox { border-radius: 15px; box-shadow: var(--panelsh); background: linear-gradient(180deg, var(--panel2), var(--panel)); }
+#journalContainer .tablebox { border-radius: 14px; box-shadow: var(--panelsh); }
+#journalContainer .cell { border-radius: 10px; }
+
+/* === יומן מסחר · דאשבורד (מוקאפ): שורת KPI, עקומה+לוח זה-לצד-זה, כותרות סקשן === */
+#journalContainer .jr-kpis { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin: 6px 0 18px; }
+#journalContainer .jr-stat { position: relative; overflow: hidden; padding: 15px 16px; border-radius: 15px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); transition: transform .14s, border-color .14s; }
+#journalContainer .jr-stat::before { content: ""; position: absolute; top: 0; inset-inline: 0; height: 3px; background: linear-gradient(90deg, var(--accent), transparent); opacity: .75; }
+#journalContainer .jr-stat:hover { transform: translateY(-2px); border-color: var(--accent); }
+#journalContainer .jr-stat .l { color: var(--muted); font-size: 11.5px; font-weight: 700; letter-spacing: .03em; }
+#journalContainer .jr-stat .v { font-family: 'Rubik', sans-serif; font-weight: 900; font-size: 23px; line-height: 1.1; margin-top: 5px; letter-spacing: -.01em; }
+#journalContainer .jr-stat .v.up { color: var(--green); }
+#journalContainer .jr-stat .v.down { color: var(--red); }
+#journalContainer .jr-stat .d { font-size: 11.5px; font-weight: 700; margin-top: 3px; color: var(--muted); }
+/* equity (wide) + calendar (narrow) side by side */
+#journalContainer .jr-jcols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; align-items: start; margin-bottom: 4px; }
+#journalContainer .jr-jcols > * { margin: 0 !important; }
+#journalContainer .jr-calwrap > h3 { margin: 0 0 10px; font-size: 14px; font-weight: 700; }
+/* section headers (open positions / recent trades) */
+#journalContainer .jr-dashsec { margin-top: 22px; }
+#journalContainer .jr-th { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+#journalContainer .jr-th h2 { font-size: 15px; font-weight: 800; margin: 0; }
+#journalContainer .jr-th .jr-c { color: var(--muted); font-size: 12px; }
+#journalContainer .jr-th .jr-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+@media (max-width: 980px) { #journalContainer .jr-kpis { grid-template-columns: repeat(3, 1fr); } #journalContainer .jr-jcols { grid-template-columns: 1fr; } }
+@media (max-width: 520px) { #journalContainer .jr-kpis { grid-template-columns: repeat(2, 1fr); } }
+
+/* === שידור חי (מוקאפ): גימור נגן + פאנל צ'אט מעומק + ריאקשנים === */
+/* player frame — rounded + depth (same 16:9 stage, just premium framing) */
+#page .live-stage { border-radius: 18px; box-shadow: var(--panelsh); }
+/* chat panel → gradient surface + depth, like the mockup */
+#page .lc-box { border-radius: 18px; background: linear-gradient(180deg, var(--panel2), var(--panel)); box-shadow: var(--panelsh); }
+#page .lc-count { background: var(--chip, var(--panel2)); }
+#page .lc-form input { background: var(--chip, var(--panel2)); border-radius: 11px; padding: 10px 12px; }
+#page .lc-form button { background: var(--accent); color: var(--accent-ink); border-radius: 11px; }
+#page .lc-login a { color: var(--accent); }
+/* reaction buttons → gradient surface + subtle lift (keeps the round emoji row) */
+#page .lr-btn { background: linear-gradient(180deg, var(--panel2), var(--panel)); box-shadow: 0 6px 16px rgba(0,0,0,.28); }
+#page .lr-btn:hover { border-color: var(--accent); }
+
+/* === מרכז התראות (מוקאפ): צ'יפי כיוון + שורות מקובצות לקטגוריה === */
+.al-modal .alc-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.al-modal .alc-fchips { display: flex; gap: 7px; flex-wrap: wrap; }
+.al-modal .fc { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; color: var(--muted); background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); border-radius: 11px; padding: 7px 12px; cursor: pointer; transition: all .14s; }
+.al-modal .fc:hover { color: var(--ink); }
+.al-modal .fc .n { font-size: 11px; font-weight: 800; opacity: .85; }
+.al-modal .fc.on { background: var(--accentbg); border-color: var(--accent); color: var(--accent); }
+.al-modal .fc.up.on { background: rgba(47,207,142,.15); border-color: var(--green); color: var(--green); }
+.al-modal .fc.down.on { background: rgba(251,106,127,.15); border-color: var(--red); color: var(--red); }
+.al-modal .alc-bar2 { margin-top: -4px; margin-bottom: 10px; }
+.al-modal .alc-sort { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.al-modal .alc-sort-l { font-size: 12px; font-weight: 700; color: var(--muted); margin-inline-end: 2px; }
+.al-modal .alc-sortb { font-family: inherit; font-size: 12px; font-weight: 700; color: var(--muted); background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); border-radius: 999px; padding: 5px 11px; cursor: pointer; transition: all .14s; }
+.al-modal .alc-sortb:hover { color: var(--ink); }
+.al-modal .alc-sortb.on { background: var(--accentbg); border-color: var(--accent); color: var(--accent); }
+.al-modal .alc-scroll { max-height: 60vh; overflow-y: auto; }
+.al-modal .alc-cat { margin-top: 11px; }
+.al-modal .alc-cat:first-child { margin-top: 0; }
+.al-modal .alc-cathead { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 800; color: var(--muted); margin: 0 0 6px; }
+.al-modal .alc-catn { font-size: 11px; color: var(--accent); background: var(--accentbg); border: 1px solid var(--accentbg); padding: 1px 8px; border-radius: 999px; font-weight: 800; }
+.al-modal .alc-copy { font-family: inherit; font-size: 11.5px; font-weight: 800; color: var(--accent); background: var(--accentbg); border: 1px solid var(--accent); border-radius: 999px; padding: 3px 11px; cursor: pointer; transition: background .14s, color .14s; flex: 0 0 auto; }
+.al-modal .alc-copy:hover { background: var(--accent); color: var(--accent-ink); }
+.al-modal .alc-copy.done { background: var(--green); border-color: var(--green); color: #04150e; }
+.al-modal .alc-catline { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+/* COMPACT single-line rows (Adi): ticker stays bold/prominent, everything else on one line,
+   so many more alerts fit on screen. ~40px tall vs the old ~72px two-line card. */
+.al-modal .alc-list { display: flex; flex-direction: column; gap: 3px; }
+.al-modal .alc { display: flex; align-items: center; gap: 10px; padding: 4px 12px; border-radius: 8px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); transition: border-color .14s, background .14s; }
+.al-modal .alc:hover { border-color: var(--accent); }
+.al-modal .alc-ico { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; flex: 0 0 auto; font-size: 11px; font-weight: 900; }
+.al-modal .alc.bull .alc-ico { background: rgba(47,207,142,.15); color: var(--green); }
+.al-modal .alc.bear .alc-ico { background: rgba(251,106,127,.15); color: var(--red); }
+.al-modal .alc.neutral .alc-ico { background: var(--chip, rgba(255,255,255,.05)); color: var(--muted); }
+.al-modal .alc-mid { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+.al-modal .alc-sym { font-family: 'Rubik', sans-serif; font-weight: 900; font-size: 15px; letter-spacing: .02em; cursor: pointer; flex: 0 0 auto; }
+.al-modal .alc-preset { font-size: 12px; color: var(--muted); margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; display: block; height: auto; width: auto; top: auto; text-align: start; }
+.al-modal .alc-right { display: flex; align-items: baseline; gap: 9px; flex: 0 0 auto; }
+.al-modal .alc-px { font-weight: 800; font-size: 13px; direction: ltr; color: var(--ink); }
+.al-modal .alc-time { font-size: 11px; color: var(--muted); margin: 0; direction: ltr; white-space: nowrap; width: auto; text-align: start; top: auto; left: auto; }
+
+/* === עמוד חדשות (מוקאפ): סיכום AI + דיווחים + פיד סנטימנט + יומן כלכלי === */
+#page .news-status { color: var(--muted); font-size: 12.5px; margin: 6px 2px 0; }
+/* AI summary card */
+#page .ai-card { margin-top: 14px; border-radius: 18px; border: 1px solid var(--accent); box-shadow: var(--panelsh); padding: 20px 22px; background: radial-gradient(600px 260px at 85% -20%, var(--accentbg), transparent 70%), linear-gradient(180deg, var(--panel2), var(--panel)); }
+#page .ai-h { display: flex; align-items: center; gap: 10px; }
+#page .ai-ic { width: 34px; height: 34px; border-radius: 10px; background: var(--accentbg); display: grid; place-items: center; flex: 0 0 auto; font-size: 18px; }
+#page .ai-h h2 { font-size: 16px; font-weight: 800; margin: 0; }
+#page .ai-tag { font-size: 10.5px; font-weight: 800; color: var(--accent); background: var(--accentbg); border: 1px solid var(--accent); padding: 3px 9px; border-radius: 999px; }
+#page .ai-card p { color: var(--ink); font-size: 14px; line-height: 1.6; margin: 12px 0 0; }
+#page .ai-pts { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+#page .ai-pt { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; color: var(--muted); }
+#page .ai-pt .b { color: var(--accent); font-weight: 800; flex: 0 0 auto; }
+#page .ai-gt { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 13px; border-top: 1px solid var(--line); }
+#page .ai-gt .lab { font-size: 11px; color: var(--muted); font-weight: 700; align-self: center; }
+#page .ai-gt span { font-size: 12px; font-weight: 700; color: var(--muted); background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; }
+#page .ai-gt span b { color: var(--ink); margin-inline-start: 5px; }
+/* earnings cards */
+#page .earn-sec { margin-top: 16px; }
+#page .earn-head { display: flex; align-items: center; gap: 9px; margin: 0 2px 12px; }
+#page .earn-head h2 { font-size: 15px; font-weight: 800; margin: 0; }
+#page .earn-head .ec { color: var(--muted); font-size: 12px; }
+#page .earn-head .eline { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+#page .earn-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+#page .ecard { padding: 14px 15px; border-radius: 15px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); }
+#page .ecard .etop { display: flex; align-items: center; gap: 8px; }
+#page .ecard .esym { font-family: 'Rubik', sans-serif; font-weight: 800; font-size: 17px; letter-spacing: .02em; }
+#page .ecard .ebm { font-size: 10.5px; font-weight: 800; padding: 2px 8px; border-radius: 999px; margin-inline-start: auto; }
+#page .ecard .ebm.beat { background: rgba(47,207,142,.15); color: var(--green); }
+#page .ecard .ebm.miss { background: rgba(251,106,127,.15); color: var(--red); }
+#page .ecard .erx { font-weight: 800; font-size: 15px; margin-top: 8px; direction: ltr; }
+#page .ecard .erx.up { color: var(--green); } #page .ecard .erx.down { color: var(--red); }
+#page .ecard .erow { display: flex; justify-content: space-between; font-size: 12px; margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--line); }
+#page .ecard .erow .el { color: var(--muted); } #page .ecard .erow .ev { font-weight: 700; }
+#page .ecard .erow .ev .es { color: var(--muted); font-weight: 600; } #page .ecard .erow .ev.pos { color: var(--green); }
+/* feed + calendar columns */
+#page .news-cols { display: grid; grid-template-columns: 1fr 310px; gap: 16px; margin-top: 16px; align-items: start; }
+#page .news-cols.nocal { grid-template-columns: 1fr; }
+#page .news-feedcol { display: flex; flex-direction: column; gap: 12px; }
+#page .nart { display: flex; gap: 14px; padding: 15px 17px; border-radius: 15px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); transition: border-color .14s, transform .14s; cursor: pointer; }
+#page .nart:hover { border-color: var(--accent); transform: translateY(-1px); }
+#page .nart .nsent { width: 4px; border-radius: 3px; flex: 0 0 auto; }
+#page .nart.bull .nsent { background: var(--green); } #page .nart.bear .nsent { background: var(--red); } #page .nart.neu .nsent { background: var(--muted); }
+#page .nart .nbody { flex: 1; min-width: 0; }
+#page .nart .nmeta { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+#page .nart .npill { font-size: 10.5px; font-weight: 800; padding: 3px 9px; border-radius: 999px; }
+#page .nart .npill.bull { background: rgba(47,207,142,.15); color: var(--green); } #page .nart .npill.bear { background: rgba(251,106,127,.15); color: var(--red); } #page .nart .npill.neu { background: var(--chip, rgba(255,255,255,.05)); color: var(--muted); }
+#page .nart .nsrc { color: var(--muted); font-size: 11.5px; font-weight: 600; }
+#page .nart h3 { font-size: 15px; font-weight: 700; margin: 7px 0 0; line-height: 1.35; }
+#page .nart .nticks { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 9px; }
+#page .nart .ntk { font-size: 11px; font-weight: 800; color: var(--accent); background: var(--accentbg); border: 1px solid var(--accentbg); padding: 2px 8px; border-radius: 7px; }
+#page .news-cal { background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--panelsh); padding: 18px 20px; position: sticky; top: 14px; }
+#page .news-cal .nch { display: flex; align-items: center; gap: 9px; margin-bottom: 13px; }
+#page .news-cal .nch h2 { font-size: 15px; font-weight: 700; margin: 0; }
+#page .news-cal .ncline { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+#page .nev { display: flex; align-items: center; gap: 11px; padding: 11px 0; border-top: 1px solid var(--line); }
+#page .nev:first-of-type { border-top: 0; }
+#page .nevt { font-family: 'Rubik', sans-serif; font-weight: 800; font-size: 13px; color: var(--muted); min-width: 46px; text-align: center; }
+#page .nevm { flex: 1; } #page .nevn { font-weight: 700; font-size: 13.5px; } #page .nevd { color: var(--muted); font-size: 11.5px; }
+#page .nevimp { display: flex; gap: 2px; }
+#page .nevimp i { width: 5px; height: 12px; border-radius: 2px; background: var(--line); }
+#page .nevimp.h i:nth-child(-n+3) { background: var(--red); } #page .nevimp.m i:nth-child(-n+2) { background: #f4b64e; } #page .nevimp.l i:nth-child(1) { background: var(--green); }
+@media (max-width: 900px) { #page .news-cols { grid-template-columns: 1fr; } #page .news-cal { position: static; } #page .earn-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 460px) { #page .earn-grid { grid-template-columns: 1fr; } }
+
+/* === הקלטות (מוקאפ): חיפוש + הקלטה מודגשת + כפתור play טורקיז === */
+#page .vod-head { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+#page .vod-head .page-head { flex: 1 1 260px; }
+#page .vod-search { display: flex; align-items: center; gap: 8px; padding: 9px 13px; border-radius: 11px; background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); color: var(--muted); }
+#page .vod-search svg { width: 15px; height: 15px; flex: 0 0 auto; }
+#page .vod-search input { background: transparent; border: 0; outline: 0; color: var(--ink); font-family: inherit; font-size: 13px; min-width: 160px; }
+#page .vod-search input::placeholder { color: var(--muted); }
+/* teal circular play button (override the injected white ▶) */
+#page .vod-thumb .vod-play { width: 52px; height: 52px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; font-size: 20px; line-height: 1; padding-inline-start: 3px; box-shadow: 0 8px 22px rgba(0,0,0,.4); text-shadow: none; opacity: 1; transition: background .14s; }
+#page .vod-card:hover .vod-play, #page .vod-feat:hover .vod-play { background: var(--accent); filter: brightness(1.12); }
+/* premium card surfaces */
+#page .vod-card { background: linear-gradient(180deg, var(--panel2), var(--panel)); box-shadow: var(--panelsh); }
+#page .vod-thumb { border-radius: 14px; overflow: hidden; }
+/* featured hero */
+#page .vod-feat { display: grid; grid-template-columns: 1.3fr 1fr; gap: 16px; margin-top: 16px; padding: 16px; border-radius: 18px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); align-items: center; cursor: pointer; transition: border-color .14s, transform .14s; }
+#page .vod-feat:hover { border-color: var(--accent); transform: translateY(-2px); }
+#page .vod-feat .vod-thumb { aspect-ratio: 16/9; }
+#page .vf-tag { display: inline-block; font-size: 10.5px; font-weight: 800; color: var(--accent); background: var(--accentbg); border: 1px solid var(--accentbg); padding: 3px 9px; border-radius: 999px; }
+#page .vf-meta h2 { font-size: 21px; font-weight: 800; margin: 9px 0 0; line-height: 1.2; color: var(--ink); }
+#page .vf-tldr { margin-top: 8px; }
+#page .vf-chips { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 13px; }
+#page .vf-chips span { font-size: 11.5px; font-weight: 700; color: var(--muted); background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; }
+#page .vf-chips span b { color: var(--accent); font-weight: 800; margin-inline-start: 4px; direction: ltr; }
+@media (max-width: 820px) { #page .vod-feat { grid-template-columns: 1fr; } }
+
+/* === הגרלות (שדרוג בטוח בשפת המוקאפ): פאנל אדמין 🔒 + chips טורקיז + "איך זה עובד" === */
+#page .gvw-admin { background: linear-gradient(180deg, rgba(244,182,78,.1), transparent); border: 1px solid rgba(244,182,78,.32); border-radius: 18px; }
+#page .gvw-admin h3 { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+#page .gvw-adm-lock { font-size: 11px; font-weight: 800; color: #f4b64e; background: rgba(244,182,78,.14); padding: 3px 9px; border-radius: 999px; }
+#page .gvw-pill.open { background: rgba(47,207,142,.15); color: var(--green); }
+#page .gvw-pill.done { background: var(--accentbg); color: var(--accent); }
+#page .gvw-chip { background: var(--accentbg); border: 1px solid var(--accent); color: var(--accent); border-radius: 999px; }
+#page .gvw-chip.me { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+/* "איך זה עובד" steps panel (mockup) */
+#page .gvw-steps { margin-top: 24px; padding: 18px 20px; border-radius: 18px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); }
+#page .gvw-steps-h { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
+#page .gvw-steps-h h2 { font-size: 15px; font-weight: 800; margin: 0; }
+#page .gvw-steps-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+#page .gvw-step { display: flex; gap: 12px; align-items: flex-start; margin-top: 12px; }
+#page .gvw-step:first-of-type { margin-top: 0; }
+#page .gvw-stepn { width: 28px; height: 28px; border-radius: 50%; background: var(--accentbg); color: var(--accent); display: grid; place-items: center; font-weight: 800; font-size: 13px; flex: 0 0 auto; }
+#page .gvw-stept b { font-weight: 800; font-size: 13.5px; }
+#page .gvw-stept p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.4; }
+
+/* === מניות קהילה (מוקאפ): כרטיס הצעה + גריד מאושרות + תור אישור 🔒 === */
+#page .comm-submit { margin-top: 16px; border-radius: 18px; border: 1px solid var(--line); box-shadow: var(--panelsh); padding: 20px 22px; background: radial-gradient(500px 220px at 85% -20%, var(--accentbg), transparent 70%), linear-gradient(180deg, var(--panel2), var(--panel)); }
+#page .cs-h { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+#page .cs-ic { width: 34px; height: 34px; border-radius: 10px; background: var(--accentbg); color: var(--accent); display: grid; place-items: center; flex: 0 0 auto; font-size: 18px; }
+#page .cs-h h2 { font-size: 17px; font-weight: 800; margin: 0; }
+#page .cs-d { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+#page .cs-form { display: flex; gap: 10px; flex-wrap: wrap; }
+#page .cs-tk { width: 130px; flex: 0 0 auto; background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; color: var(--ink); font-family: 'Rubik', sans-serif; font-weight: 800; font-size: 15px; letter-spacing: .06em; text-align: center; }
+#page .cs-re { flex: 1; min-width: 160px; background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; color: var(--ink); font-family: inherit; font-size: 14px; }
+#page .cs-form input::placeholder { color: var(--muted); }
+#page .cs-send { border: 0; background: var(--accent); color: var(--accent-ink); font-family: inherit; font-weight: 800; font-size: 14px; padding: 12px 20px; border-radius: 12px; cursor: pointer; flex: 0 0 auto; }
+#page .cs-hint { color: var(--muted); font-size: 11.5px; margin-top: 10px; }
+#page .comm-head { display: flex; align-items: center; gap: 9px; margin: 26px 2px 13px; }
+#page .comm-head h2 { font-size: 15px; font-weight: 800; margin: 0; }
+#page .comm-head .comm-c { color: var(--muted); font-size: 12.5px; }
+#page .comm-head .comm-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+/* collapsible approved-tickers grid (keeps the showcase from flooding the page) */
+#page .comm-collapse > summary.comm-head { cursor: pointer; list-style: none; user-select: none; }
+#page .comm-collapse > summary.comm-head::-webkit-details-marker { display: none; }
+#page .comm-collapse > summary.comm-head .comm-count { font-size: 12.5px; font-weight: 700; color: var(--muted); }
+#page .comm-collapse > summary.comm-head::after { content: "▾"; margin-inline-start: 8px; opacity: .6; font-size: 13px; transition: transform .15s ease; }
+#page .comm-collapse[open] > summary.comm-head::after { transform: rotate(180deg); }
+#page .comm-collapse > summary.comm-head:hover h2 { color: var(--accent, var(--ink)); }
+#page .comm-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 13px; }
+#page .comm-cc { padding: 14px 15px; border-radius: 15px; background: linear-gradient(180deg, var(--panel2), var(--panel)); border: 1px solid var(--line); box-shadow: var(--panelsh); transition: border-color .14s, transform .14s; }
+#page .comm-cc:hover { border-color: var(--accent); transform: translateY(-1px); }
+#page .comm-cc .cc-top { display: flex; align-items: center; gap: 8px; }
+#page .comm-cc .cc-sym { font-family: 'Rubik', sans-serif; font-weight: 800; font-size: 17px; letter-spacing: .02em; cursor: pointer; }
+#page .comm-cc .cc-etf { font-size: 10.5px; color: var(--muted); background: var(--chip, rgba(255,255,255,.05)); border: 1px solid var(--line); padding: 2px 7px; border-radius: 6px; font-weight: 700; }
+#page .comm-cc .cc-st { margin-inline-start: auto; font-size: 10.5px; font-weight: 800; padding: 2px 8px; border-radius: 999px; background: rgba(47,207,142,.15); color: var(--green); }
+#page .comm-cc .cc-by { color: var(--muted); font-size: 12px; margin-top: 8px; display: flex; align-items: center; gap: 7px; }
+#page .comm-cc .cc-av { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 10px; font-weight: 800; flex: 0 0 auto; }
+/* admin queue */
+#page .comm-admin { margin-top: 16px; padding: 18px 20px; border-radius: 18px; background: linear-gradient(180deg, rgba(244,182,78,.1), transparent); border: 1px solid rgba(244,182,78,.32); }
+#page .ca2-h { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; flex-wrap: wrap; }
+#page .ca2-ic { font-size: 16px; }
+#page .ca2-h h2 { font-size: 15px; font-weight: 800; margin: 0; }
+#page .ca2-cnt:not(:empty) { font-size: 11px; font-weight: 800; color: #f4b64e; background: rgba(244,182,78,.14); border: 1px solid rgba(244,182,78,.3); padding: 1px 8px; border-radius: 999px; }
+#page .ca2-lock { font-size: 11px; font-weight: 800; color: #f4b64e; background: rgba(244,182,78,.14); padding: 3px 9px; border-radius: 999px; }
+#page .ca2-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+#page .comm-pr { display: flex; align-items: center; gap: 13px; padding: 12px 14px; border-radius: 12px; background: var(--chip, rgba(255,255,255,.03)); border: 1px solid var(--line); margin-top: 9px; }
+#page .comm-pr:first-child { margin-top: 0; }
+#page .comm-pr .pr-sym { font-family: 'Rubik', sans-serif; font-weight: 800; font-size: 16px; min-width: 64px; }
+#page .comm-pr .pr-mid { flex: 1; min-width: 0; }
+#page .comm-pr .pr-re { font-size: 13px; }
+#page .comm-pr .pr-meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+#page .comm-pr .pr-ok { color: var(--green); font-weight: 700; }
+#page .comm-pr .pr-act { display: flex; gap: 7px; flex: 0 0 auto; }
+#page .comm-pr .pr-act button { border: 0; font-family: inherit; font-weight: 800; font-size: 12.5px; padding: 8px 13px; border-radius: 10px; cursor: pointer; }
+#page .comm-pr .cq-ok { background: var(--green); color: #04150e; }
+#page .comm-pr .cq-no { background: var(--chip, rgba(255,255,255,.05)); color: var(--muted); border: 1px solid var(--line); }
+@media (max-width: 820px) { #page .comm-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { #page .comm-grid { grid-template-columns: 1fr; } #page .comm-pr { flex-wrap: wrap; } }
+
+/* === מועדפים: premium polish + palette fix (teal accent, drop legacy violet) === */
+#page .fav-card { background: linear-gradient(180deg, var(--panel2), var(--panel)); box-shadow: var(--panelsh); border-radius: 15px; }
+#page .fav-card:hover { border-color: var(--accent); }
+#page .fav-card.fc-pos { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accentbg); }
+#page .fav-section-1 .fav-sec-hdr { border-inline-start-color: var(--accent); }
+#page .fav-section-2 .fav-sec-hdr { border-inline-start-color: var(--green); }
+#page .fc-chg.pos { color: var(--green); }
+#page .fc-chg.neg { color: var(--red); }
+#page .fav-pdrop-sum.on { border-color: var(--accent); color: var(--accent); background: var(--accentbg); }
+#page .fpd-item.on { background: var(--accentbg); color: var(--accent); }
+#page .fpd-item input { accent-color: var(--accent); }
+#page .fav-selchip { color: var(--accent); background: var(--accentbg); border-color: var(--accent); }
+#page .fav-selx { color: var(--accent); }
+@media (max-width: 1040px) { .scan-wb { grid-template-columns: 1fr; } .scan-wb-rail .filters.fbar .frow, .scan-wb-rail .filters .frow { flex-direction: row; flex-wrap: wrap; } .scan-wb-rail .filters.fbar .fpop { width: auto; position: relative; border-top: none; } .scan-wb-rail .filters.fbar .fpop-btn { border: 1px solid var(--line); background: var(--panel2); } .scan-wb-rail .filters.fbar .fpop-body { position: absolute; } }
+/* launcher match counts + insights band */
+.sl-cnt { margin-top: 6px; font-size: 11px; font-weight: 800; color: var(--accent); }
+.scan-insband { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+.sib { display: flex; flex-direction: column; gap: 2px; padding: 9px 14px; border-radius: 12px; background: var(--panel); border: 1px solid var(--line); min-width: 94px; }
+.sib .l { font-size: 10.5px; font-weight: 700; color: var(--muted); letter-spacing: .02em; }
+.sib .v { font-size: 17px; font-weight: 800; }
+.sib .sib-sec { font-size: 14px; }
+.sib.hl { background: var(--accentbg); border-color: var(--accent); }
+.sib.warn .v { color: #e0a73a; }
+
+/* === סקירת שוק polish (redesign) === */
+.cockpit { border-radius: 16px; box-shadow: var(--panelsh); }
+.mh-panel { margin-top: 2px; }
+.mh-head { display: flex; align-items: center; gap: 10px; margin-bottom: 11px; }
+.mh-head h3 { margin: 0; font-size: 15px; }
+.mh-full { margin-inline-start: auto; color: var(--accent); font-size: 12.5px; font-weight: 700; cursor: pointer; }
+.mh-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(94px, 1fr)); gap: 7px; }
+.mh-tile { border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); cursor: pointer; transition: transform .12s, border-color .12s; min-height: 56px; }
+.mh-tile:hover { transform: translateY(-2px); border-color: var(--accent); }
+.mh-u1 { background: rgba(47,207,142,.13); } .mh-u2 { background: rgba(47,207,142,.26); } .mh-u3 { background: rgba(47,207,142,.42); }
+.mh-d1 { background: rgba(251,106,127,.13); } .mh-d2 { background: rgba(251,106,127,.26); } .mh-d3 { background: rgba(251,106,127,.42); }
+.mh-flat { background: var(--chip); }
+.mh-etf { font-weight: 800; font-size: 13px; letter-spacing: .02em; color: #fff; }   /* white — not direction-colored (Adi) */
+.mh-etf.tsym { align-self: flex-start; padding: 0 5px; margin: -1px -2px 0; border-radius: 5px; transition: background .12s, color .12s; }   /* ETF ticker is its own click → chart */
+.mh-etf.tsym:hover { background: rgba(255,255,255,.16); color: var(--accent); }
+.mh-chg { font-weight: 800; font-size: 12px; direction: ltr; color: #fff; }           /* white — was green/red by direction (Adi) */
+.mh-he { font-size: 20px; font-weight: 800; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* Hebrew name ×2, bold + near-white to match the page heading (Adi) */
+.mkt-rank-grid .panel { border-radius: 14px; }
+
+/* === תצוגה דחוסה למסכים גדולים (Adi 2026-10-30: שהדפים ייכנסו בלי גלילה) ===
+   מהדק את התפריט הצדדי + ה"כרום" האנכי (באנרים/כותרות/מרווחים) מעל התוכן
+   בכל דף + הדאשבורדים. ממוקד לדסקטופ (≥1000px) כדי לא לפגוע במובייל.
+   מאומת ב-viewport של Adi (~2752×1040): מרכז-בקרה/שוק/סקטורים נכנסים בלי גלילה. */
+@media (min-width: 1000px) {
+  /* תפריט צדדי — דחוס יותר (היה גולל בעצמו) */
+  .sidebar { padding-top: 18px !important; padding-bottom: 14px !important; }
+  .side-brand { padding-bottom: 14px !important; }
+  .side-nav a { padding-top: 6px !important; padding-bottom: 6px !important; }
+  .nav-group-label { margin-top: 10px !important; }
+  /* כרום מעל התוכן */
+  .main { padding-top: 8px !important; padding-bottom: 8px !important; }
+  .community-cta { margin-bottom: 8px !important; padding-top: 6px !important; padding-bottom: 6px !important; }
+  .top-strip { margin-bottom: 5px !important; }
+  .page-head { margin-top: 2px !important; margin-bottom: 6px !important; }
+  .page-head h1 { font-size: 20px !important; line-height: 1.2 !important; }
+  .page-head .sub { font-size: 12px !important; margin-top: 1px !important; }
+  .page-head.compact { margin-bottom: 5px !important; }
+  .pulse-tabs { margin-bottom: 6px !important; }
+  .uni-switch { margin-bottom: 3px !important; }
+  /* סרגל מצב השוק + דאשבורדים */
+  .cockpit { padding-top: 9px !important; padding-bottom: 9px !important; margin-bottom: 7px !important; }
+  .cc-dash { margin-top: 8px !important; gap: 9px !important; }
+  .cc-dash .panel, .cc-hot, .cc-read, .cc-heatp, .cc-leadp { padding-top: 11px !important; padding-bottom: 11px !important; }
+  .mkt-dash { gap: 9px !important; }
+  .mh-tile { min-height: 46px !important; }
+  .cc-heatp .mh-tile { min-height: 42px !important; }
+  .mkt-rank-grid .panel { padding-top: 10px !important; padding-bottom: 10px !important; }
+  /* פוטר דחוס */
+  .site-footer-mount, .site-footer { padding-top: 12px !important; padding-bottom: 8px !important; }
+}
+
+/* === zoom למסך אולטרה-רחב (Adi: 3440×1440 ב-125% = ~2752 CSS px) — הגישה שמכניסה דפים בלי גלילה ===
+   מקטין את כל העמוד ל-83% על מסכים רחבים מאוד (≥2200px). ה-OS של Adi ב-125% מפצה,
+   כך שהטקסט הפיזי עדיין ~4% גדול מ-100%. כל הדפים הראשיים נכנסים בלי גלילה (פרט ל-sp500 — טריימאפ מלא).
+   ה-zoom על body (ולא על .scanner-app) שומר רוחב מלא בלי פס ריק בצד. */
+@media (min-width: 2200px) {
+  body { zoom: 0.90; }                      /* Adi: 0.83 היה קטן מדי, 0.92 נכון אבל הפוטר נגלל — 0.90 כמעט זהה ל-0.92 וקונה עוד ~21px כדי להיכנס בלי גלילה */
+  /* ⚠️ אין zoom שונה לדף/טאב בודד — זה גרם ל"קפיצת" זום מורגשת במעבר בין טאבים (רוחב↔תזרים).
+     הקטנת מפת החום נעשית ברמת הרכיב (.sp-heat למטה), לא בזום של כל הדף. */
+  /* ניצול המקום האנכי הפנוי במסך הרחב: גרפי רוחב-מעל-ממוצעים גבוהים יותר.
+     סלקטור ספציפי + !important כדי לגבור על הגדרות density (compact/dense) של המשתמש. */
+  body .brd-chart .brd-svg { height: 235px !important; }
+  /* סקירת שוק — אריחי מפת חום סקטורים: קומפקטיים (בלי גלילה) אך עם כיתוב גדול יותר + גופן האתר (Heebo) */
+  /* Heebo's line metrics are taller than the Rubik/Inter the font-unification replaced, which pushed the
+     dense pages past the no-scroll fold. Cap the inherited line-height (app only — off-body share cards keep
+     theirs) to recover that height. Scoped to .scanner-app, not body, so share-card PNGs are untouched. */
+  .scanner-app { line-height: 1.25; }
+  .mkt-dash .mh-tile { min-height: 0 !important; padding: 4px 12px !important; gap: 0 !important; }
+  .mkt-dash .mh-tile .mh-etf { font-size: 13px; line-height: 1.1; }
+  .mkt-dash .mh-tile .mh-chg { font-size: 12px; line-height: 1.1; }
+  .mkt-dash .mh-tile .mh-he { font-size: 20px; line-height: 1.05; }   /* Hebrew name large (≈2×) but compact so the tile doesn't grow (Adi) */
+  /* חיסכון אנכי נוסף בסקירת שוק כדי שהפוטר ייכנס בלי גלילה — הידוק מרווחים בלבד, בלי לכווץ נתונים.
+     ממוקד למסך הרחב (.scanner-app) כדי שלא ישפיע על דפים אחרים או על כרטיסי השיתוף. */
+  .scanner-app main.main { padding-top: 9px !important; padding-bottom: 9px !important; }
+  .scanner-app .pulse-tabs { padding-bottom: 2px !important; margin-bottom: 2px !important; }
+  .scanner-app .page-head { margin-top: 0 !important; margin-bottom: 5px !important; }
+  .scanner-app .uni-switch { margin-bottom: 0 !important; }
+  .scanner-app .community-cta { margin-bottom: 5px !important; }
+  .scanner-app .mkt-dash { gap: 6px !important; }
+  .scanner-app .mkt-rank-grid { gap: 7px !important; }
+  .scanner-app .gm-grid { row-gap: 6px !important; }
+  .scanner-app .site-footer-mount { padding-top: 4px !important; }
+  .scanner-app .site-footer { padding-top: 8px !important; padding-bottom: 6px !important; }
+}
+/* index cards moved INTO the cockpit, above the breadth bar (Adi 2026-11-01) — compact so they fit the
+   free vertical space and the separate full-width idx-row is dropped. cp-brwrap keeps the breadth click. */
+.cockpit .cp-breadth { gap: 6px; }
+.cockpit .cp-breadth .idx-row { margin: 0; gap: 7px; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); }
+.cockpit .cp-breadth .idx-card { padding: 4px 11px; border-radius: 9px; }
+.cockpit .cp-breadth .idx-card .sym { font-size: 14px; }
+.cockpit .cp-breadth .idx-card .ic-px { font-size: 11px; }
+.cockpit .cp-breadth .idx-card .ic-chg { font-size: 12.5px; }
+.cockpit .cp-breadth .idx-card .ic-cndl { font-size: 11px; padding: 1px 6px; }
+.cp-brwrap { display: flex; flex-direction: column; gap: 5px; }
+.cp-brwrap.clickable { cursor: pointer; }
+/* אריחי מפת-החום בסקירת שוק ממלאים את כל הרוחב (auto-fit במקום auto-fill) — Adi */
+.mkt-dash .mh-grid { grid-template-columns: repeat(auto-fit, minmax(94px, 1fr)) !important; gap: 9px; }
+/* פוטר קומפקטי (דסקטופ) — פחות גובה בתחתית כל דף */
+@media (min-width: 1000px) {
+  .site-footer { font-size: 11px !important; }
+  .site-footer .sf-top { padding-top: 6px !important; padding-bottom: 4px !important; }
+  .site-footer .sf-logo-img { width: 22px !important; height: 22px !important; }
+  .site-footer .sf-links { gap: 3px 12px !important; }
+  .site-footer .sf-bottom, .site-footer .sf-copy, .site-footer .sf-legal { padding-top: 3px !important; padding-bottom: 3px !important; font-size: 10px !important; }
+  /* שם המשתמש + "התנתק" בתחתית התפריט — צ'יפ חשבון מסודר (Adi: נראה זרוק) */
+  .side-foot .user-area { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 7px 10px; border-radius: 12px; background: var(--panel2); border: 1px solid var(--line); }
+  .side-foot .user-area .avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; border: 1px solid var(--line); flex-shrink: 0; }
+  .side-foot .user-area .uname { font-weight: 700; font-size: 13px; color: var(--ink); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side-foot .user-area #logoutBtn { font-size: 11px; padding: 5px 10px; flex-shrink: 0; }
+}
+
+/* ===== "איפה ה-2'ים" — מפת ה-2'ים (סקטור × טיימפריים · נרות כיווניים 2U/2D) ===== */
+.m2-panel .m2-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.m2-panel .m2-head h3 { margin: 0; }
+.m2-uni { display: inline-flex; gap: 4px; }
+.m2-verdict { margin: 10px 0 4px; }
+.m2-table { width: 100%; border-collapse: separate; border-spacing: 0; text-align: center; }
+.m2-table th, .m2-table td { padding: 8px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.m2-table thead th { position: sticky; top: 0; background: var(--panel2, #121726); color: var(--muted); font-weight: 700; z-index: 2; }
+.m2-table .m2-sec-h, .m2-table .m2-sec { text-align: start; white-space: nowrap; }
+.m2-table .m2-tot-h, .m2-table .m2-tot { font-weight: 800; color: var(--ink); }
+.m2-table .m2-sec { display: flex; align-items: center; gap: 7px; }
+.m2-secnm { font-weight: 700; color: var(--ink); }
+.m2-etf { font-size: 10.5px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
+.m2-cell { cursor: pointer; transition: filter .12s; border-radius: 6px; }
+.m2-cell:hover { filter: brightness(1.18); }
+.m2-cell .m2-u, .m2-cell .m2-d { display: inline-block; font-weight: 800; font-variant-numeric: tabular-nums; }
+.m2-cell .m2-u { color: var(--green, #26a69a); margin-inline-end: 7px; }
+.m2-cell .m2-d { color: var(--red, #ef5350); }
+.m2-cell .m2-z { color: var(--muted); opacity: .5; }
+.m2-foot td { font-weight: 800; color: var(--ink); background: var(--panel2, #121726); border-top: 2px solid var(--line); }
+.m2-foot .m2-sec { color: var(--muted); font-weight: 700; }
+.m2-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; margin-top: 10px; font-size: 12px; color: var(--ink); }
+.m2-legend .m2-u { color: var(--green, #26a69a); }
+.m2-legend .m2-d { color: var(--red, #ef5350); }
+/* drill modal */
+.m2-drill { display: flex; flex-wrap: wrap; gap: 16px; }
+.m2-dr-sec { flex: 1 1 240px; min-width: 0; }
+.m2-dr-h { font-weight: 800; padding: 6px 8px; border-radius: 8px; margin-bottom: 6px; background: var(--panel2, #121726); display: flex; align-items: center; gap: 8px; }
+.m2-dr-h.pos { color: var(--green, #26a69a); }
+.m2-dr-h.neg { color: var(--red, #ef5350); }
+.m2-cpy { margin-inline-start: auto; background: transparent; border: 1px solid var(--line, #263042); color: inherit; border-radius: 7px; padding: 2px 8px; font-size: 13px; cursor: pointer; line-height: 1.4; }
+.m2-cpy:hover { border-color: var(--accent, #2fe6c7); }
+.m2-dr-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); cursor: pointer; border-radius: 6px; }
+.m2-dr-row:hover { background: var(--panel2, #121726); }
+.m2-dr-sym { font-weight: 800; min-width: 54px; }
+.m2-dr-nm { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.m2-dr-chg { font-weight: 700; font-variant-numeric: tabular-nums; }
+.m2-dr-chg.pos { color: var(--green, #26a69a); }
+.m2-dr-chg.neg { color: var(--red, #ef5350); }
+/* "💰 לאן הכסף החכם נכנס עכשיו" — prominent smart-money inflow band (hero of the page) */
+.m2-smart { margin: 4px 0 14px; padding: 14px 16px; border-radius: 14px; background: linear-gradient(135deg, rgba(38,166,154,.12), rgba(38,166,154,.02)); border: 1px solid rgba(38,166,154,.32); }
+.m2-sm-ttl { font-size: 18px; font-weight: 800; color: var(--ink); letter-spacing: .2px; }
+.m2-sm-sub { font-size: 12px; color: var(--muted); margin: 3px 0 11px; }
+.m2-sm-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(188px, 1fr)); gap: 10px; }
+.m2-sm-card { padding: 11px 13px; border-radius: 11px; background: var(--panel2, #121726); border: 1px solid var(--line); border-inline-start: 4px solid var(--green, #26a69a); cursor: pointer; transition: transform .12s, box-shadow .12s; }
+.m2-sm-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(38,166,154,.22); }
+.m2-sm-card.fresh { box-shadow: 0 0 0 1px rgba(38,166,154,.45), 0 0 18px rgba(38,166,154,.22); }
+.m2-sm-h { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.m2-sm-nm { font-weight: 800; color: var(--ink); font-size: 15px; }
+.m2-sm-fresh { font-size: 10.5px; font-weight: 800; color: var(--green, #26a69a); background: rgba(38,166,154,.14); border-radius: 6px; padding: 1px 6px; }
+.m2-sm-sc { font-size: 23px; font-weight: 900; color: var(--green, #26a69a); font-variant-numeric: tabular-nums; margin-top: 4px; line-height: 1.05; }
+.m2-sm-lab { font-size: 11px; font-weight: 700; color: var(--muted); }
+.m2-sm-tfs { font-size: 11.5px; color: var(--ink); margin-top: 3px; }
+.m2-sm-out { margin-top: 11px; font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.m2-sm-ochip { font-weight: 700; color: var(--red, #ef5350); background: rgba(239,83,80,.1); border: 1px solid rgba(239,83,80,.25); border-radius: 7px; padding: 2px 8px; cursor: pointer; }
+.m2-sm-ochip:hover { background: rgba(239,83,80,.18); }
+.m2-table tr.m2-in td.m2-sec { box-shadow: inset 3px 0 0 var(--green, #26a69a); }
+.m2-table tr.m2-out td.m2-sec { box-shadow: inset 3px 0 0 var(--red, #ef5350); }
+.m2-sm-d2 { color: var(--red, #ef5350); font-size: 16px; }
+/* timeframe filter chips */
+.m2-tfbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; }
+.m2-tfbar-lbl { font-size: 12.5px; font-weight: 700; color: var(--muted); margin-inline-end: 2px; }
+.m2-tfchip { font-size: 13px; font-weight: 700; padding: 5px 13px; border-radius: 999px; cursor: pointer; color: var(--ink); background: var(--panel2, #121726); border: 1px solid var(--line); transition: all .12s; }
+.m2-tfchip:hover { border-color: var(--accent, #2fe6c7); }
+.m2-tfchip.on { background: var(--accent, #2fe6c7); color: #061015; border-color: var(--accent, #2fe6c7); }
+/* per-timeframe leaders line (all view) */
+.m2-tflead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line); }
+.m2-tflead-lbl { font-size: 12.5px; font-weight: 800; color: var(--ink); }
+.m2-tflead-item { font-size: 12.5px; color: var(--ink); background: var(--panel2, #121726); border: 1px solid var(--line); border-radius: 8px; padding: 3px 9px; cursor: pointer; }
+.m2-tflead-item:hover { border-color: var(--accent, #2fe6c7); }
+.m2-tflead-item b { color: var(--accent, #2fe6c7); }
+/* selected-column emphasis in the grid */
+.m2-table th.m2-col-on { color: var(--accent, #2fe6c7); font-size: 14px; }
+.m2-table td.m2-cell.m2-col-on { outline: 2px solid var(--accent, #2fe6c7); outline-offset: -2px; }
+.m2-table td.m2-cell.m2-col-dim { opacity: .4; }
+/* per-timeframe leader — glowing box right in the grid (replaces the old text leader line) */
+.m2-table td.m2-cell.m2-lead { outline: 2px solid var(--accent, #2fe6c7); outline-offset: -2px; box-shadow: 0 0 11px 1px rgba(47,230,199,.6), inset 0 0 9px rgba(47,230,199,.28); position: relative; z-index: 1; border-radius: 4px; }
+
+/* ===== 🎯 MONEY-FLOW RADAR — compact one-line in/out; full detail (stocks) on hover ===== */
+.mf-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 10px; }
+.mf-pill { flex: 1 1 320px; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 12px; border: 1px solid var(--line, #263042); border-radius: 10px; background: var(--panel2, #121726);
+  position: relative; cursor: pointer; font-size: 13px; line-height: 1.3; transition: border-color .15s; }
+.mf-pill.mf-in  { border-inline-start: 4px solid var(--green, #26a69a); }
+.mf-pill.mf-out { border-inline-start: 4px solid var(--red, #ef5350); }
+.mf-pill.mf-in:hover, .mf-pill.mf-in.open   { border-color: var(--green, #26a69a); }
+.mf-pill.mf-out:hover, .mf-pill.mf-out.open { border-color: var(--red, #ef5350); }
+.mf-pill-dir { font-weight: 800; white-space: nowrap; }
+.mf-pill-dir.pos { color: var(--green, #26a69a); } .mf-pill-dir.neg { color: var(--red, #ef5350); }
+.mf-pill-sec { font-weight: 800; font-size: 15px; white-space: nowrap; }
+.mf-pill-etf { font-size: 12px; font-weight: 700; padding: 1px 7px; border-radius: 6px; background: rgba(255,255,255,.04); border: 1px solid var(--line, #263042); white-space: nowrap; }
+.mf-pill-etf.pos { color: var(--green, #26a69a); } .mf-pill-etf.neg { color: var(--red, #ef5350); }
+.mf-pill-str { font-size: 11px; font-weight: 800; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line, #263042); white-space: nowrap; }
+.mf-pill-str.s3 { color: var(--accent, #2fe6c7); border-color: var(--accent, #2fe6c7); box-shadow: 0 0 7px rgba(47,230,199,.35); }
+.mf-pill-str.s2 { color: var(--ink, #e6edf3); } .mf-pill-str.s1 { color: var(--muted, #8b98a9); }
+.mf-pill-part { font-size: 11px; color: var(--muted, #8b98a9); white-space: nowrap; }
+.mf-pill-part.broad { color: var(--accent, #2fe6c7); }
+.mf-pop-hint { margin-inline-start: auto; color: var(--muted, #8b98a9); font-size: 11px; opacity: .7; }
+/* hover / tap popover with the detail + stocks */
+.mf-pop { position: absolute; top: calc(100% + 4px); inset-inline-start: 0; inset-inline-end: 0; z-index: 60;
+  display: none; padding: 11px 12px; border: 1px solid var(--line, #263042); border-radius: 12px;
+  background: var(--panel, #0d1424); box-shadow: 0 12px 34px rgba(0,0,0,.5); }
+/* transparent bridge over the gap so the mouse can travel pill→popover without losing :hover */
+.mf-pop::before { content: ""; position: absolute; top: -10px; inset-inline: 0; height: 10px; }
+.mf-pill:hover .mf-pop, .mf-pill.open .mf-pop, .mf-pill:focus-within .mf-pop { display: block; }
+.mf-pop-h { font-size: 12px; font-weight: 700; margin-bottom: 8px; }
+.mf-pop-h.pos { color: var(--green, #26a69a); } .mf-pop-h.neg { color: var(--red, #ef5350); }
+.mf-facs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-bottom: 9px; }
+.mf-fac { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.mf-fac-l { white-space: nowrap; min-width: 62px; color: var(--muted, #8b98a9); }
+.mf-fac-bar { flex: 1; height: 5px; border-radius: 3px; background: rgba(255,255,255,.06); overflow: hidden; }
+.mf-fac-bar i { display: block; height: 100%; border-radius: 3px; }
+.mf-fac.on .mf-fac-bar i { background: var(--accent, #2fe6c7); }
+.mf-fac.off .mf-fac-bar i { background: var(--muted, #8b98a9); opacity: .5; }
+.mf-stocks { display: flex; flex-wrap: wrap; gap: 6px; }
+.mf-stk { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line, #263042); background: rgba(255,255,255,.03); font-size: 12px; cursor: pointer; }
+.mf-stk:hover { border-color: var(--accent, #2fe6c7); }
+.mf-stk-sym { font-weight: 800; }
+.mf-stk-tf { font-size: 10px; color: var(--accent, #2fe6c7); font-weight: 700; }
+.mf-stk-ft { font-size: 10px; }
+.mf-stk-chg { font-size: 11px; font-weight: 700; } .mf-stk-chg.pos { color: var(--green, #26a69a); } .mf-stk-chg.neg { color: var(--red, #ef5350); }
+.mf-pop-all { margin-top: 9px; font-size: 12px; font-weight: 700; color: var(--accent, #2fe6c7); cursor: pointer; }
+.mf-pop-all:hover { text-decoration: underline; }
+/* head-to-head: a close runner-up sector (XLF/XLY, XLE/XLK …) */
+.mf-pill-vs { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 6px; white-space: nowrap;
+  color: var(--muted, #8b98a9); border: 1px dashed var(--line, #263042); background: rgba(255,255,255,.03); }
+.mf-pop-vs { display: flex; align-items: center; gap: 8px; margin: 11px 0 9px; font-size: 11px; font-weight: 800;
+  letter-spacing: .04em; color: var(--muted, #8b98a9); text-transform: none; }
+.mf-pop-vs::before, .mf-pop-vs::after { content: ""; flex: 1; height: 1px; background: var(--line, #263042); }
+.mf-pop-runner { opacity: .96; }
+
+/* ===== preset share modal (short link + name) ===== */
+.ps-share { display: flex; flex-direction: column; gap: 11px; min-width: min(420px, 78vw); }
+.ps-share-lead { font-size: 13px; color: var(--muted, #8b98a9); line-height: 1.5; }
+.ps-share-name { font-size: 15px; font-weight: 800; color: var(--ink, #e6edf3); }
+.ps-share-link { width: 100%; box-sizing: border-box; padding: 9px 11px; border-radius: 9px; direction: ltr; text-align: left;
+  font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; color: var(--accent, #2fe6c7);
+  border: 1px solid var(--line, #263042); background: var(--panel2, #121726); }
+.ps-share-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ps-share-badge { font-size: 11px; font-weight: 800; padding: 2px 9px; border-radius: 999px; color: var(--green, #26a69a); border: 1px solid var(--green, #26a69a); }
+.ps-share-badge.warn { color: var(--muted, #8b98a9); border-color: var(--line, #263042); }

@@ -1,0 +1,352 @@
+:root{
+  /* REDESIGN 2026-10 — deep-blue base + futuristic teal accent (blue palette · dark = default).
+     Two theme axes: data-pal (blue default / green) × data-theme (dark default / light) → 4 combos.
+     Bullish/bearish (green/red) kept for data clarity, separate from the teal accent. */
+  --bg:#090e18; --panel:#111a2c; --panel2:#15233a; --cell:#15233a; --line:#26314a;
+  --green:#2fcf8e; --greenbg:rgba(47,207,142,.14); --greenbd:rgba(47,207,142,.5);   /* up */
+  --red:#fb6a7f; --redbg:rgba(251,106,127,.14); --redbd:rgba(251,106,127,.5);        /* down */
+  --ink:#eef3fb; --muted:#9fb1ca; --accent:#34e0d0; --accent-ink:#06231d; --accentbg:rgba(52,224,208,.12);   /* teal accent */
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", "DejaVu Sans Mono", monospace;
+  --soft:rgba(255,255,255,.055);
+  --soft2:rgba(255,255,255,.03);
+  --panelbd:transparent;
+  --panelsh:0 16px 40px rgba(0,0,0,.42);   /* premium floating card */
+  --tline:rgba(255,255,255,.05);
+}
+html[data-theme="light"]{
+  /* blue · light */
+  --bg:#eef2f8; --panel:#ffffff; --panel2:#f6f8fc; --cell:#eef2f8; --line:#d9e0ec;
+  --green:#12a56e; --greenbg:rgba(18,165,110,.13); --greenbd:rgba(18,165,110,.45);
+  --red:#e24863; --redbg:rgba(226,72,99,.12); --redbd:rgba(226,72,99,.45);
+  --ink:#131a2b; --muted:#56617a; --accent:#0fb6a4; --accent-ink:#ffffff; --accentbg:rgba(15,182,164,.12);
+  --soft:rgba(16,24,40,.05); --soft2:rgba(16,24,40,.035);
+  --panelbd:var(--line);
+  --panelsh:0 1px 3px rgba(16,24,40,.08),0 10px 26px rgba(16,24,40,.07);
+  --tline:var(--line);
+}
+/* ===== GREEN palette (data-pal="green") — overrides only the palette tokens ===== */
+html[data-pal="green"]{
+  --bg:#07140f; --panel:#0f1f18; --panel2:#132a20; --cell:#132a20; --line:#20392c;
+  --accent:#3ddc84; --accent-ink:#032417; --accentbg:rgba(61,220,132,.13);
+  --muted:#9ac3ac;
+}
+html[data-pal="green"][data-theme="light"]{
+  --bg:#eef4f0; --panel:#ffffff; --panel2:#f5faf6; --cell:#eef4f0; --line:#d6e5db;
+  --ink:#122018; --muted:#50685b; --accent:#14ad7d; --accent-ink:#ffffff; --accentbg:rgba(20,173,125,.12);
+}
+/* ===== FUTURISTIC palette (data-pal="pro") — Strat-School-inspired glass + luminous teal, serious-trading look.
+   Tokens only here; the glass/glow polish (scoped to .scanner-app so it never touches the off-body share-card
+   render nodes) lives at the end of this file. ===== */
+html[data-pal="pro"]{
+  --bg:#080a11; --panel:#121726; --panel2:#1a2133; --cell:#1a2133; --line:#2b3348;
+  --green:#26a69a; --greenbg:rgba(38,166,154,.16); --greenbd:rgba(38,166,154,.5);   /* TradingView pair (Adi 2026-11-01) */
+  --red:#ef5350; --redbg:rgba(239,83,80,.16); --redbd:rgba(239,83,80,.5);           /* TradingView pair */
+  --ink:#eef3fc; --muted:#93a0bd; --accent:#2fe6c7; --accent-ink:#04231d; --accentbg:rgba(47,230,199,.13);
+  --soft:rgba(255,255,255,.05); --soft2:rgba(255,255,255,.028);
+  --panelbd:rgba(47,230,199,.16);
+  --panelsh:0 22px 55px rgba(0,0,0,.55), 0 0 0 1px rgba(47,230,199,.05);
+}
+html[data-pal="pro"][data-theme="light"]{
+  --bg:#eef1f8; --panel:#ffffff; --panel2:#f4f7fc; --cell:#eef1f8; --line:#dde3ef;
+  --green:#1b8a7f; --greenbg:rgba(27,138,127,.13); --greenbd:rgba(27,138,127,.5);   /* TradingView, deepened for light */
+  --red:#e53935; --redbg:rgba(229,57,53,.12); --redbd:rgba(229,57,53,.5);
+  --ink:#121a2b; --muted:#55617a; --accent:#0c9d86; --accent-ink:#ffffff; --accentbg:rgba(12,157,134,.12);
+  --panelbd:rgba(12,157,134,.22);
+  --panelsh:0 1px 3px rgba(16,24,40,.08),0 12px 30px rgba(16,24,40,.08);
+}
+html[data-theme="light"] body{ background:var(--bg); color:var(--ink); }
+html[data-theme="light"] .panel{ box-shadow:var(--panelsh); }
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:'Heebo','Segoe UI',Arial,sans-serif;background:var(--bg);color:var(--ink);}
+a{color:var(--accent);text-decoration:none}
+button{font-family:inherit}
+.hidden{display:none !important}
+
+/* layout */
+.app{max-width:1180px;margin:0 auto;padding:20px}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.brand .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#17c08a,#16b877);
+  display:flex;align-items:center;justify-content:center;font-weight:800;color:#fff}
+.brand h1{font-size:20px;margin:0}
+.brand .tag{color:var(--muted);font-size:13px}
+
+.bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0}
+.spacer{flex:1}
+.btn{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;
+  padding:8px 14px;cursor:pointer;font-size:13px}
+.btn:hover{border-color:#3a4150}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.ghost{background:transparent}
+.sel{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:9px;
+  padding:8px 12px;font-size:13px}
+
+.tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);margin-bottom:18px}
+.tab{padding:10px 16px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:14px}
+.tab.active{color:var(--ink);border-bottom-color:var(--accent)}
+
+/* stat cards */
+.jr-scope-lbl{font-size:12.5px;font-weight:700;color:var(--muted);margin:0 0 9px;letter-spacing:.2px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:14px 16px}
+.card .lbl{color:var(--muted);font-size:12px;margin-bottom:6px}
+.card .val{font-size:21px;font-weight:800}
+.pos{color:var(--green)} .neg{color:var(--red)} .zero{color:var(--muted)}
+
+/* calendar */
+.calbar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.nav{display:flex;align-items:center;gap:8px}
+.nav button{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:8px;
+  width:34px;height:34px;font-size:16px;cursor:pointer}
+.mlabel{font-size:19px;font-weight:700;min-width:150px;text-align:center}
+.badge{border-radius:9px;padding:6px 12px;font-size:14px;font-weight:700}
+.badge.lbl{background:var(--panel);color:var(--muted);font-weight:600}
+.badge.pos{background:var(--greenbg);color:var(--green)}
+.badge.neg{background:var(--redbg);color:var(--red)}
+.badge.days{background:var(--accentbg);color:#cfd6e2}
+.grid{display:grid;grid-template-columns:repeat(7,1fr) 158px;gap:7px}
+.dow{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;padding:6px 4px;text-align:center}
+.cell{background:var(--cell);border:1px solid var(--line);border-radius:9px;min-height:104px;padding:8px 10px;position:relative}
+.cell.empty{background:transparent;border-color:transparent}
+.cell.pos{background:var(--greenbg);border-color:var(--greenbd)}
+.cell.neg{background:var(--redbg);border-color:var(--redbd)}
+.cell.clickable{cursor:pointer}
+.cell.clickable:hover{filter:brightness(1.12)}
+.dnum{position:absolute;top:7px;left:10px;font-size:13px;color:var(--muted)}
+.cell.pos .dnum,.cell.neg .dnum{color:var(--ink)}
+.pnl{margin-top:20px;font-size:19px;font-weight:800}
+.tcount{font-size:12px;color:var(--muted);margin-top:2px}
+.sub{font-size:11px;color:var(--muted);margin-top:5px}
+.wk{background:var(--panel);border:1px solid var(--line);border-radius:9px;min-height:104px;padding:12px 14px;
+  display:flex;flex-direction:column;justify-content:center}
+.wk .wlab{font-size:13px;color:var(--muted)}
+.wk .wval{font-size:20px;font-weight:800;margin:6px 0 8px}
+.wk .wdays{align-self:flex-start;background:var(--accentbg);color:#cfd6e2;border-radius:20px;padding:2px 10px;font-size:11px}
+
+/* equity curve */
+.chartbox{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:18px;margin-bottom:20px}
+.chartbox h3{margin:0 0 12px;font-size:15px}
+.eq-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.eq-head h3{margin:0}
+.eq-modes{display:inline-flex;gap:3px}
+.eq-mode-btn{font-size:13px;font-weight:800;min-width:34px;padding:4px 10px;border-radius:8px;cursor:pointer;background:rgba(255,255,255,.05);color:var(--muted);border:1px solid var(--line);transition:.15s}
+.eq-mode-btn.on{background:linear-gradient(90deg,rgba(12,145,96,.92),rgba(23,192,138,.85));color:#fff;border-color:transparent}
+.eq-mode-btn:hover:not(.on){color:var(--ink)}
+.eq-ranges{display:inline-flex;gap:3px;flex-wrap:wrap}
+.eq-range-btn{font-size:12px;font-weight:800;padding:4px 9px;border-radius:8px;cursor:pointer;background:rgba(255,255,255,.05);color:var(--muted);border:1px solid var(--line);transition:.15s}
+.eq-range-btn.on{background:linear-gradient(90deg,rgba(12,145,96,.92),rgba(23,192,138,.85));color:#fff;border-color:transparent}
+.eq-range-btn:hover:not(.on){color:var(--ink)}
+.eq-daterange{display:inline-flex;align-items:center;gap:4px;margin-inline-start:8px}
+.eq-dr-lbl{font-size:11px;color:var(--muted);font-weight:700}
+.eq-date{font-size:11px;padding:3px 6px;border-radius:7px;background:rgba(255,255,255,.05);color:var(--ink);border:1px solid var(--line);color-scheme:dark}
+.eq-date:hover{border-color:var(--lux-g2,#17c08a)}
+.eq-base-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 2px;font-size:12.5px}
+.eq-base-row label{display:inline-flex;align-items:center;gap:4px;font-weight:600}
+.eq-base-inp{width:110px;padding:5px 8px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-size:13px;font-weight:700}
+.eq-base-row .muted{font-size:11px}
+svg .axis{stroke:var(--line);vector-effect:non-scaling-stroke}
+svg .eqline{fill:none;stroke:var(--accent);stroke-width:2;vector-effect:non-scaling-stroke}
+svg .eqarea{fill:url(#eqgrad)}
+/* bounded height (won't grow with width/zoom), uniform-scaled so it isn't squished */
+.eqsvg{cursor:crosshair;display:block;width:100%;max-height:440px;margin:0 auto}
+.eqsvg text{direction:ltr}   /* numbers/dates stay LTR on the RTL page (else the label clips) */
+.eqhover{transition:opacity .1s;pointer-events:none}
+.eqcross{stroke:var(--muted);stroke-width:1;stroke-dasharray:4 4;opacity:.7}
+.eqdot{stroke:#0f1116;stroke-width:2}
+.eqtipbg{fill:var(--panel2);stroke:var(--line)}
+.eqtiptext{font-size:14px;font-weight:800;fill:#fff}
+.eqtoptext{font-size:14px;font-weight:800;fill:#fff}
+.eqbottext{font-size:12px;font-weight:700;fill:var(--ink)}
+
+/* tables */
+.tablebox{background:var(--panel);border:1px solid var(--line);border-radius:13px;overflow:hidden}
+.jr-day-total td{border-top:2px solid var(--line);border-bottom:none;background:rgba(255,255,255,.035)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:10px 12px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.03em;cursor:pointer;user-select:none}
+tbody tr:hover{background:var(--panel2)}
+tr:last-child td{border-bottom:none}
+.pill{display:inline-block;border-radius:20px;padding:2px 9px;font-size:11px}
+.pill.long{background:var(--greenbg);color:var(--green)} .pill.short{background:var(--redbg);color:var(--red)}
+.pill.opt{background:var(--accentbg);color:#cfd6e2} .pill.stk{background:#22303a;color:#7fc4e0}
+.jsym{cursor:pointer;font-weight:700;border-bottom:1px dashed transparent;transition:color .12s}
+.jsym:hover{color:var(--accent);border-bottom-color:currentColor}
+.opt-px{width:84px;background:var(--accentbg);color:var(--ink);border:1px solid var(--accent);border-radius:7px;padding:4px 8px;font-size:13px;font-weight:600}
+.opt-px::placeholder{color:var(--muted);font-weight:400}
+.opt-px:focus{outline:none;box-shadow:0 0 0 2px rgba(23,192,138,.35)}
+.trades-aggbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 10px;padding:8px 12px;background:var(--accentbg);border-radius:8px}
+.agg-toggle{display:inline-flex;align-items:center;gap:7px;cursor:pointer;font-size:13px;font-weight:600}
+.agg-toggle input{width:16px;height:16px;cursor:pointer;accent-color:var(--accent)}
+.agg-badge{display:inline-block;font-size:10.5px;font-weight:800;background:var(--accent);color:#fff;border-radius:6px;padding:1px 6px;vertical-align:middle}
+.yearly-table th,.yearly-table td{text-align:center;padding:7px 9px;font-size:12.5px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.yearly-table tfoot td{border-top:2px solid var(--line);padding-top:9px}
+.yearly-table td.pos{color:#4fe39b}.yearly-table td.neg{color:#ff6b7a}
+.jr-totalpnl{margin:0 0 14px;padding:14px 18px;background:linear-gradient(90deg,rgba(23,192,138,.12),rgba(12,145,96,.05));border:1px solid rgba(23,192,138,.3)}
+.jtp-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.jtp-lbl{font-size:15px;font-weight:800}
+.jtp-val{font-size:27px;font-weight:800;font-variant-numeric:tabular-nums}
+.jtp-val.pos{color:#4fe39b}.jtp-val.neg{color:#ff6b7a}
+.jtp-sub{margin-top:6px;font-size:12.5px;color:var(--muted)}
+.jtp-sub b.pos{color:#4fe39b}.jtp-sub b.neg{color:#ff6b7a}
+.cal-granbar{margin-bottom:10px}
+.cal-mgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:6px}
+.cal-mgrid.q{grid-template-columns:repeat(3,1fr)}
+.cal-mcell{background:#0f1826;border:1px solid var(--line);border-radius:12px;padding:14px 16px;min-height:92px;display:flex;flex-direction:column;gap:5px;transition:border-color .12s}
+.cal-mcell.pos{background:rgba(22,184,119,.09);border-color:rgba(22,184,119,.3)}
+.cal-mcell.neg{background:rgba(224,82,79,.09);border-color:rgba(224,82,79,.3)}
+.cal-mcell.empty{opacity:.5}
+.cal-mcell.clickable{cursor:pointer}
+.cal-mcell.clickable:hover{border-color:var(--accent)}
+.cm-name{font-weight:700;font-size:13.5px;color:var(--ink)}
+.cm-pnl{font-size:21px;font-weight:800;font-variant-numeric:tabular-nums}
+.cm-pnl.pos{color:#4fe39b}.cm-pnl.neg{color:#ff6b7a}
+.cm-sub{font-size:11.5px;color:var(--muted)}
+@media(max-width:640px){.cal-mgrid,.cal-mgrid.q{grid-template-columns:repeat(2,1fr);gap:9px}.cal-mcell{padding:11px 12px;min-height:78px}.cm-pnl{font-size:17px}}
+.pill.src{background:#2a2a33;color:#aab}
+
+/* forms / modal */
+.modal-bg{position:fixed;inset:0;background:rgba(6,8,12,.7);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px;width:min(560px,94vw);max-height:90vh;overflow:auto}
+.modal h2{margin:0 0 16px;font-size:18px}
+.form{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form .full{grid-column:1/3}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:12px;color:var(--muted)}
+.field input,.field select,.field textarea{background:var(--bg);color:var(--ink);border:1px solid var(--line);
+  border-radius:8px;padding:9px 10px;font-size:13px;font-family:inherit}
+.field textarea{resize:vertical;min-height:60px}
+.modal-actions{display:flex;justify-content:flex-start;gap:10px;margin-top:18px;flex-wrap:wrap}
+.pnlpreview{font-size:15px;font-weight:700}
+/* manual-entry wizard step indicator */
+.wiz-steps{display:flex;align-items:center;gap:8px;margin:0 0 16px;justify-content:center}
+.wiz-steps .wiz-dot{font-size:12px;font-weight:700;color:var(--muted);background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:5px 14px}
+.wiz-steps .wiz-dot.on{color:#fff;background:var(--accent);border-color:transparent}
+.wiz-steps .wiz-dot.done{color:var(--accent);border-color:var(--accent)}
+.wiz-steps .wiz-arrow{color:var(--muted);font-size:13px}
+
+/* dropzone */
+.drop{border:2px dashed var(--line);border-radius:14px;padding:34px;text-align:center;color:var(--muted);
+  background:var(--panel);cursor:pointer;transition:.15s}
+.drop.hot{border-color:var(--accent);background:var(--accentbg);color:var(--ink)}
+.drop b{color:var(--ink)}
+
+.empty-state{text-align:center;color:var(--muted);padding:60px 20px}
+.empty-state .big{font-size:44px;margin-bottom:10px}
+.note{color:var(--muted);font-size:12px;line-height:1.6;margin-top:16px}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;padding:12px 18px;font-size:13px;z-index:60;box-shadow:0 6px 24px rgba(0,0,0,.4)}
+
+/* ===== MOBILE (journal) — phone polish (2026-07-15) ===== */
+@media (max-width: 640px) {
+  /* wide trade tables must SCROLL, not get clipped (was overflow:hidden → columns cut off) */
+  .tablebox { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tablebox table { font-size: 12px; }
+  .tablebox th, .tablebox td { padding: 8px 7px; white-space: nowrap; }
+  /* tabs: fit three across, tap-friendly */
+  .tabs { gap: 2px; margin-bottom: 14px; }
+  .tab { padding: 9px 11px; font-size: 13px; }
+  /* stat cards already 2-col via app.css; equity chart box tighter */
+  .chartbox { padding: 13px 12px; margin-bottom: 16px; }
+  .chartbox h3 { font-size: 14px; }
+  /* CSV drop zone smaller */
+  .drop { padding: 22px 14px; }
+  /* CALENDAR: drop the weekly-summary column → clean 7-day month grid that fits the phone */
+  .grid { grid-template-columns: repeat(7, 1fr); gap: 4px; }
+  .grid .wk, .grid .dow-wk { display: none; }
+  .dow { font-size: 10px; padding: 4px 1px; letter-spacing: 0; }
+  .cell { min-height: 58px; padding: 5px 4px; border-radius: 7px; }
+  .dnum { font-size: 11px; top: 4px; left: 5px; }
+  .cell .pnl { margin-top: 15px; font-size: 12.5px; }
+  .cell .tcount, .cell .sub { font-size: 9.5px; margin-top: 1px; }
+  /* month nav bar compact */
+  .calbar { gap: 6px; margin-bottom: 12px; }
+  .mlabel { font-size: 16px; min-width: 96px; }
+  .nav button { width: 30px; height: 30px; font-size: 15px; }
+  .badge { padding: 5px 9px; font-size: 12px; }
+}
+
+/* =========================================================================
+   FUTURISTIC palette polish (data-pal="pro") — ALL effects scoped to
+   .scanner-app, the on-screen app shell. Share-card PNGs render in detached
+   nodes appended to document.body (off-shell) and bake colors inline, so none
+   of this reaches html2canvas. Keep every rule under .scanner-app.
+   ========================================================================= */
+/* ambient glow backdrop (dark only) — shorthand with var(--bg) as the base layer,
+   because landing.css sets `body{background: <shorthand>}` after this file and would
+   otherwise leave the ground transparent. */
+html[data-pal="pro"]:not([data-theme="light"]) body{
+  background:
+    radial-gradient(1100px 620px at 85% -10%, rgba(47,230,199,.075), transparent 60%),
+    radial-gradient(820px 520px at 3% 2%, rgba(123,116,240,.055), transparent 55%),
+    var(--bg);
+  background-attachment:fixed;
+}
+/* glass panels + luminous hairline */
+html[data-pal="pro"] .scanner-app .panel{ border-radius:16px; border-top-color:var(--panelbd); }
+html[data-pal="pro"]:not([data-theme="light"]) .scanner-app .panel{
+  background:rgba(18,23,38,.82);
+  -webkit-backdrop-filter:blur(10px) saturate(1.12); backdrop-filter:blur(10px) saturate(1.12);
+}
+/* ⚠️ backdrop-filter makes the element a containing block for position:fixed/absolute children AND a
+   stacking context, which TRAPPED the filter-bar popover (.fpop-body, z-index:70) inside the filters
+   panel — so the later table panel painted over it (Adi saw the open filter behind the table during a
+   live). Keep the filters bar as a solid (opaque) panel with NO backdrop-filter so its popover escapes
+   and its z-index wins globally. Opaque bg so there's no blur-less see-through. */
+html[data-pal="pro"]:not([data-theme="light"]) .scanner-app .panel.filters.fbar{
+  -webkit-backdrop-filter:none; backdrop-filter:none; background:#121726;
+}
+/* nav active item glow */
+html[data-pal="pro"] .scanner-app .side-nav a.active{ box-shadow:inset -3px 0 0 var(--accent), 0 0 20px rgba(47,230,199,.18); }
+/* primary action glow on hover */
+html[data-pal="pro"] .scanner-app .btn.primary:hover{ box-shadow:0 0 22px rgba(47,230,199,.4); }
+/* terminal-style tabular figures on the hero tile numbers */
+html[data-pal="pro"] .scanner-app .bc-card .bcc-pct,
+html[data-pal="pro"] .scanner-app .bc-card .bcc-usd,
+html[data-pal="pro"] .scanner-app .idx-card .ic-chg,
+html[data-pal="pro"] .scanner-app .idx-card .ic-px{
+  font-family:'JetBrains Mono','Rubik',ui-monospace,monospace; font-variant-numeric:tabular-nums;
+}
+/* subtle luminosity on live/status accents (dark only, kept off red/green data) */
+html[data-pal="pro"]:not([data-theme="light"]) .scanner-app .mkt-live,
+html[data-pal="pro"]:not([data-theme="light"]) .scanner-app .tf-ind-badge{ text-shadow:0 0 14px rgba(47,230,199,.28); }
+
+/* ===== VIVID green/red across the WHOLE live UI (Adi 2026-11-01). Many components hardcode their own
+   green/red shades (#3fe0a0 / #4fe39b / #22e39b / #ff6b7a …) or a separate --mfpos/--mfneg family, so the
+   --green/--red tokens alone didn't reach them. Re-point them all to the vivid tokens. ALL rules scoped to
+   .scanner-app, so the off-body share-card PNG render nodes are untouched. ===== */
+html[data-pal="pro"] .scanner-app :is(.pos, .up, .bull){ color:var(--green) !important; }
+html[data-pal="pro"] .scanner-app :is(.neg, .down, .dn, .bear){ color:var(--red) !important; }
+/* candle "above/below open" badges */
+html[data-pal="pro"] .scanner-app .tf.up{ color:var(--green); background:var(--greenbg); box-shadow:inset 0 0 0 1px var(--greenbd); }
+html[data-pal="pro"] .scanner-app .tf.down{ color:var(--red); background:var(--redbg); box-shadow:inset 0 0 0 1px var(--redbd); }
+/* sector heat-map tiles (מפת חום · סקטורים) — were a muted rgba; make them vivid by magnitude */
+html[data-pal="pro"] .scanner-app .mh-u1{ background:rgba(38,166,154,.16); }
+html[data-pal="pro"] .scanner-app .mh-u2{ background:rgba(38,166,154,.32); }
+html[data-pal="pro"] .scanner-app .mh-u3{ background:rgba(38,166,154,.50); }
+html[data-pal="pro"] .scanner-app .mh-d1{ background:rgba(239,83,80,.16); }
+html[data-pal="pro"] .scanner-app .mh-d2{ background:rgba(239,83,80,.32); }
+html[data-pal="pro"] .scanner-app .mh-d3{ background:rgba(239,83,80,.50); }
+/* money-flow battery + alert-center (live) use their own --mfpos/--mfneg — re-point in-scope */
+html[data-pal="pro"] .scanner-app .mf-card,
+html[data-pal="pro"] .scanner-app .ac2-card{ --mfpos:var(--green); --mfneg:var(--red); }
+/* money-flow ranking bars: keep the bright "strong" variant vivid too */
+html[data-pal="pro"] .scanner-app .rk.u2 .fill{ background:var(--green); }
+html[data-pal="pro"] .scanner-app .rk.u2 .pct{ color:var(--green); }
+html[data-pal="pro"] .scanner-app .rk.d2 .fill{ background:var(--red); }
+html[data-pal="pro"] .scanner-app .rk.d2 .pct{ color:var(--red); }
+
+/* ===== Unify ALL fonts to one family across the live app (Adi 2026-11-01). The UI mixed
+   Heebo / Rubik / Inter / JetBrains-Mono / Varela; force Heebo everywhere. Scoped to .scanner-app
+   so the off-body share-card PNG render nodes (pixel-tuned to Rubik/Inter) keep their fonts. ===== */
+.scanner-app, .scanner-app *{ font-family:'Heebo','Noto Sans Hebrew','Segoe UI',Arial,sans-serif !important; }
+
+/* ===== BARS use the up/down tokens (TradingView pair) — same as tiles + numbers, one consistent
+   green/red across the whole app (Adi 2026-11-01). Covers the magnitude bars (.rk .fill), the breadth
+   split bar (.bigbreadth .bseg) and the cockpit breadth bar (.cp-brbar + its green fill child). ===== */
+.scanner-app .rk.u1 .fill, .scanner-app .rk.u2 .fill, .scanner-app .rk.u3 .fill{ background:var(--green) !important; }
+.scanner-app .rk.d1 .fill, .scanner-app .rk.d2 .fill, .scanner-app .rk.d3 .fill{ background:var(--red) !important; }
+.scanner-app .bigbreadth .bseg.up{ background:var(--green) !important; }
+.scanner-app .bigbreadth .bseg.down{ background:var(--red) !important; }
+.scanner-app .cp-brbar{ background:var(--red) !important; }
+.scanner-app .cp-brbar > span{ background:var(--green) !important; }

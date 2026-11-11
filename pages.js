@@ -1,0 +1,10313 @@
+/* StratNinja Platform — scanner pages + sidebar navigation.
+ * Pages render with DEMO data; live data (Massive/Polygon) will be wired next.
+ * Candle color = direction (close vs open): green=up, red=down, gray=doji —
+ * applied to ALL Strat types (1/2U/2D/3), which reveals "conflict" candles.
+ */
+(function () {
+  "use strict";
+  const $ = s => document.querySelector(s);
+  let LIVE = null;  // live market snapshot from Supabase (null = show demo)
+  let FLOW = null;  // AI money-flow analysis (market_snapshot id='flow') for the "לאן הכסף הולך" page
+  let SCAN = null;  // live per-ticker scanner data (null = show demo)
+  let SCAN_YDAY = null;   // yesterday's snapshot (loaded lazily when the scanner "📅 אתמול" view is opened)
+  let scanView = "live";  // scanner data view: "live" | "yday"
+
+  // ---------- helpers ----------
+  const SHAPE_HE = { doji: "דוג'י", hammer: "פטיש 🔨", shooter: "כוכב נופל ⭐", marubozu: "מרובוזו", spinning: "סביבון", normal: "נר רגיל", flat: "—" };
+  const SHAPE_OPTS = [["all", "הכל"], ["hammer", "🔨 פטיש (Hammer)"], ["shooter", "⭐ כוכב נופל (Shooter)"], ["doji", "דוג'י (Doji)"], ["marubozu", "מרובוזו (Marubozu)"], ["spinning", "סביבון (Spinning)"]];
+  const SHAPE_MULTI = SHAPE_OPTS.slice(1).map(o => ({ val: o[0], label: o[1] }));   // multi-select options (drop "all")
+  // ---- Strat sequence builder (C2 ← C1 ← CC): each cell multi-select, matched against the directional seq3d ----
+  const SEQ_TYPES = [{ val: "1", label: "⏸️ 1" }, { val: "2U", label: "🔼 2U" }, { val: "2D", label: "🔽 2D" }, { val: "3", label: "💥 3" }];
+  const SEQ_CELLS = [
+    { k: "c2", code: "C2", he: "2 אחורה", tip: "C2 = הנר הראשון ברצף (2 נרות אחורה)" },
+    { k: "c1", code: "C1", he: "1 אחורה", tip: "C1 = הנר האמצעי (1 נר אחורה)" },
+    { k: "cc", code: "CC", he: "הנר הנוכחי", tip: "CC = Current Candle — הנר הנוכחי (האחרון)" },
+  ];
+  function seqActive() { const q = scanState.seq; return !!(q.c2.length || q.c1.length || q.cc.length || q.c2col || q.c1col || q.cccol); }
+  // C2/C1/CC result columns (shown only while the builder is active) — the directional last-3 of the primary TF
+  function _seqbt(v) { const cls = v === "2U" ? "b2u" : v === "2D" ? "b2d" : v === "3" ? "b3" : "b1"; return '<td><span class="seqbt ' + cls + '">' + (v || "—") + "</span></td>"; }
+  function seqCells(t) {
+    if (!seqActive()) return "";
+    const tf = scanState.tfs[0] || "D";
+    const sd = ((t[tf] || t.D || {}).seq3d || "").split("-");   // [C2, C1, CC]
+    return _seqbt(sd[0]) + _seqbt(sd[1]) + _seqbt(sd[2]);
+  }
+  function _seqNorm(x) { return (x === "2U" || x === "2D") ? "2" : x; }
+  function seqPatternName() {
+    const q = scanState.seq;
+    if (!seqActive()) return "";
+    if (q.c2.length === 1 && q.c1.length === 1 && q.cc.length === 1) {   // fully specified → try to name it
+      const a = q.c2[0], b = q.c1[0], d = q.cc[0];
+      const dir = d === "2U" ? " · שורי" : d === "2D" ? " · דובי" : "";
+      const seq = _seqNorm(a) + "-" + _seqNorm(b) + "-" + _seqNorm(d);
+      let base = "רצף מותאם";
+      if (seq === "1-2-2") base = "RevStrat (1-2-2)";
+      else if (seq === "2-1-2") base = (_seqNorm(a) === "2" && a !== d ? "2-1-2 היפוך" : "2-1-2");
+      else if (seq === "3-1-2") base = "3-1-2";
+      else if (seq === "1-1-2") base = "פריצה מהתכנסות כפולה";
+      else if (seq === "2-2-2" || seq === "3-2-2") base = "שרשרת כיוונית";
+      return base + dir;
+    }
+    // partial or multi-select → show the raw sequence with wildcards (empty cell = "כל")
+    const disp = a => a.length ? a.join("/") : "כל";
+    return disp(q.c2) + " ← " + disp(q.c1) + " ← " + disp(q.cc);
+  }
+  function seqBuilder() {
+    const chip = (cell, t) => '<button class="seq-cc' + (scanState.seq[cell].indexOf(t.val) >= 0 ? " on" : "") + '" data-seqcell="' + cell + '" data-seqval="' + t.val + '">' + t.label + "</button>";
+    const colBtn = (cell, v, ico, tip) => '<button class="seq-col' + (scanState.seq[cell + "col"] === v ? " on " + v : "") + '" data-seqcol="' + cell + '" data-seqcolv="' + v + '" title="' + tip + '">' + ico + "</button>";
+    const cellHtml = c => '<div class="seq-cell"><div class="seq-lbl" title="' + escAttr(c.tip) + '"><span class="seq-code">' + c.code + '</span><span class="seq-he">· ' + c.he + "</span></div><div class=\"seq-chips\">" + SEQ_TYPES.map(t => chip(c.k, t)).join("") +
+      '<span class="seq-cols">' + colBtn(c.k, "up", "🟢", "נסחר מעל הפתיחה (נר ירוק)") + colBtn(c.k, "down", "🔴", "נסחר מתחת לפתיחה (נר אדום)") + "</span></div></div>";
+    const nameLine = seqActive()
+      ? '<div class="seq-name">🧩 <span class="muted">אתה בונה:</span> <b>' + escHtml(seqPatternName()) + '</b> <button class="chip" id="seqClear" style="font-size:11px;padding:2px 9px">✕ נקה</button></div>'
+      : '<div class="seq-name muted" style="font-size:12px">בחר סוגי נר בכל תא (בחירה מרובה) · תא ריק = כל נר · השם יופיע כאן</div>';
+    const quick = '<div class="seq-quick"><span class="muted" style="font-size:11px">מהיר:</span>' +
+      ["1|2D|2U:RevStrat 1-2-2", "2U|1|2D:2-1-2 היפוך", "3|1|2U:3-1-2", "1|1|2U:התכנסות→פריצה"].map(x => {
+        const p = x.split(":"); return '<button class="seq-q" data-seqfill="' + p[0] + '">' + p[1] + "</button>";
+      }).join("") + "</div>";
+    return '<div class="fgrp fgrp-seq"><details class="seq-details"' + (seqActive() ? " open" : "") + '>' +
+      '<summary class="seq-summary">🧩 <b>תבנית (רצף Strat)</b>' + (seqActive() ? ' <span class="seq-sumname">' + escHtml(seqPatternName()) + "</span>" : ' <span class="muted" style="font-size:11px">· C2 ← C1 ← CC · בחירה מרובה · לחץ לפתיחה</span>') + "</summary>" +
+      '<div class="seq-build">' + SEQ_CELLS.map((c, i) => cellHtml(c) + (i < SEQ_CELLS.length - 1 ? '<span class="seq-arrow">←</span>' : "")).join("") + "</div>" +
+      nameLine + quick + "</details></div>";
+  }
+  const BR_HE = { up: "היפוך 2D 🔼 (reclaim מלמטה)", down: "היפוך 2U 🔽 (rejection מלמעלה)" };
+  const BROAD_OPTS = [["off", "הכל"], ["any", "⚡ כל היפוך"], ["up", "🔼 היפוך 2D (שורי)"], ["down", "🔽 היפוך 2U (דובי)"],
+    ["1-1", "🎯 התכנסות כפולה (1 → 1) — קפיץ דחוס לפני פריצה"],
+    ["3-2", "🔷 3 → 2 (נר חוץ ← פריצה)"], ["1-2", "1 → 2 (פנימי ← פריצה)"], ["2-2", "2 → 2 (היפוך)"],
+    ["2-1-2", "לקראת 2-1-2"], ["3-1-2", "לקראת 3-1-2"], ["1-3-2", "לקראת 1-3-2"], ["1-2-2", "לקראת 1-2-2"], ["3-2-2", "לקראת 3-2-2"]];
+  const _isCombo = v => /^\d(-\d){1,2}$/.test(v || "");
+  // sector → SPDR sector ETF (the ETF that holds the stock)
+  const SECTOR_ETF = { "Technology": "XLK", "Financials": "XLF", "Health Care": "XLV", "Energy": "XLE", "Consumer Disc.": "XLY", "Communication": "XLC", "Industrials": "XLI", "Consumer Staples": "XLP", "Materials": "XLB", "Real Estate": "XLRE", "Utilities": "XLU" };
+  function etfFor(sec) { return SECTOR_ETF[sec] || ""; }
+  const SECTOR_HE = { "Technology": "טכנולוגיה", "Financials": "פיננסים", "Health Care": "בריאות", "Energy": "אנרגיה", "Consumer Disc.": "צריכה מחזורית", "Communication": "תקשורת", "Industrials": "תעשייה", "Consumer Staples": "צריכה בסיסית", "Materials": "חומרי גלם", "Real Estate": 'נדל"ן', "Utilities": "תשתיות", "Crypto": "קריפטו", "אחר": "אחר" };
+  // definite forms for use INSIDE a sentence (the ה goes in the right place, not just prefixed):
+  // "חומרי גלם"→"חומרי הגלם", "צריכה בסיסית"→"הצריכה הבסיסית", single words just take a leading ה.
+  const SECTOR_HE_DEF = { "Technology": "הטכנולוגיה", "Financials": "הפיננסים", "Health Care": "הבריאות", "Energy": "האנרגיה", "Consumer Disc.": "הצריכה המחזורית", "Communication": "התקשורת", "Industrials": "התעשייה", "Consumer Staples": "הצריכה הבסיסית", "Materials": "חומרי הגלם", "Real Estate": 'הנדל"ן', "Utilities": "התשתיות", "Crypto": "הקריפטו", "אחר": "האחרים" };
+  function secHe(name) { return SECTOR_HE[name] || name; }
+  function secHeDef(name) { return SECTOR_HE_DEF[name] || ("ה" + (SECTOR_HE[name] || name)); }
+  function escAttr(s) { return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;"); }
+  function escHtml(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+  // sub-sector (industry) → closest tradeable ETF, matched by keyword (ordered specific→general).
+  // Validated against all 171 live industries; unmapped ones are genuine ETF/macro categories.
+  const INDUSTRY_ETF_KW = [
+    ["SMH", ["semiconductor", "מוליכים למחצה", "שבבי", "וחומרה ל-ai", "חומרה ל-ai"]],
+    ["XBI", ["biotechnology", "ביוטכנולוגיה", "עריכה גנטית"]],
+    ["IHI", ["medical devices", "מכשור רפואי"]],
+    ["IHF", ["שירותי בריאות", "ביטוח רפואי", "healthcare plans"]],
+    ["IGV", ["תוכנה", "software", "saas", "וענן", "תוכנת ai", "פלטפורמות"]],
+    ["CIBR", ["סייבר", "cyber", "אבטחת רשת", "אבטחת מידע"]],
+    ["QTUM", ["קוונט", "quantum"]],
+    ["BOTZ", ["בינה מלאכותית", "robotics"]],
+    ["FINX", ["פינטק", "fintech"]],
+    ["VNQ", ["נדל", "reit", "real estate"]],
+    ["XOP", ["e&p"]],
+    ["OIH", ["equipment & services"]],
+    ["AMLP", ["midstream"]],
+    ["ICLN", ["אנרגיה נקייה", "אנרגיה מתחדשת", "renewable", "clean energy"]],
+    ["KRE", ["banks - regional", "בנקים אזוריים"]],
+    ["KBE", ["banks - diversified", "banks", "בנקים"]],
+    ["KIE", ["ביטוח", "insurance"]],
+    ["IAI", ["בורסות", "ברוקרים", "broker", "exchange"]],
+    ["BLOK", ["בלוקצ", "blockchain", "קריפטו", "crypto", "כורי"]],
+    ["GDX", ["gold", "זהב", "מתכות יקרות", "כריית מתכות"]],
+    ["URA", ["אורניום", "uranium", "גרעין", "nuclear"]],
+    ["LIT", ["ליתיום", "lithium", "מתכות נדירות"]],
+    ["XME", ["מתכות וכרייה", "כרייה", "מתכות תעשייתיות", "industrial metals", "other industrial metals", "mining"]],
+    ["JETS", ["חברות תעופה", "תעופה", "airline"]],
+    ["DRIV", ["רכב", "auto parts", "auto "]],
+    ["ITA", ["חלל", "ביטחון", "aerospace", "defense"]],
+    ["IYT", ["תחבורה", "לוגיסטיקה", "transport", "logistic", "freight", "railroad", "trucking", "airline"]],
+    ["IBUY", ["מסחר אלקטרוני", "e-commerce", "online retail"]],
+    ["PEJ", ["תיירות", "פנאי", "leisure", "gambling", "hotel", "travel"]],
+    ["XRT", ["קמעונאות", "apparel retail", "retail"]],
+    ["FDN", ["internet content", "internet"]],
+    ["XLC", ["מדיה", "תקשורת", "telecom", "entertainment", "communication"]],
+    ["ITB", ["בנייה", "homebuild", "building products", "building materials"]],
+    ["XLP", ["מזון", "משקאות", "packaged foods", "צריכה בסיסי", "מוצרי בית", "טיפוח", "staples", "beverage"]],
+    ["XLB", ["כימיקלים", "chemicals", "packaging", "containers"]],
+    ["GRID", ["חשמול"]],
+    ["XLU", ["utilities", "electric"]],
+    ["MOO", ["חקלאות", "agricult"]],
+    ["ARKK", ["צמיחה גבוהה", "מומנטום"]],
+    ["FXI", ["סין", "china"]],
+    ["SRVR", ["מרכזי נתונים", "data center"]],
+    ["XLE", ["אנרגיה", "oil & gas", "נפט"]],
+    ["XLV", ["בריאות", "health", "diagnostics", "pharma"]],
+    ["XLI", ["תעופה", "תעשייה", "industrial", "business services", "machinery"]],
+    ["XLK", ["טכנולוגיה", "technology", "electronic components", "information technology"]],
+    ["XLF", ["פיננסים", "financ", "asset management", "credit", "מנהלי נכסים"]],
+  ];
+  function indEtf(ind) {
+    if (!ind) return "";
+    const s = String(ind).toLowerCase();
+    for (let i = 0; i < INDUSTRY_ETF_KW.length; i++) {
+      const kws = INDUSTRY_ETF_KW[i][1];
+      for (let j = 0; j < kws.length; j++) { if (s.indexOf(kws[j].toLowerCase()) >= 0) return INDUSTRY_ETF_KW[i][0]; }
+    }
+    return "";
+  }
+  function etfChip(t) { return t ? '<span class="tsym clickable etf-chip" data-chart="' + t + '" title="תעודת סל · לחץ לגרף">' + t + "</span>" : ""; }
+  // broad SPDR sector ETFs — must NOT appear as a sub-sector tag (that would just duplicate the sector's own ETF)
+  const SECTOR_ETF_VALS = Object.keys(SECTOR_ETF).map(function (k) { return SECTOR_ETF[k]; });
+  // normalize a sub-sector label so "אנרגיה - נפט וגז" and "אנרגיה-נפט וגז" match (dash/space variants)
+  function _normInd(s) { return String(s || "").replace(/\s*[-–—]\s*/g, "-").replace(/\s+/g, " ").trim(); }
+  function subEtfFor(ind) {
+    if (!ind) return "";
+    // prefer the server's authoritative sub-sector→ETF map (LIVE.subsectors carries the real ETF, e.g. XOP);
+    // the keyword heuristic below is only a fallback and can mis-match a sub-sector to its parent sector ETF.
+    if (LIVE && LIVE.subsectors) { const k = _normInd(ind), m = LIVE.subsectors.find(s => _normInd(s.ind) === k); if (m && m.etf) return m.etf; }
+    const e = indEtf(ind);
+    if (!e || SECTOR_ETF_VALS.indexOf(e) >= 0) return "";
+    // never let the keyword heuristic BORROW a thematic ETF that authoritatively belongs to ANOTHER
+    // sub-sector (e.g. "רכב"→DRIV when DRIV is really "רכב אוטונומי", or plain "ליתיום"→LIT owned by
+    // "ליתיום וסוללות") — that produced duplicate ETF cards in the continuity view.
+    if (LIVE && LIVE.subsectors && LIVE.subsectors.some(s => s.etf === e)) return "";
+    return e;
+  }
+  function cell(t, c) { return { t: t, c: c }; }
+  function tf(x, sym, tfl) {
+    const c = x && x.c ? x.c : "doji";
+    const t = x && x.t ? x.t : "1";
+    const sh = x && x.sh ? x.sh : "";
+    const parts = [];
+    if (sh && SHAPE_HE[sh]) parts.push(SHAPE_HE[sh]);
+    if (x && x.br && BR_HE[x.br]) parts.push(BR_HE[x.br]);
+    const title = parts.length ? ' title="' + parts.join(" · ") + '"' : "";
+    const brMark = x && x.br ? ' style="text-decoration:underline dotted"' : "";
+    const clk = sym ? ' clickable" data-chart="' + sym + '" data-tf="' + tfl + '"' : '"';
+    return '<span class="tf ' + c + clk + title + brMark + ">" + t + "</span>";
+  }
+  const DEMO = '<div class="demo-flag">🧪 נתוני דמו — יחובר למפתח Massive/Polygon החי בשלב הבא</div>';
+  function money(v, d) { d = d == null ? 2 : d; return "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }); }
+  function pct(v) { const s = (v >= 0 ? "+" : "") + v.toFixed(2) + "%"; return '<span class="' + (v > 0 ? "pos" : v < 0 ? "neg" : "zero") + '">' + s + "</span>"; }
+  function copyToClipboard(text, done) {
+    const finish = () => { if (done) done(); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(finish).catch(() => fallbackCopy(text, finish));
+    } else { fallbackCopy(text, finish); }
+  }
+  function fallbackCopy(text, done) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (e) {}
+    ta.remove(); if (done) done();
+  }
+  function star(sym) {
+    const on = window.Prefs && window.Prefs.isFav(sym);
+    return '<button class="starbtn' + (on ? " on" : "") + '" data-star="' + sym + '" title="מועדפים">' + (on ? "★" : "☆") + "</button>";
+  }
+
+  // ---------- demo data ----------
+  const INDICES = [
+    { sym: "SPY", name: "S&P 500", Y: cell("2U", "up"), Q: cell("1", "up"), M: cell("1", "down"), W: cell("2U", "up"), D: cell("3", "down") },
+    { sym: "QQQ", name: "NASDAQ 100", Y: cell("2U", "up"), Q: cell("1", "up"), M: cell("1", "up"), W: cell("1", "down"), D: cell("2D", "down") },
+    { sym: "IWM", name: "Russell 2000", Y: cell("2U", "up"), Q: cell("2U", "up"), M: cell("2U", "down"), W: cell("2U", "up"), D: cell("2D", "down") },
+    { sym: "DIA", name: "Dow Jones", Y: cell("2U", "up"), Q: cell("2U", "up"), M: cell("2U", "up"), W: cell("2U", "down"), D: cell("2U", "up") },
+  ];
+  const BREADTH_IDX = [
+    { sym: "S5FD", desc: "מעל SMA50" }, { sym: "S5OF", desc: "מעל SMA100" }, { sym: "S5FI", desc: "מעל SMA150" },
+    { sym: "S5OH", desc: "מעל SMA200" }, { sym: "S5TW", desc: "מעל SMA20" }, { sym: "S5TH", desc: "שיאים/שפל" },
+  ];
+  const DIST = [
+    { k: "3 (חיצוני)", n: 41, dot: "p" }, { k: "2D (יורד)", n: 116, dot: "r" },
+    { k: "1 (פנימי)", n: 34, dot: "gray" }, { k: "2U (עולה)", n: 309, dot: "g" },
+  ];
+
+  // ticker universe (demo) — includes conflict candles, dojis, green/red 1s & 3s
+  const TICKERS = [
+    tk("NVDA", "NVIDIA", "Technology", 187.16, 1.24, "2U", "up", "marubozu", 8.9, 1.4, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["2U", "up"]),
+    tk("AAPL", "Apple", "Technology", 231.30, -0.42, "2U", "down", "hammer", 4.1, 0.9, false, ["2U", "up"], ["1", "up"], ["2U", "up"], ["2U", "up"]),
+    tk("MSFT", "Microsoft", "Technology", 438.20, 0.31, "1", "up", "doji", 6.3, 0.8, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["1", "up"]),
+    tk("AVGO", "Broadcom", "Technology", 356.40, -1.10, "2D", "down", "normal", 12.1, 1.1, false, ["2U", "up"], ["2U", "up"], ["2D", "down"], ["2D", "down"]),
+    tk("AMD", "AMD", "Technology", 168.90, 2.05, "3", "up", "normal", 7.2, 1.6, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["3", "up"]),
+    tk("PLTR", "Palantir", "Technology", 74.56, 3.90, "2U", "up", "marubozu", 3.4, 2.3, true, ["3", "up"], ["2U", "up"], ["2U", "up"], ["2U", "up"]),
+    tk("INTC", "Intel", "Technology", 24.30, -2.10, "2D", "up", "hammer", 1.1, 1.9, false, ["2D", "down"], ["2D", "down"], ["2U", "up"], ["2D", "up"]),
+    tk("ORCL", "Oracle", "Technology", 178.20, 0.15, "1", "down", "doji", 5.0, 0.7, true, ["2U", "up"], ["2U", "up"], ["1", "up"], ["1", "down"]),
+
+    tk("JPM", "JPMorgan", "Financials", 268.10, 0.62, "2U", "up", "normal", 4.8, 0.9, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["2U", "up"]),
+    tk("BAC", "Bank of America", "Financials", 46.20, -0.30, "2D", "down", "normal", 1.0, 0.8, false, ["2U", "up"], ["2U", "up"], ["2D", "down"], ["2D", "down"]),
+    tk("GS", "Goldman Sachs", "Financials", 612.40, 1.02, "3", "down", "shooter", 14.2, 1.2, false, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["3", "down"]),
+
+    tk("XOM", "Exxon Mobil", "Energy", 118.30, -0.88, "2D", "down", "normal", 2.6, 1.0, false, ["2U", "up"], ["1", "down"], ["2D", "down"], ["2D", "down"]),
+    tk("CVX", "Chevron", "Energy", 158.90, 0.44, "2U", "down", "hammer", 3.1, 0.9, false, ["1", "up"], ["2U", "down"], ["2U", "up"], ["2U", "down"]),
+    tk("CTRA", "Coterra", "Energy", 32.56, -8.62, "2D", "down", "normal", 1.4, 3.1, false, ["1", "down"], ["1", "down"], ["2U", "up"], ["2D", "down"]),
+
+    tk("UNH", "UnitedHealth", "Health Care", 512.10, -1.50, "2D", "down", "normal", 11.0, 1.3, false, ["2D", "down"], ["2D", "down"], ["2D", "down"], ["2D", "down"]),
+    tk("LLY", "Eli Lilly", "Health Care", 842.30, 0.90, "2U", "up", "normal", 18.4, 1.1, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["2U", "up"]),
+    tk("MRNA", "Moderna", "Health Care", 28.40, 4.10, "3", "up", "hammer", 1.8, 2.4, false, ["2D", "down"], ["2D", "down"], ["1", "down"], ["3", "up"]),
+
+    tk("TSLA", "Tesla", "Consumer Disc.", 412.90, 2.80, "2U", "up", "normal", 12.7, 1.8, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["2U", "up"]),
+    tk("AMZN", "Amazon", "Consumer Disc.", 224.10, -0.20, "1", "down", "doji", 4.9, 0.8, true, ["2U", "up"], ["2U", "up"], ["2U", "up"], ["1", "down"]),
+    tk("HD", "Home Depot", "Consumer Disc.", 408.60, 0.10, "1", "up", "doji", 5.5, 0.6, false, ["2U", "up"], ["1", "up"], ["1", "up"], ["1", "up"]),
+
+    tk("SMCI", "Super Micro", "Technology", 75.23, 12.45, "2U", "up", "marubozu", 4.2, 4.8, true, ["2D", "down"], ["3", "up"], ["1", "up"], ["2U", "up"]),
+    tk("SNAP", "Snap", "Communication", 11.43, -7.89, "2D", "down", "normal", 0.7, 3.3, false, ["2U", "up"], ["1", "up"], ["3", "down"], ["2D", "down"]),
+    tk("NIO", "NIO", "Consumer Disc.", 5.23, -4.56, "2D", "up", "hammer", 0.3, 2.1, false, ["1", "up"], ["2U", "up"], ["3", "down"], ["2D", "up"]),
+    tk("MARA", "Marathon", "Financials", 22.87, 6.78, "3", "up", "normal", 1.6, 3.9, true, ["1", "up"], ["3", "up"], ["2U", "up"], ["3", "up"]),
+  ];
+  function tk(sym, name, sector, price, chg, ccT, ccC, shape, atr, rvol, ftfc, Y, Q, M, W) {
+    return { sym, name, sector, price, chg, cc: cell(ccT, ccC), shape, atr, rvol, ftfc,
+      Y: cell(Y[0], Y[1]), Q: cell(Q[0], Q[1]), M: cell(M[0], M[1]), W: cell(W[0], W[1]), D: cell(ccT, ccC) };
+  }
+
+  const SECTOR_DEFS = [
+    { name: "טכנולוגיה", etf: "XLK" }, { name: "פיננסים", etf: "XLF" }, { name: "בריאות", etf: "XLV" },
+    { name: "אנרגיה", etf: "XLE" }, { name: "מוצרי צריכה מחזוריים", etf: "XLY" }, { name: "תקשורת", etf: "XLC" },
+    { name: "תעשייה", etf: "XLI" }, { name: "מוצרי צריכה בסיסיים", etf: "XLP" }, { name: "חומרי גלם", etf: "XLB" },
+    { name: "נדל\"ן", etf: "XLRE" }, { name: "שירותים", etf: "XLU" },
+  ];
+  // deterministic pseudo-breadth per sector (demo)
+  function sectorBreadth(seed) {
+    const rows = ["D", "W", "M"];
+    const out = {};
+    rows.forEach((r, i) => {
+      const base = (seed * 7 + i * 13) % 20;
+      const u2 = 8 + (base % 12), d2 = 6 + ((base + 5) % 10), three = 1 + (base % 4), one = 3 + ((base + 2) % 5);
+      out[r] = { u2, d2, one, three };
+    });
+    return out;
+  }
+  const SECTORS = SECTOR_DEFS.map((s, i) => ({ ...s, breadth: sectorBreadth(i + 1), total: 22 + (i * 3) % 40 }));
+
+  const GAPPERS = {
+    up: [
+      { sym: "SMCI", name: "Super Micro", price: 75.23, gd: 8.32, gp: 12.45, vol: "45.2M" },
+      { sym: "PLTR", name: "Palantir", price: 74.56, gd: 5.67, gp: 8.23, vol: "32.1M" },
+      { sym: "MARA", name: "Marathon", price: 22.87, gd: 1.45, gp: 6.78, vol: "18.9M" },
+      { sym: "RIVN", name: "Rivian", price: 14.78, gd: 0.72, gp: 5.12, vol: "22.1M" },
+    ],
+    down: [
+      { sym: "SNAP", name: "Snap", price: 11.43, gd: -0.98, gp: -7.89, vol: "28.4M" },
+      { sym: "LCID", name: "Lucid", price: 3.10, gd: -0.21, gp: -6.34, vol: "15.6M" },
+      { sym: "NIO", name: "NIO", price: 5.23, gd: -0.25, gp: -4.56, vol: "12.3M" },
+      { sym: "PARA", name: "Paramount", price: 12.67, gd: -0.42, gp: -3.21, vol: "8.9M" },
+    ],
+  };
+
+  // ---------- shared renderers ----------
+  function tfHeadCols() { return "<th>Y</th><th>Q</th><th>M</th><th>W</th><th>D</th>"; }
+  function tfCells(t) {
+    const s = t.sym;
+    return "<td>" + tf(t.Y, s, "Y") + "</td><td>" + tf(t.Q, s, "Q") + "</td><td>" + tf(t.M, s, "M") + "</td><td>" + tf(t.W, s, "W") + "</td><td>" + tf(t.D, s, "D") + "</td>";
+  }
+  // FTFC badge — GREEN when the continuity is bullish, RED ("bear") when bearish.
+  // Default = the server's D·W·M flag (row.ftfc). Pass `tfs` (e.g. M·Q·Y / D·W·M·Q·Y) to compute the
+  // badge for a SPECIFIC timeframe set instead — so a drill matches the FTFC selector the user picked.
+  function ftfcBadge(row, tfs) {
+    if (!row) return "—";
+    if (tfs && tfs.length) {
+      const dir = (typeof secFtfcDir === "function") ? secFtfcDir(row, tfs) : "";
+      if (dir !== "up" && dir !== "down") return "—";
+      return '<span class="badge-ftfc' + (dir === "down" ? " bear" : "") + '">FTFC</span>';
+    }
+    if (!row.ftfc) return "—";
+    return '<span class="badge-ftfc' + ((row.D || {}).c === "down" ? " bear" : "") + '">FTFC</span>';
+  }
+  // ── moving-average overlays on the embedded TradingView charts ───────────────────────────────
+  // user picks which MAs to draw; applies to EVERY chart (single / multi-TF / grid) and is remembered.
+  // Default = SMA 150 (the StratNinja signature, like the SMA150 Sniper).
+  const MA_DEFS = [
+    { k: "sma20",  type: "SMA", len: 20,  id: "MASimple@tv-basicstudies", he: "SMA 20" },
+    { k: "sma50",  type: "SMA", len: 50,  id: "MASimple@tv-basicstudies", he: "SMA 50" },
+    { k: "sma150", type: "SMA", len: 150, id: "MASimple@tv-basicstudies", he: "SMA 150" },
+    { k: "sma200", type: "SMA", len: 200, id: "MASimple@tv-basicstudies", he: "SMA 200" },
+    { k: "ema20",  type: "EMA", len: 20,  id: "MAExp@tv-basicstudies",    he: "EMA 20" },
+    { k: "ema50",  type: "EMA", len: 50,  id: "MAExp@tv-basicstudies",    he: "EMA 50" },
+    { k: "ema150", type: "EMA", len: 150, id: "MAExp@tv-basicstudies",    he: "EMA 150" },
+    { k: "ema200", type: "EMA", len: 200, id: "MAExp@tv-basicstudies",    he: "EMA 200" },
+  ];
+  let chartMA = (function () {
+    try { const s = JSON.parse(localStorage.getItem("sn_chart_ma")); if (s && typeof s === "object") return s; } catch (e) {}
+    return { sma150: true };   // default: SMA 150 on
+  })();
+  function _saveChartMA() { try { localStorage.setItem("sn_chart_ma", JSON.stringify(chartMA)); } catch (e) {} }
+  // build the &studies=... URL fragment (TradingView) for the active MAs, each with its exact length
+  function maStudiesParam() {
+    const arr = MA_DEFS.filter(m => chartMA[m.k]).map(m => ({ id: m.id, inputs: { length: m.len } }));
+    return arr.length ? "&studies=" + encodeURIComponent(JSON.stringify(arr)) : "";
+  }
+  // the toggle bar shown on chart popups — SMA row + EMA row, active = highlighted
+  function maBarHtml() {
+    const chip = m => '<button class="chip ma-chip' + (chartMA[m.k] ? " on" : "") + '" data-ma="' + m.k + '">' + m.he + "</button>";
+    return '<div class="ma-bar"><span class="ma-lbl">📈 ממוצעים</span>' +
+      '<span class="ma-grp">' + MA_DEFS.filter(m => m.type === "SMA").map(chip).join("") + "</span>" +
+      '<span class="ma-sep"></span>' +
+      '<span class="ma-grp">' + MA_DEFS.filter(m => m.type === "EMA").map(chip).join("") + "</span></div>";
+  }
+  // wire the toggle chips inside `scope`; `onChange` re-renders the chart(s) with the new studies
+  function wireMaChips(scope, onChange) {
+    (scope || document).querySelectorAll("[data-ma]").forEach(b => b.onclick = () => {
+      const k = b.dataset.ma;
+      chartMA[k] = !chartMA[k];
+      _saveChartMA();
+      b.classList.toggle("on", !!chartMA[k]);
+      if (onChange) onChange();
+    });
+  }
+  // Warm the TradingView charting library in the background: one hidden iframe downloads TV's JS/CSS
+  // ONCE, so when the trader opens a chart grid the cells reuse the cached library and appear fast
+  // (the first iframe's library download is the slow part). Idempotent + runs when the browser is idle.
+  let _tvWarmed = false;
+  function warmTradingView() {
+    if (_tvWarmed || typeof document === "undefined") return;
+    _tvWarmed = true;
+    const go = () => {
+      try {
+        const f = document.createElement("iframe");
+        f.src = "https://www.tradingview.com/widgetembed/?frameElementId=tvwarm&symbol=SPY&interval=D&range=1M&theme=dark&style=1&hidesidetoolbar=1&hidetoptoolbar=1&hide_legend=1&saveimage=0";
+        f.setAttribute("loading", "eager"); f.setAttribute("tabindex", "-1"); f.setAttribute("aria-hidden", "true");
+        f.style.cssText = "position:absolute;width:2px;height:2px;left:-9999px;top:-9999px;opacity:0;pointer-events:none;border:0";
+        document.body.appendChild(f);
+      } catch (e) { }
+    };
+    if ("requestIdleCallback" in window) requestIdleCallback(go, { timeout: 4000 }); else setTimeout(go, 1500);
+  }
+  function openChart(sym, tfl) {
+    const iv = ({ D: "D", W: "W", M: "M", Q: "3M", Y: "12M", "15m": "15", "30m": "30", "60m": "60", "65m": "65", "2H": "120", "130m": "130", "3H": "180", "195m": "195", "4H": "240" })[tfl] || "D";
+    const base = "https://www.tradingview.com/widgetembed/?frameElementId=tvchart&symbol=" + encodeURIComponent(sym) +
+      "&interval=" + iv + "&theme=dark&style=1&hidesidetoolbar=0&saveimage=1&timezone=America%2FNew_York";
+    modal(sym + " · " + tfl,
+      maBarHtml() +
+      '<iframe id="ocFrame" src="' + base + maStudiesParam() + '" style="width:100%;height:520px;border:0;border-radius:8px;background:#131722" allowfullscreen></iframe>' +
+      '<div class="note"><a href="https://www.tradingview.com/chart/?symbol=' + encodeURIComponent(sym) + '" target="_blank" rel="noopener">פתח ב-TradingView ↗</a></div>', "onechart");
+    wireMaChips(document, () => { const f = document.getElementById("ocFrame"); if (f) f.src = base + maStudiesParam(); });
+  }
+  function openMultiChart(sym) {
+    const tfs = [["2h", "120"], ["D", "D"], ["W", "W"], ["M", "M"], ["Q", "3M"], ["Y", "12M"]];
+    // strat-type strip from the loaded scanner row (if available)
+    let strip = "";
+    if (SCAN && SCAN.rows) {
+      const r = SCAN.rows.find(x => x.s === sym);
+      if (r) strip = '<div class="mtf-strip">' + ["D", "W", "M", "Q", "Y"].map(k => '<span class="mtf-tf">' + k + " " + tf(r[k]) + "</span>").join("") + "</div>";
+    }
+    const cells = tfs.map(([lbl, iv]) => {
+      const base = "https://www.tradingview.com/widgetembed/?frameElementId=tv_" + lbl + "&symbol=" + encodeURIComponent(sym) +
+        "&interval=" + iv + "&theme=dark&style=1&hidesidetoolbar=0&saveimage=1&timezone=America%2FNew_York";
+      return '<div class="mtf-cell"><div class="mtf-lbl">' + lbl + '</div><iframe class="mtf-frame" data-base="' + base + '" src="' + base + maStudiesParam() + '" loading="lazy" style="width:100%;height:220px;border:0;border-radius:8px;background:#131722" allowfullscreen></iframe></div>';
+    }).join("");
+    modal(sym + ' · כל הטיימפריימים',
+      maBarHtml() +
+      strip + '<div class="mtf-grid">' + cells + "</div>" +
+      '<div class="note" style="display:flex;gap:14px;align-items:center;flex-wrap:wrap">' +
+        '<button class="btn ghost" id="mtfShot" style="font-size:13px;font-weight:600">📸 צילום מעוצב (כרטיס Strat)</button>' +
+        '<button class="btn ghost" id="mtfFull" style="font-size:13px;font-weight:600">🖼️ צילום מסך כולל (עם הגרפים)</button>' +
+        '<a href="https://www.tradingview.com/chart/?symbol=' + encodeURIComponent(sym) + '" target="_blank" rel="noopener">פתח ב-TradingView ↗</a></div>', "mtf");
+    { const ms = document.getElementById("mtfShot"); if (ms) ms.onclick = () => captureMtfCard(sym); }
+    { const mf = document.getElementById("mtfFull"); if (mf) mf.onclick = () => captureFullShot(); }
+    wireMaChips(document, () => document.querySelectorAll(".mtf-frame").forEach(f => { f.src = f.dataset.base + maStudiesParam(); }));
+  }
+  // exposed so the trade journal (separate module) can open the same multi-timeframe chart on a symbol click
+  window._snOpenChart = openMultiChart;
+  // exposed so the journal can open a chart-grid of all its open positions
+  window._snOpenChartGrid = (rows, opts) => openChartGrid(rows, opts || {});
+  // exposed for the journal: for each open position {sym,direction}, which saved scans it currently
+  // matches + whether the scan's direction CONFLICTS with the position (e.g. a long position that just
+  // entered a short/bearish scan). Returns { SYM: [{name, dir, conflict}] } — only symbols with hits.
+  window._snPositionSignals = function (positions) {
+    try {
+      if (!positions || !positions.length || !(window.Prefs && Prefs.scanPresets)) return {};
+      const presets = Prefs.scanPresets() || [];
+      const pm = presets.map(p => ({ name: p.name, dir: (p.cfg && p.cfg.s && p.cfg.s.dir) || "", syms: new Set(evalPreset(p) || []) }));
+      const res = {};
+      positions.forEach(pos => {
+        const sym = pos.sym, dir = pos.direction;
+        const hits = [];
+        pm.forEach(x => {
+          if (!x.syms.has(sym)) return;
+          const conflict = !!(dir && x.dir && ((dir === "long" && x.dir === "short") || (dir === "short" && x.dir === "long")));
+          hits.push({ name: x.name, dir: x.dir, conflict: conflict });
+        });
+        if (hits.length) res[sym] = hits;
+      });
+      return res;
+    } catch (e) { return {}; }
+  };
+  // ---- scanner chart-grid view (TradingView-style, filtered symbols at the selected TF) ----
+  const CG_IV = { D: "D", W: "W", M: "M", Q: "3M", Y: "12M", "15m": "15", "30m": "30", "60m": "60", "65m": "65", "2H": "120", "130m": "130", "3H": "180", "195m": "195", "4H": "240" };
+  const CG_TF_HE = { D: "יומי", W: "שבועי", M: "חודשי", Q: "רבעוני", Y: "שנתי" };
+  function openScannerGrid() { openChartGrid(sortRows(filterRows(scanRowsView())), {}); }   // respect live/yesterday view
+  // generic chart-grid: takes a list of rows ({sym, price, chg, name/ind/sector}) and shows them as a TV grid
+  function openChartGrid(rows, opts) {
+    opts = opts || {};
+    // if several TFs are selected → default to the LOWEST (shortest) one; order low→high = D,W,M,Q,Y
+    const order = ["D", "W", "M", "Q", "Y"];
+    const derived = opts.tf || (order.find(x => scanState.tfs.indexOf(x) >= 0) || "D");
+    // lookback ranges (how far back to view) — each picks a sensible candle interval
+    const CG_RANGE = [
+      { k: "1D", he: "תוך יומי", iv: "15", rng: "1D" },
+      { k: "5D", he: "5 ימים", iv: "60", rng: "5D" },
+      { k: "1M", he: "חודש", iv: "D", rng: "1M" },
+      { k: "3M", he: "רבעון", iv: "D", rng: "3M" },
+      { k: "6M", he: "חצי שנה", iv: "D", rng: "6M" },
+      { k: "12M", he: "שנה", iv: "D", rng: "12M" },
+      { k: "60M", he: "5 שנים", iv: "W", rng: "60M" },
+    ];
+    // default lookback per TF. D → a full YEAR so candles render DAILY (a short 6M range makes
+    // TradingView auto-switch to intraday 2h candles, which Adi doesn't want).
+    const RANGE_DEF = { D: "12M", W: "12M", M: "60M", Q: "60M", Y: "60M" };
+    const GCAP = 60; // lazy-loaded, but cap DOM to keep it snappy
+    // remembered column density (fewer columns = fewer charts loading at once = faster). default 3.
+    let cgDensity = (function () { try { const d = localStorage.getItem("sn_cg_density"); if (["2", "3", "4", "5"].indexOf(d) >= 0) return d; } catch (e) {} return "3"; })();
+    let cgSort = "table"; // default: keep the scanner table's current order (rows come in already sorted)
+    let cgFavTop = false; // optional: pull favorited stocks to the front (off by default each time)
+    function cgSorted() {
+      let arr = rows.slice();
+      if (cgSort === "chg") arr.sort((a, b) => (b.chg || 0) - (a.chg || 0));
+      else if (cgSort === "chgAsc") arr.sort((a, b) => (a.chg || 0) - (b.chg || 0));
+      else if (cgSort === "sym") arr.sort((a, b) => (a.sym || "").localeCompare(b.sym || ""));
+      // else "table" → keep the incoming order (matches how the scanner table is sorted right now)
+      if (cgFavTop && window.Prefs) {   // favorites first, keeping the sort within each group
+        const fav = arr.filter(t => window.Prefs.isFav(t.sym)), rest = arr.filter(t => !window.Prefs.isFav(t.sym));
+        if (fav.length) arr = fav.concat(rest);
+      }
+      return arr.slice(0, GCAP);
+    }
+    let shown = cgSorted();
+    if (!shown.length) { modal("📊 תצוגת גרפים", '<div class="note" style="padding:24px;text-align:center">אין מניות להצגה.</div>', "chartgrid"); return; }
+    let curRange = RANGE_DEF[derived] || "12M";
+    function cgSrc(sym, rk) {
+      const R = CG_RANGE.find(x => x.k === rk) || CG_RANGE[4];
+      // hide_legend — the card header already shows sym/price/%, so the TradingView legend (long name + OHLC)
+      // is redundant clutter in the grid; hiding it gives each mini-chart more room to read.
+      return "https://www.tradingview.com/widgetembed/?frameElementId=cg_" + encodeURIComponent(sym) + "&symbol=" + encodeURIComponent(sym) +
+        "&interval=" + R.iv + "&range=" + R.rng + "&theme=dark&style=1&hidesidetoolbar=1&hidetoptoolbar=1&hide_legend=1&saveimage=0&timezone=America%2FNew_York" + maStudiesParam();
+    }
+    function cellsHtml(rk) {
+      // charts are NOT rendered upfront — each is a placeholder that loads its iframe only
+      // when it scrolls into view (see observeGrid), so the first row appears in ~2s instead of ~20s.
+      return shown.map(t => {
+        return '<div class="cg-cell">' +
+          '<div class="cg-head">' + star(t.sym) +
+            '<span class="cg-sym tsym clickable" data-chart="' + t.sym + '" title="כל הטיימפריימים">' + t.sym + "</span>" +
+            '<span class="cg-name">' + (t.name || t.ind || t.sector || "") + "</span>" +
+            '<span class="cg-price">' + money(t.price) + " " + pct(t.chg) + "</span>" +
+            '<a class="cg-tv" href="https://www.tradingview.com/chart/?symbol=' + encodeURIComponent(t.sym) + '" target="_blank" rel="noopener" title="פתח ב-TradingView">↗</a>' +
+          "</div>" +
+          '<div class="cg-frame cg-ph" data-src="' + cgSrc(t.sym, rk) + '"><span class="cg-spin"></span></div>' +
+        "</div>";
+      }).join("");
+    }
+    const more = rows.length > GCAP ? ' · מוצגות ' + GCAP + " מתוך " + rows.length : "";
+    const rBtns = CG_RANGE.map(x => '<button class="chip cg-tfb' + (x.k === curRange ? " on" : "") + '" data-cgrange="' + x.k + '">' + x.he + "</button>").join("");
+    const tfSel = '<div class="cg-tfsel"><span class="muted" style="font-size:12px">טווח:</span>' + rBtns +
+      '<span class="muted" style="font-size:12px">· ' + shown.length + " מניות" + more + "</span></div>";
+    const dens = '<div class="cg-dens"><span class="muted" style="font-size:12px">צפיפות:</span>' +
+      ["2", "3", "4", "5"].map(n => '<button class="chip' + (n === cgDensity ? " on" : "") + '" data-cg="' + n + '">' + n + "</button>").join("") + "</div>";
+    const sortSel = '<div class="cg-sort"><span class="muted" style="font-size:12px">מיון:</span><select id="cgSortSel" style="font-size:12px">' +
+      '<option value="table">לפי הטבלה</option><option value="chg">עולה %</option><option value="chgAsc">יורד %</option><option value="sym">סימבול</option></select></div>';
+    const favBtn = '<button class="chip cg-favtop' + (cgFavTop ? " on" : "") + '" id="cgFavTop" title="הבא את המניות מהמועדפים לראש הרשימה">⭐ מועדפים ראשונים</button>';
+    const shotBtn = '<button class="btn ghost" id="cgShot" style="font-size:12px;font-weight:600" title="צילום מסך של תצוגת הגרפים">🖼️ צילום מסך</button>';
+    modal("📊 תצוגת גרפים" + (opts.title ? " · " + opts.title : ""), '<div class="cg-bar">' + tfSel + sortSel + dens + favBtn + shotBtn + "</div>" + maBarHtml() + '<div class="cg-grid cg-' + cgDensity + '" id="cgGrid">' + cellsHtml(curRange) + "</div>", "chartgrid");
+    const grid = $("#cgGrid");
+    const scroller = document.querySelector(".modal.chartgrid");
+
+    // ---- lazy chart loading: each chart loads the moment its cell scrolls into view ----
+    // Visible charts load IN PARALLEL (no artificial stagger) — the first iframe downloads the
+    // TradingView library, the rest reuse it from cache, so the whole visible screen fills quickly.
+    let io = null;
+    function realizePh(ph) {
+      if (!ph || ph.dataset.done) return;
+      ph.dataset.done = "1";
+      const f = document.createElement("iframe");
+      f.className = "cg-frame"; f.src = ph.dataset.src; f.setAttribute("allowfullscreen", "");
+      f.setAttribute("loading", "lazy");
+      ph.replaceWith(f);
+    }
+    function observeGrid() {
+      if (io) io.disconnect();
+      if (!("IntersectionObserver" in window)) { // very old browser fallback: just load all
+        grid.querySelectorAll(".cg-ph").forEach(realizePh); return;
+      }
+      io = new IntersectionObserver(entries => {
+        entries.forEach(e => { if (e.isIntersecting) { io.unobserve(e.target); realizePh(e.target); } });
+      }, { root: scroller || null, rootMargin: "250px 0px", threshold: 0.01 });
+      grid.querySelectorAll(".cg-ph").forEach(ph => io.observe(ph));
+    }
+    observeGrid();
+    // moving-average toggles → rebuild the grid cells with the new studies (keeps range/sort/density)
+    wireMaChips(scroller || document, () => { grid.innerHTML = cellsHtml(curRange); observeGrid(); });
+
+    // density toggle
+    document.querySelectorAll("[data-cg]").forEach(b => b.onclick = () => {
+      cgDensity = b.dataset.cg;
+      try { localStorage.setItem("sn_cg_density", cgDensity); } catch (e) {}   // remember the choice
+      if (grid) grid.className = "cg-grid cg-" + cgDensity;
+      document.querySelectorAll("[data-cg]").forEach(x => x.classList.toggle("on", x === b));
+    });
+    // manual range (lookback) selector — rebuilds the charts in place (re-observes for lazy loading)
+    document.querySelectorAll("[data-cgrange]").forEach(b => b.onclick = () => {
+      curRange = b.dataset.cgrange;
+      if (grid) { grid.innerHTML = cellsHtml(curRange); wireStars(grid); wireCharts(grid); observeGrid(); }
+      document.querySelectorAll("[data-cgrange]").forEach(x => x.classList.toggle("on", x === b));
+    });
+    // sort selector — re-orders the charts (like sorting the scanner table)
+    { const ss = $("#cgSortSel"); if (ss) ss.onchange = () => { cgSort = ss.value; shown = cgSorted(); if (grid) { grid.innerHTML = cellsHtml(curRange); wireStars(grid); wireCharts(grid); observeGrid(); } }; }
+    // "⭐ מועדפים ראשונים" — bring favorited stocks to the front (keeps the current sort within groups)
+    { const fb = $("#cgFavTop"); if (fb) fb.onclick = () => { cgFavTop = !cgFavTop; fb.classList.toggle("on", cgFavTop); shown = cgSorted(); if (grid) { grid.innerHTML = cellsHtml(curRange); wireStars(grid); wireCharts(grid); observeGrid(); } }; }
+    // full screenshot of the chart grid (captures the live TradingView charts)
+    { const sh = $("#cgShot"); if (sh) sh.onclick = () => captureFullShot(); }
+  }
+  function wireCharts(scope) {
+    (scope || document).querySelectorAll("[data-chart]").forEach(b => {
+      b.onclick = e => {
+        e.stopPropagation();
+        if (b.classList.contains("tsym")) openMultiChart(b.dataset.chart);
+        else openChart(b.dataset.chart, b.dataset.tf);
+      };
+    });
+  }
+
+  // ========== MARKET ==========
+  function pctSpan(v) { v = v == null ? 0 : v; return '<span class="' + (v > 0 ? "pos" : v < 0 ? "neg" : "zero") + '" style="font-size:13px">' + (v >= 0 ? "+" : "") + v.toFixed(2) + "%</span>"; }
+  function mkLead(items, cls, isSector) {
+    if (!items || !items.length) return '<div class="muted" style="padding:8px 12px;font-size:13px">ממתין לנתוני מסחר…</div>';
+    const max = Math.max(0.01, ...items.map(x => Math.abs((isSector ? x.chg : x.c) || 0)));
+    return '<div class="rank">' + items.map(x => {
+      const v = (isSector ? x.chg : x.c) || 0;
+      const chart = isSector ? etfFor(x.name) : x.s;
+      const sym = isSector ? (etfFor(x.name) || secHe(x.name)) : x.s;
+      const w = Math.max(6, Math.round(Math.abs(v) / max * 100));
+      return '<div class="rk ' + _moveTier(v) + '">' +
+        '<span class="sym' + (chart ? ' tsym clickable" data-chart="' + chart + '" data-tf="D' : "") + '">' + sym + "</span>" +
+        '<span class="pct"><span class="arrow">' + _arrow(v) + "</span>" + (v >= 0 ? "+" : "") + v.toFixed(2) + "%</span>" +
+        '<span class="track"><span class="fill" style="width:' + w + '%"></span></span></div>';
+    }).join("") + "</div>";
+  }
+  function breadthBar() {
+    const b = mktU().breadth;
+    if (!b || !b.total) return "";
+    const ap = (b.above / b.total * 100);
+    const uniLbl = marketUniverse === "sp500" ? "S&P 500" : "StratNinja";
+    return '<div class="panel breadth-panel clickable" id="breadthBar"><h3>רוחב שוק · Breadth <span class="muted" style="font-size:12px">' + uniLbl + " · " + b.total + ' מניות · לחץ לפירוט לפי סקטור →</span></h3>' +
+      '<div class="bigbreadth"><span class="bseg up" style="width:' + ap.toFixed(1) + '%"></span><span class="bseg down" style="width:' + (100 - ap).toFixed(1) + '%"></span></div>' +
+      '<div class="bkey" style="margin-top:10px;font-size:13px"><span class="pos">🟢 ' + b.above + " מעל פתיחה</span><span class=\"neg\">🔴 " + b.below + ' מתחת</span><span class="muted">' + ap.toFixed(0) + "% ירוקים</span></div></div>";
+  }
+  function liveBanner() {
+    if (LIVE && LIVE.updated) {
+      const hh = d => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+      const scanTxt = (SCAN && SCAN.updated) ? ' · <span title="מחירי המניות בסורק מתעדכנים כל 15 דקות">מחירי מניות ' + hh(new Date(SCAN.updated)) + "</span>" : "";
+      return '<div class="demo-flag" style="background:rgba(22,184,119,.12);color:#7ee2b8;border-color:rgba(22,184,119,.3)" title="מדדים/שוק מתעדכנים כל 3 דקות · סורק המניות כל 15 דקות (בשעות המסחר)">🟢 נתונים חיים · שוק עודכן ' + hh(new Date(LIVE.updated)) + scanTxt + "</div>";
+    }
+    return DEMO;
+  }
+  // ---- Candle Map (client-side breadth by candle type, from scanner data) ----
+  const CMAP_ROWS = [
+    ["3G", "3 GREEN — נר 3 חיצוני ירוק (Outside · התרחבות שורית)", "cm-3g"],
+    ["F2D", "Failed 2D — שבר את הנמוך ונסגר ירוק (reclaim · היפוך שורי)", "cm-f2d"],
+    ["2U", "2 UP — נר 2 מעלה (המשך שורי)", "cm-2u"],
+    ["1", "INSIDE — נר פנימי (התכווצות / דשדוש)", "cm-1"],
+    ["2D", "2 DOWN — נר 2 מטה (המשך דובי)", "cm-2d"],
+    ["F2U", "Failed 2U — שבר את הגבוה ונסגר אדום (rejection · היפוך דובי)", "cm-f2u"],
+    ["3R", "3 RED — נר 3 חיצוני אדום (Outside · התרחבות דובית)", "cm-3r"],
+  ];
+  const CMAP_DESC = {}; CMAP_ROWS.forEach(r => CMAP_DESC[r[0]] = r[1]);
+  const TF_HE = { D: "יומי", W: "שבועי", M: "חודשי", Q: "רבעוני", Y: "שנתי" };
+  function candleBucket(c) {
+    if (!c) return "1";
+    const t = c.t, col = c.c;
+    if (t === "3") return col === "up" ? "3G" : "3R";
+    if (t === "2U") return col === "down" ? "F2U" : "2U";
+    if (t === "2D") return col === "up" ? "F2D" : "2D";
+    return "1";
+  }
+  const _CM_BUCKET_HE = { "3G": "3 ירוק (התרחבות שורית)", "F2D": "היפוך 2D (reclaim)", "2U": "2U (המשך שורי)", "1": "Inside", "2D": "2D (המשך דובי)", "F2U": "היפוך 2U (rejection)", "3R": "3 אדום (התרחבות דובית)" };
+  const _CM_TF_HE = { D: "היומי", W: "השבועי", M: "החודשי", Q: "הרבעוני", Y: "השנתי" };
+  // "מבנה דומיננטי" (Adi 2026-10-04) = the single BIGGEST cell (candle type × timeframe), e.g. {b:"1", tf:"Q", n:346}
+  // — not the type summed across all TFs (that old metric wasn't tied to a timeframe and felt unintuitive).
+  function _cmDomCell(counts, cols) {
+    let b = null, tf = null, n = -1;
+    CMAP_ROWS.forEach(([k]) => cols.forEach(t => { const v = (counts[k] && counts[k][t]) || 0; if (v > n) { n = v; b = k; tf = t; } }));
+    return { b: b, tf: tf, n: n };
+  }
+  function _cmDomLabel(d) { return (d && d.b) ? d.b + " · " + (TF_HE[d.tf] || d.tf) + " · " + d.n : "—"; }
+  let _cmFacts = [], _cmTimer = null;
+  // global universe toggle: "sp500" (default) | "all" (StratNinja world). Controls the Candle Map + market
+  // overview everywhere; switchable from the market page AND a persistent sidebar control (under 🚀 שיא 52ש').
+  let marketUniverse = "sp500", _mktFlip = false;
+  try { const _mu = localStorage.getItem("sn_mkt_uni"); if (_mu === "sp500" || _mu === "all") marketUniverse = _mu; } catch (e) {}
+  function _setUniverse(u) {
+    if ((u !== "sp500" && u !== "all") || marketUniverse === u) return;
+    marketUniverse = u; _mktFlip = true;
+    try { localStorage.setItem("sn_mkt_uni", u); } catch (e) {}
+    reRender();   // the market overview + Candle Map re-render with the new active state
+  }
+  // shared compact universe toggle — rendered where it's relevant (market overview + continuity Candle Map)
+  function _uniSwitchHtml(extraCls) {
+    return '<span class="uni-switch uni-switch-mini' + (extraCls ? " " + extraCls : "") + '" title="בחר יקום — S&P 500 או כל היקום">' +
+      '<button class="uni-btn' + (marketUniverse === "sp500" ? " on" : "") + '" data-uni="sp500">S&P 500</button>' +
+      '<button class="uni-btn' + (marketUniverse === "all" ? " on" : "") + '" data-uni="all">כל היקום</button></span>';
+  }
+  // which section of the market-overview page the user chose to share (set by the share-section picker)
+  let _mktShareSection = "state";   // "state" | "candlemap" | "leaders" | "movers"
+  function mktU() {
+    const u = LIVE && LIVE.universes;
+    return (u && u[marketUniverse]) ? u[marketUniverse] : (LIVE || {});
+  }
+  function cmapRows() {
+    const all = (SCAN && SCAN.rows) || [];
+    if (marketUniverse === "sp500") { const sp = all.filter(r => r.sp); if (sp.length) return sp; }
+    return all;
+  }
+  function candleMapFacts() {
+    const rows = cmapRows();
+    if (!rows.length) return [];
+    const facts = [], pc = (a, b) => Math.round(a / b * 100);
+    ["Y", "M", "W"].forEach(tf => {
+      const byB = {};
+      rows.forEach(r => { const b = candleBucket(r[tf]); (byB[b] = byB[b] || []).push(r); });
+      Object.keys(byB).forEach(bk => {
+        const arr = byB[bk];
+        if (arr.length < 8) return;
+        const sec = {}; arr.forEach(r => { if (r.sec) sec[r.sec] = (sec[r.sec] || 0) + 1; });
+        const top = Object.keys(sec).map(k => [k, sec[k]]).sort((a, b) => b[1] - a[1])[0];
+        if (top && top[1] / arr.length >= 0.28)
+          facts.push("מבין <b>" + arr.length + "</b> המניות עם נר <b>" + _CM_BUCKET_HE[bk] + "</b> בטיימפריים " + _CM_TF_HE[tf] + " — <b>" + pc(top[1], arr.length) + "%</b> מסקטור <b>" + top[0] + "</b>.");
+        const ind = {}; arr.forEach(r => { if (r.ind) ind[r.ind] = (ind[r.ind] || 0) + 1; });
+        const ti = Object.keys(ind).map(k => [k, ind[k]]).sort((a, b) => b[1] - a[1])[0];
+        if (ti && ti[1] >= 5 && ti[1] / arr.length >= 0.2)
+          facts.push("<b>" + pc(ti[1], arr.length) + "%</b> מהמניות עם נר <b>" + _CM_BUCKET_HE[bk] + "</b> " + _CM_TF_HE[tf] + " הן בתת-סקטור <b>" + ti[0] + "</b>.");
+      });
+    });
+    const dayG = rows.filter(r => (r.D || {}).c === "up").length;
+    facts.push("היום <b>" + pc(dayG, rows.length) + "%</b> מהמניות בנר יומי ירוק — " + (dayG / rows.length >= 0.55 ? "הטיה שורית רחבה 🟢" : dayG / rows.length <= 0.45 ? "הטיה דובית 🔴" : "שוק מאוזן ⚖️") + ".");
+    const secTot = {}, secG = {};
+    rows.forEach(r => { if (r.sec) { secTot[r.sec] = (secTot[r.sec] || 0) + 1; if ((r.D || {}).c === "up") secG[r.sec] = (secG[r.sec] || 0) + 1; } });
+    const secRank = Object.keys(secTot).filter(s => secTot[s] >= 6).map(s => [s, (secG[s] || 0) / secTot[s]]).sort((a, b) => b[1] - a[1]);
+    if (secRank.length) {
+      facts.push("הסקטור הכי שורי היום: <b>" + secRank[0][0] + "</b> (<b>" + Math.round(secRank[0][1] * 100) + "%</b> מהמניות בירוק).");
+      const last = secRank[secRank.length - 1];
+      facts.push("הסקטור הכי דובי היום: <b>" + last[0] + "</b> (רק <b>" + Math.round(last[1] * 100) + "%</b> בירוק).");
+    }
+    const ftfc = rows.filter(r => r.ftfc).length;
+    if (ftfc) facts.push("<b>" + ftfc + "</b> מניות בהמשכיות-טיימפריימים מלאה (FTFC) — יישור חזק בין הזמנים.");
+    ["W", "M"].forEach(tf => {
+      const ins = rows.filter(r => (r[tf] || {}).t === "1").length;
+      if (ins / rows.length >= 0.2) facts.push("<b>" + pc(ins, rows.length) + "%</b> מהמניות בנר <b>Inside</b> בטיימפריים " + _CM_TF_HE[tf] + " — התכווצות לפני תנועה.");
+    });
+    return facts;
+  }
+  function candleMapPanel() {
+    const cols = ["D", "W", "M", "Q", "Y"];
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) {
+      return '<div class="panel"><h3>🗺️ Candle Map · התפלגות נרות</h3><div class="muted" style="padding:14px">טוען נתוני סורק…</div></div>';
+    }
+    const cmRows = cmapRows();
+    const counts = {}; CMAP_ROWS.forEach(r => counts[r[0]] = { D: 0, W: 0, M: 0, Q: 0, Y: 0 });
+    cmRows.forEach(row => cols.forEach(tf => { const b = candleBucket(row[tf]); if (counts[b]) counts[b][tf]++; }));
+    const head = '<tr><th style="text-align:start">TYPE</th>' + cols.map(t => "<th>" + t + "</th>").join("") + "</tr>";
+    const body = CMAP_ROWS.map(([key, desc, cls]) =>
+      '<tr><td class="cm-type" title="' + desc + '">' + key + "</td>" +
+      cols.map(tf => '<td><span class="cm-pill ' + cls + ' cm-click" data-cmb="' + key + '" data-cmtf="' + tf + '" title="' + desc + ' · לחץ לרשימת המניות">' + counts[key][tf] + "</span></td>").join("") + "</tr>").join("");
+    // prominent auto-verdict: dominant candle structure · strongest (most bullish) timeframe · leading sector
+    const dom = _cmDomCell(counts, cols);
+    let bestTf = null, bestScore = -Infinity;
+    cols.forEach(tf => {
+      const bull = (counts["2U"][tf] || 0) + (counts["3G"][tf] || 0) + (counts["F2D"][tf] || 0);
+      const bear = (counts["2D"][tf] || 0) + (counts["3R"][tf] || 0) + (counts["F2U"][tf] || 0);
+      if (bull - bear > bestScore) { bestScore = bull - bear; bestTf = tf; }
+    });
+    const cmLead = (mktU().sectorLeaders || [])[0];
+    const verdict = '<div class="cm-verdict">' +
+      '<span class="cmv-item"><span class="cmv-k">המבנה הדומיננטי</span><span class="cmv-v ' + (_cmBull(dom.b) ? "pos" : _cmBear(dom.b) ? "neg" : "") + '">' + _cmDomLabel(dom) + "</span></span>" +
+      '<span class="cmv-item"><span class="cmv-k">הטיימפריים החזק</span><span class="cmv-v">' + (bestTf ? (_CM_TF_HE[bestTf] || bestTf) : "—") + "</span></span>" +
+      '<span class="cmv-item"><span class="cmv-k">הסקטור המוביל</span><span class="cmv-v pos">' + (cmLead ? secHe(cmLead.name) : "—") + "</span></span></div>";
+    _cmFacts = candleMapFacts();
+    const firstFact = _cmFacts.length ? _cmFacts[Math.floor(Math.random() * _cmFacts.length)] : "";
+    const insightBox = verdict + (_cmFacts.length
+      ? '<div class="cm-insight"><span class="cm-bulb">💡</span><span id="cmInsightText">' + firstFact + "</span></div>"
+      : "");
+    return '<div class="panel"><h3 class="cmap-head"><span>🗺️ Candle Map · התפלגות נרות לפי טיימפריים <span class="muted" style="font-size:12px">' + cmRows.length + ' מניות · לחץ על מספר לרשימה</span></span></h3>' +
+      '<div class="tablewrap"><table class="cmap-table">' + head + body + "</table></div>" + insightBox + "</div>";
+  }
+  // WIDE/compact Candle Map (for the bottom of the continuity tab) — TRANSPOSED so it's wide & short (no scroll):
+  // timeframes down the side, bar-type buckets across the top.
+  function candleMapPanelWide() {
+    const cols = ["D", "W", "M", "Q", "Y"];
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) return "";
+    const cmRows = cmapRows();
+    const counts = {}; CMAP_ROWS.forEach(r => counts[r[0]] = { D: 0, W: 0, M: 0, Q: 0, Y: 0 });
+    cmRows.forEach(row => cols.forEach(tf => { const b = candleBucket(row[tf]); if (counts[b]) counts[b][tf]++; }));
+    const head = '<tr><th class="cmw-corner">TF</th>' + CMAP_ROWS.map(([key, desc]) => '<th class="cmw-bh" title="' + escAttr(desc) + '">' + key + "</th>").join("") + "</tr>";
+    const body = cols.map(tf =>
+      '<tr><td class="cm-type">' + tf + "</td>" +
+      CMAP_ROWS.map(([key, desc, cls]) => '<td><span class="cm-pill ' + cls + ' cm-click" data-cmb="' + key + '" data-cmtf="' + tf + '" title="' + escAttr(desc) + ' · לחץ לרשימת המניות">' + counts[key][tf] + "</span></td>").join("") + "</tr>").join("");
+    const dom = _cmDomCell(counts, cols);
+    let bestTf = null, bestScore = -Infinity;
+    cols.forEach(tf => { const bull = (counts["2U"][tf] || 0) + (counts["3G"][tf] || 0) + (counts["F2D"][tf] || 0); const bear = (counts["2D"][tf] || 0) + (counts["3R"][tf] || 0) + (counts["F2U"][tf] || 0); if (bull - bear > bestScore) { bestScore = bull - bear; bestTf = tf; } });
+    const verdict = '<div class="cm-verdict cmw-verdict">' +
+      '<span class="cmv-item"><span class="cmv-k">מבנה דומיננטי</span><span class="cmv-v ' + (_cmBull(dom.b) ? "pos" : _cmBear(dom.b) ? "neg" : "") + '">' + _cmDomLabel(dom) + "</span></span>" +
+      '<span class="cmv-item"><span class="cmv-k">טיימפריים חזק</span><span class="cmv-v">' + (bestTf ? (_CM_TF_HE[bestTf] || bestTf) : "—") + "</span></span></div>";
+    return '<div class="panel cmap-wide"><h3 class="cmap-head"><span>🗺️ Candle Map · התפלגות נרות <span class="muted" style="font-size:12px">' + cmRows.length + ' מניות · לחץ על מספר לרשימת המניות</span></span></h3>' +
+      '<div class="tablewrap"><table class="cmap-table cmap-table-wide">' + head + body + "</table></div>" + verdict + "</div>";
+  }
+  // NARROW/compact Candle Map for the LEFT column of the continuity tab — bar-type buckets across the TOP
+  // (columns), timeframes down the RIGHT side (rows), so it maps the CANDLES. Stays slim (no page height).
+  function candleMapPanelSide() {
+    const cols = ["D", "W", "M", "Q", "Y"];   // timeframes = rows (down the right side)
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) return "";
+    const cmRows = cmapRows();
+    const counts = {}; CMAP_ROWS.forEach(r => counts[r[0]] = { D: 0, W: 0, M: 0, Q: 0, Y: 0 });
+    cmRows.forEach(row => cols.forEach(tf => { const b = candleBucket(row[tf]); if (counts[b]) counts[b][tf]++; }));
+    const head = '<tr><th class="cmw-corner">TF</th>' + CMAP_ROWS.map(([key, desc]) => '<th class="cmw-bh" title="' + escAttr(desc) + '">' + key + "</th>").join("") + "</tr>";
+    const body = cols.map(tf =>
+      '<tr><td class="cm-type">' + tf + "</td>" +
+      CMAP_ROWS.map(([key, desc, cls]) => '<td><span class="cm-pill ' + cls + ' cm-click" data-cmb="' + key + '" data-cmtf="' + tf + '" title="' + escAttr(desc) + ' · לחץ לרשימת המניות">' + counts[key][tf] + "</span></td>").join("") + "</tr>").join("");
+    const dom = _cmDomCell(counts, cols);   // the single biggest cell (type × TF)
+    let bestTf = null, bestScore = -Infinity;
+    cols.forEach(tf => { const bull = (counts["2U"][tf] || 0) + (counts["3G"][tf] || 0) + (counts["F2D"][tf] || 0); const bear = (counts["2D"][tf] || 0) + (counts["3R"][tf] || 0) + (counts["F2U"][tf] || 0); if (bull - bear > bestScore) { bestScore = bull - bear; bestTf = tf; } });
+    const domCls = _cmBull(dom.b) ? "pos" : _cmBear(dom.b) ? "neg" : "";
+    const verdict = '<div class="cm-verdict cmw-verdict cms-verdict">' +
+      '<span class="cmv-item"><span class="cmv-k">מבנה דומיננטי</span><span class="cmv-v ' + domCls + '">' + _cmDomLabel(dom) + "</span></span>" +
+      '<span class="cmv-item"><span class="cmv-k">TF חזק</span><span class="cmv-v">' + (bestTf ? (_CM_TF_HE[bestTf] || bestTf) : "—") + "</span></span></div>";
+    return '<div class="panel cmap-side"><h3 class="cmap-head"><span>🗺️ Candle Map</span>' + _uniSwitchHtml("cmap-uni") + '</h3>' +
+      '<div class="muted cms-note">' + cmRows.length + ' מניות · לחץ מספר לרשימה</div>' +
+      '<div class="tablewrap"><table class="cmap-table cmap-table-side">' + head + body + "</table></div>" + verdict + "</div>";
+  }
+  let cmDrill = { bucket: null, tfk: null, col: null, dir: -1, favTop: false };
+  function cmSortVal(r, col, tfk) {
+    if (col === "sym") return r.s;
+    if (col === "sec") return r.sec || "";
+    if (col === "price") return r.p || 0;
+    // candle color: green(up)=2, doji=1, red(down)=0 → descending puts green on top, then red
+    if (col === "cndl") { const c = (r[tfk] || {}).c; return c === "up" ? 2 : (c === "down" ? 0 : 1); }
+    return null;
+  }
+  function openCandleMapDrill(bucket, tfk) { cmDrill = { bucket, tfk, col: null, dir: -1, favTop: false }; renderCmDrill(); }
+  function renderCmDrill() {
+    if (!(SCAN && SCAN.rows)) return;
+    const bucket = cmDrill.bucket, tfk = cmDrill.tfk;
+    let members = cmapRows().filter(r => candleBucket(r[tfk]) === bucket);
+    const title = (CMAP_DESC[bucket] || bucket).split(" — ")[0];
+    if (!members.length) { modal(bucket, '<div class="muted" style="padding:20px">אין מניות</div>'); return; }
+    if (cmDrill.col) {
+      members = members.slice().sort((a, b) => {
+        const va = cmSortVal(a, cmDrill.col, tfk), vb = cmSortVal(b, cmDrill.col, tfk);
+        if (typeof va === "string") return cmDrill.dir * va.localeCompare(vb);
+        return cmDrill.dir * (va - vb);
+      });
+    } else {
+      members = members.slice().sort((a, b) => a.s.localeCompare(b.s));
+    }
+    if (cmDrill.favTop && window.Prefs) {   // favorites first, keeping the sort within each group
+      const fav = members.filter(r => window.Prefs.isFav(r.s)), rest = members.filter(r => !window.Prefs.isFav(r.s));
+      if (fav.length) members = fav.concat(rest);
+    }
+    const th = (label, col, start) => {
+      const arrow = cmDrill.col === col ? (cmDrill.dir < 0 ? " ▼" : " ▲") : "";
+      return '<th class="sortable" data-cmsort="' + col + '" style="cursor:pointer;user-select:none' + (start ? ";text-align:start" : "") + '">' + label + arrow + "</th>";
+    };
+    const rows = members.map(r =>
+      "<tr><td>" + star(r.s) + '</td><td class="sym"><span class="tsym clickable" data-chart="' + r.s + '" data-tf="D">' + r.s +
+      '</span></td><td class="tname" style="text-align:start">' + (r.sec || "") + "</td><td>" + money(r.p || 0) + "</td><td>" + tf(r[tfk], r.s, tfk) + "</td></tr>").join("");
+    const syms = members.map(r => r.s).join(", ");
+    modal("🗺️ " + title + " · " + (TF_HE[tfk] || tfk) + " · " + members.length + " מניות",
+      '<div class="drill-bar"><button class="btn ghost" id="cmapGrid" style="font-size:12px;font-weight:600">📊 תצוגת גרפים</button>' +
+      '<button class="btn ghost" id="cmapCopy" style="font-size:12px;font-weight:600">📋 העתק ' + members.length + " טיקרים</button>" +
+      '<button class="chip cg-favtop' + (cmDrill.favTop ? " on" : "") + '" id="cmapFav" title="הבא את המניות מהמועדפים לראש">⭐ מועדפים ראשונים</button></div>' +
+      '<div class="note" style="margin-bottom:8px">' + (CMAP_DESC[bucket] || "") + ' · לחץ על כל כותרת למיון (נר = 🟢 ירוק / 🔴 אדום)</div>' +
+      '<div class="tablewrap"><table class="scan-table"><thead><tr><th></th>' + th("סימבול", "sym", true) + th("סקטור", "sec", true) + th("מחיר", "price") + th("נר " + tfk, "cndl") + "</tr></thead><tbody>" + rows + "</tbody></table></div>");
+    const cp = $("#cmapCopy");
+    if (cp) cp.onclick = () => { copyToClipboard(syms, () => { cp.textContent = "✓ הועתקו " + members.length; }); };
+    const gb = $("#cmapGrid");
+    if (gb) gb.onclick = () => openChartGrid(members.map(r => ({ sym: r.s, sector: r.sec, ind: r.ind, price: r.p || 0, chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0) })), { title: title });
+    { const fv = $("#cmapFav"); if (fv) fv.onclick = () => { cmDrill.favTop = !cmDrill.favTop; renderCmDrill(); }; }
+    document.querySelectorAll("[data-cmsort]").forEach(h => h.onclick = () => {
+      const c = h.dataset.cmsort;
+      if (cmDrill.col === c) cmDrill.dir *= -1; else { cmDrill.col = c; cmDrill.dir = c === "sym" ? 1 : -1; }
+      renderCmDrill();
+    });
+  }
+  // compact "what's happening now" pulse — market mode + session + index strip
+  function marketPulse() {
+    const ms = todayMarketState(), sess = (typeof newsSession === "function") ? newsSession() : "";
+    if (!ms) return '<div class="panel mkt-pulse"><span class="mp-mode">📡 מה עולה עכשיו</span><span class="muted">התחבר לנתונים חיים</span></div>';
+    const idx = ms.idx.map(i => '<span class="mp-idx"><b>' + i.sym + "</b> " + pctSpanBare(i.chg) + "</span>").join("");
+    const vix = ms.vix ? '<span class="mp-idx"><b>VIX</b> ' + ms.vix.level.toFixed(1) + "</span>" : "";
+    // breadth gauge — a mini bar, pushed to the far (left) end, opposite the mode label
+    let breadth = "";
+    if (ms.br && ms.br.total) {
+      const ap = (ms.br.above / ms.br.total * 100);
+      breadth = '<div class="mp-breadth clickable" id="pulseBreadth" title="רוחב שוק — לחץ לפירוט לפי סקטור">' +
+        '<span class="mp-brlbl">רוחב שוק</span>' +
+        '<span class="mp-brbar"><span class="mp-brup" style="width:' + ap.toFixed(1) + '%"></span></span>' +
+        '<span class="mp-brnum"><span class="pos">' + ms.br.above + '</span>/<span class="neg">' + ms.br.below + "</span></span></div>";
+    }
+    return '<div class="panel mkt-pulse ' + ms.cls + '"><div class="mp-left"><span class="mp-mode">' + ms.emoji + " " + ms.mode + '</span><span class="mp-sess">' + sess + "</span>" +
+      (ms.why ? '<span class="mp-why">' + ms.why + "</span>" : "") + "</div>" +
+      '<div class="mp-strip">' + idx + vix + "</div>" + breadth + "</div>";
+  }
+  // minutes since midnight in Israel time (works regardless of the viewer's own TZ)
+  function _ilMinutes() {
+    try {
+      const p = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date());
+      const hh = +p.find(x => x.type === "hour").value, mm = +p.find(x => x.type === "minute").value;
+      return hh * 60 + mm;
+    } catch (e) { return new Date().getHours() * 60 + new Date().getMinutes(); }
+  }
+  // Time-aware movers panel (Israel time). US↔IL is a constant 7h offset, so:
+  //   16:30–23:00 → RTH gappers · 11:00–16:30 → pre-market (US pre-market 04:00–09:30 ET) ·
+  //   23:00–11:00 (wraps past midnight) → after-market. The long after-market window keeps the
+  //   last session's post-market movers on screen through the overnight dead zone (nothing new
+  //   trades 03:00–11:00 IL), instead of showing an empty "pre-market" list.
+  function gappersMini() {
+    const mins = _ilMinutes();
+    // movers panel ALWAYS uses the widest universe (full StratNinja, ~1415 stocks) so big
+    // movers never get hidden by the S&P-500 filter — e.g. non-S&P names like IONS crashing.
+    const U = (LIVE && LIVE.universes && LIVE.universes.all) || {};
+    let head, data, upLbl, dnLbl, seeAll = "", note = "";
+    if (mins >= 16 * 60 + 30 && mins < 23 * 60) {    // 16:30–23:00 IL → gappers (RTH)
+      head = "⚡ גאפרים · פתיחת יום";
+      data = U.gappers || (LIVE && LIVE.gappers) || { up: [], down: [] };
+      upLbl = "🟢 TOP גאפ אפ"; dnLbl = "🔴 TOP גאפ דאון";
+      seeAll = '<button class="btn ghost" id="gapAll" style="font-size:12px;font-weight:600">ראה הכל →</button>';
+    } else if (mins >= 11 * 60 && mins < 16 * 60 + 30) {   // 11:00–16:30 IL → pre-market (US pre live)
+      head = "🌅 PRE-MARKET MOVERS · תנועות לפני הפתיחה";
+      data = U.premovers || (LIVE && LIVE.premovers) || { up: [], down: [] };
+      upLbl = "🟢 עולות לפני פתיחת המסחר"; dnLbl = "🔴 יורדות לפני פתיחת המסחר";
+      note = "מתעדכן ככל שנסחר יותר בפרה-מרקט";
+    } else {                                         // 23:00–11:00 IL → after-market (post + overnight)
+      head = "🌙 AFTER-MARKET MOVERS · תנועות אחרי הסגירה";
+      data = U.aftermovers || (LIVE && LIVE.aftermovers) || { up: [], down: [] };
+      upLbl = "🟢 עולות אחרי סגירת המסחר"; dnLbl = "🔴 יורדות אחרי סגירת המסחר";
+      note = "תנועה ביחס למחיר הסגירה של היום";
+    }
+    // use the SAME row style as the leaders/laggards panels above (mkLead → .rank/.rk bars) for one unified language
+    const row = arr => arr.length ? mkLead(arr.slice(0, 5).map(x => ({ s: x.s, c: x.gp })), "", false)
+      : '<div class="muted" style="font-size:12px;padding:5px 2px">אין כרגע</div>';
+    // subtitle (note) moved to a hover tooltip on the heading to save vertical space (Adi)
+    return '<div class="panel gappers-mini"><h3 class="gm-head"><span' + (note ? ' title="' + escAttr(note) + '" style="cursor:help"' : "") + ">" + head + "</span>" + seeAll + "</h3>" +
+      '<div class="gm-grid"><div><div class="td-h pos">' + upLbl + "</div>" + row(data.up) + '</div><div><div class="td-h neg">' + dnLbl + "</div>" + row(data.down) + "</div></div></div>";
+  }
+  // ---- market-page mini chart of an index (30-day, candles or line) ----
+  let _idxChartMode = "candle";
+  function indexChartSvg(ohlc, mode, w, h) {
+    if (!ohlc || !ohlc.length) return '<div class="muted" style="padding:26px 0;text-align:center;font-size:12px">אין נתוני גרף — יטען בהרצת השרת הבאה</div>';
+    const padT = 4, padB = 4, padL = 4, padR = 42, n = ohlc.length;
+    let lo = Infinity, hi = -Infinity;
+    ohlc.forEach(b => { lo = Math.min(lo, b[2]); hi = Math.max(hi, b[1]); });
+    const rng = (hi - lo) || 1;
+    const cw = (w - padL - padR) / n;
+    const y = v => padT + (h - padT - padB) * (1 - (v - lo) / rng);
+    const x = i => padL + cw * i + cw / 2;
+    let s = "";
+    if (mode === "line") {
+      const pts = ohlc.map((b, i) => x(i).toFixed(1) + "," + y(b[3]).toFixed(1)).join(" ");
+      const col = ohlc[n - 1][3] >= ohlc[0][3] ? "var(--green)" : "var(--red)";
+      s += '<polyline points="' + pts + '" fill="none" stroke="' + col + '" stroke-width="1.8" stroke-linejoin="round"/>';
+    } else {
+      ohlc.forEach((b, i) => {
+        const o = b[0], hh = b[1], ll = b[2], c = b[3], cx = x(i);
+        const col = c >= o ? "var(--green)" : "var(--red)";
+        const bt = y(Math.max(o, c)), bb = y(Math.min(o, c)), bw = Math.max(1.5, cw * 0.62);
+        s += '<line x1="' + cx.toFixed(1) + '" x2="' + cx.toFixed(1) + '" y1="' + y(hh).toFixed(1) + '" y2="' + y(ll).toFixed(1) + '" stroke="' + col + '" stroke-width="1"/>';
+        s += '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + bt.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + Math.max(1, bb - bt).toFixed(1) + '" fill="' + col + '"/>';
+      });
+    }
+    s += '<text x="' + (w - padR + 4) + '" y="' + (y(hi) + 7) + '" fill="var(--muted)" font-size="9">' + hi.toFixed(0) + "</text>";
+    s += '<text x="' + (w - padR + 4) + '" y="' + (y(lo) - 1) + '" fill="var(--muted)" font-size="9">' + lo.toFixed(0) + "</text>";
+    return '<svg viewBox="0 0 ' + w + " " + h + '" width="100%" height="' + h + '" preserveAspectRatio="none">' + s + "</svg>";
+  }
+  function spyChartPanel() {
+    const idx = (LIVE && LIVE.indices) || [];
+    const spy = idx.find(x => x.sym === "SPY");
+    const ohlc = spy && spy.ohlc, chg = spy ? spy.chg : null;
+    const nb = ohlc ? ohlc.length : 0;
+    const rangeLbl = nb >= 55 ? "רבעון" : (nb ? nb + " ימי מסחר" : "30 יום");
+    return '<div class="panel spy-chart-panel"><div class="spc-head">' +
+      '<span class="spc-title">SPY · ' + rangeLbl + "</span>" +
+      (chg != null ? '<span class="' + (chg >= 0 ? "pos" : "neg") + '" style="font-weight:700;font-size:12px">' + (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%</span>" : "") +
+      '<span class="spc-toggle"><button class="spc-btn' + (_idxChartMode === "candle" ? " on" : "") + '" data-idxmode="candle">🕯️ נרות</button><button class="spc-btn' + (_idxChartMode === "line" ? " on" : "") + '" data-idxmode="line">📈 קו</button></span>' +
+      "</div><div class=\"spc-body\">" + indexChartSvg(ohlc, _idxChartMode, 520, 300) + "</div></div>";
+  }
+  // ── Market Cockpit: one clear status bar (state + breadth + VIX + SPY + why) ──
+  function marketCockpit() {
+    const ms = todayMarketState();
+    const b = mktU().breadth || {};
+    const ap = b.total ? (b.above / b.total * 100) : 50;
+    const vix = (LIVE && LIVE.vix) || null;
+    const spy = ((LIVE && LIVE.indices) || []).find(x => x.sym === "SPY");
+    const cCol = ms ? (ms.cls === "pos" ? "var(--green)" : ms.cls === "neg" ? "var(--red)" : "#e0c760") : "#8892a6";
+    const sv = spy && spy.chg != null ? spy.chg : null;
+    const sCol = sv == null ? "var(--muted)" : (sv > 0.05 ? "var(--green)" : sv < -0.05 ? "var(--red)" : "var(--muted)");
+    return '<div class="cockpit">' +
+      '<div class="cp-state"><span class="cp-dot" style="background:' + cCol + '"></span>' +
+        '<div><div class="k">מצב שוק</div><div class="v" style="color:' + cCol + '">' + (ms ? ms.emoji + " " + ms.mode : "—") + "</div></div></div>" +
+      '<div class="cp-sep"></div>' +
+      '<div class="cp-breadth">' +
+        indexCards() +   // index cards moved up here, into the cockpit's free space above the breadth bar (Adi)
+        '<div class="cp-brwrap clickable" id="cockpitBreadth" title="לחץ לרוחב שוק לפי סקטור →">' +
+          '<div class="k"><span>רוחב שוק · Breadth</span><span><b class="pos">' + (b.above || 0) + " ▲</b> / <b class=\"neg\">" + (b.below || 0) + ' ▼</b></span></div>' +
+          '<div class="cp-brbar"><span style="width:' + ap.toFixed(1) + '%"></span></div>' +
+        '</div></div>' +
+      '<div class="cp-sep"></div>' +
+      '<div class="cp-metric"><div class="k">VIX</div><div class="v">' + (vix ? vix.level.toFixed(2) : "—") + "</div></div>" +
+      '<div class="cp-sep"></div>' +
+      '<div class="cp-metric"><div class="k">SPY</div><div class="v" style="color:' + sCol + '">' + (sv == null ? "—" : _arrow(sv) + " " + (sv >= 0 ? "+" : "") + sv.toFixed(2) + "%") + "</div></div>" +
+      (ms && ms.why ? '<div class="why">💡 ' + ms.why + "</div>" : "") +
+      "</div>";
+  }
+  function indexCards() {
+    const idx = (LIVE && LIVE.indices && LIVE.indices.length) ? LIVE.indices : INDICES;
+    const byS = {}; idx.forEach(r => { byS[r.sym] = r; });
+    let list = ["DIA", "IWM", "QQQ", "SPY", "BTC"].map(s => byS[s]).filter(Boolean);
+    if (list.length < 4) list = idx.slice(0, 6);
+    return '<div class="idx-row">' + list.map(r => {
+      const v = r.chg, col = v == null ? "var(--muted)" : v > 0.05 ? "var(--green)" : v < -0.05 ? "var(--red)" : "var(--muted)";
+      const dt = (r.D && r.D.t) ? r.D.t : null;   // daily Strat candle type
+      const dCls = (r.D && r.D.c) ? (r.D.c === "up" ? "pos" : r.D.c === "down" ? "neg" : "") : "";
+      return '<div class="idx-card ' + ((v || 0) >= 0 ? "up" : "dn") + '">' +
+        '<span class="sym tsym clickable" data-chart="' + r.sym + '" data-tf="D">' + r.sym + "</span>" +
+        '<span class="ic-px" data-flick="idxp-' + r.sym + '">' + (r.price != null ? Number(r.price).toFixed(2) : "") + "</span>" +
+        '<span class="ic-chg" data-flick="idxc-' + r.sym + '" style="color:' + col + '"><span class="arrow">' + _arrow(v) + "</span>" + (v == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%") + "</span>" +
+        (dt ? '<span class="ic-cndl ' + dCls + '">' + dt + "</span>" : "") + "</div>";
+    }).join("") + "</div>";
+  }
+  // ---- Index charts (SPY vs QQQ) — embedded TradingView, live & interactive ----
+  let _tvLoading = null;
+  function _loadTV() {
+    if (window.TradingView && window.TradingView.widget) return Promise.resolve();
+    if (_tvLoading) return _tvLoading;
+    _tvLoading = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "https://s3.tradingview.com/tv.js"; s.async = true;
+      s.onload = () => res(); s.onerror = () => { _tvLoading = null; rej(new Error("tv")); };
+      document.head.appendChild(s);
+    });
+    return _tvLoading;
+  }
+  function indexChartsPanel() {
+    const cell = (id, sub, sym) =>
+      '<div class="idx-chart"><div class="idx-chart-lbl">' + sub +
+      ' <span class="idx-chart-sym">' + sym + '</span></div>' +
+      '<div id="' + id + '" class="tvchart"><div class="muted tvfallback">טוען גרף…</div></div></div>';
+    return '<div class="panel idx-charts-panel"><h3>📈 מדדים מובילים · SPY מול QQQ</h3>' +
+      '<div class="idx-charts">' +
+        cell("tvSpy", "S&amp;P 500", "SPY") +
+        cell("tvQqq", "Nasdaq 100", "QQQ") +
+      "</div></div>";
+  }
+  function mountIndexCharts() {
+    if (!document.getElementById("tvSpy")) return;
+    _loadTV().then(() => {
+      const theme = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+      const specs = [["tvSpy", "AMEX:SPY"], ["tvQqq", "NASDAQ:QQQ"]];
+      specs.forEach(([id, sym]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.innerHTML = "";
+        try {
+          new TradingView.widget({
+            container_id: id, symbol: sym, interval: "D", timezone: "America/New_York",
+            theme: theme, style: "1", locale: "he_IL", autosize: true,
+            hide_side_toolbar: true, allow_symbol_change: false, save_image: false,
+            withdateranges: true, hide_volume: false,
+            backgroundColor: theme === "light" ? "#ffffff" : "#12171f"
+          });
+        } catch (e) { el.innerHTML = '<div class="muted tvfallback">הגרף לא זמין כרגע</div>'; }
+      });
+    }).catch(() => {
+      ["tvSpy", "tvQqq"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.innerHTML = '<div class="muted tvfallback">הגרף לא זמין כרגע</div>';
+      });
+    });
+  }
+  // ===== Command Center home (redesign 2026-10) — reuses marketCockpit/mkLead for live data =====
+  function _ccTile(goto, ico, title, desc) {
+    return '<a class="cc-tile" data-goto="' + goto + '"><span class="cc-ic">' + ico + '</span>' +
+      '<span class="cc-tt">' + title + '</span><span class="cc-ds">' + desc + '</span></a>';
+  }
+  function _ccTileExt(href, ico, title, desc) {
+    return '<a class="cc-tile" href="' + href + '" target="_blank" rel="noopener"><span class="cc-ic">' + ico + '</span>' +
+      '<span class="cc-tt">' + title + '</span><span class="cc-ds">' + desc + '</span></a>';
+  }
+  function _ccZone(title, sub, tiles, cls) {
+    return '<div class="cc-zone' + (cls ? " " + cls : "") + '"><div class="cc-zhead"><h2>' + title + '</h2><span class="cc-zsub">' + sub + '</span></div>' +
+      '<div class="cc-tiles">' + tiles + '</div></div>';
+  }
+  // ===== Hot opportunities — strongest FTFC + directional-candle setups, straight from the live scanner =====
+  // Reuses the platform's established "ready setup" definition: full-timeframe-continuity (r.ftfc) + a
+  // directional daily candle (candleBucket). Bull buckets = 2U/3G/F2D · Bear = 2D/3R/F2U (same split as the
+  // Candle Map verdict). Ranked by move size, with a boost for volume confirmation (rvol ≥ 1.5×).
+  const _HOT_BULL = { "2U": 1, "3G": 1, "F2D": 1 };
+  const _HOT_BEAR = { "2D": 1, "3R": 1, "F2U": 1 };
+  const _HOT_LABEL = { "2U": "2U", "2D": "2D", "3G": "נר 3", "3R": "נר 3", "F2D": "היפוך", "F2U": "היפוך" };
+  function _hotOpps(limit) {
+    const rows = (SCAN && SCAN.rows) || [];
+    const picks = [];
+    rows.forEach(r => {
+      if (!r.ftfc) return;
+      const bk = candleBucket(r.D);
+      const dir = _HOT_BULL[bk] ? "bull" : (_HOT_BEAR[bk] ? "bear" : null);
+      if (!dir) return;
+      const chg = (r.c != null) ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : 0);
+      // skip contradictions (e.g. a "2U" that actually gapped down hard today)
+      if (dir === "bull" && chg < -0.5) return;
+      if (dir === "bear" && chg > 0.5) return;
+      const rvol = (r.tech && r.tech.rvol != null) ? r.tech.rvol : null;
+      const score = Math.abs(chg || 0) + (rvol && rvol >= 1.5 ? 1.5 : 0);
+      picks.push({ s: r.s, sec: r.sec, dir: dir, label: _HOT_LABEL[bk] || bk, chg: chg, rvol: rvol, score: score });
+    });
+    picks.sort((a, b) => b.score - a.score);
+    return picks.slice(0, limit || 6);
+  }
+  function _hotOppsPanel() {
+    const head = '<h3><span>🔥 הזדמנויות חמות היום</span><span class="cc-more" data-goto="scanner">פתח בסורק ←</span></h3>';
+    if (!(SCAN && SCAN.rows && SCAN.rows.length))
+      return '<div class="panel cc-hot">' + head + '<div class="muted" style="padding:16px 4px">טוען נתוני סורק…</div></div>';
+    const picks = _hotOpps(6);
+    if (!picks.length)
+      return '<div class="panel cc-hot">' + head + '<div class="muted" style="padding:16px 4px">אין כרגע סטאפים בהמשכיות-טיימפריימים מלאה (FTFC). נסה שוב כשהסורק יתעדכן.</div></div>';
+    const body = picks.map(p => {
+      const dftfc = p.dir === "bull" ? "FTFC🟢" : "FTFC🔴";
+      const rv = (p.rvol && p.rvol >= 1.5) ? '<span class="cc-op-badge">נפח ×' + p.rvol.toFixed(1) + "</span>" : "";
+      const chgTxt = (p.chg >= 0 ? "+" : "") + (p.chg || 0).toFixed(2) + "%";
+      return '<div class="cc-op tsym clickable" data-chart="' + p.s + '" data-tf="D">' +
+        '<span class="cc-op-sym">' + p.s + "</span>" +
+        '<span class="cc-op-setup ' + p.dir + '">' + p.label + " · " + dftfc + "</span>" +
+        '<span class="cc-op-meta">' + (p.sec ? secHe(p.sec) : "") + rv + "</span>" +
+        '<span class="cc-op-px ' + (p.chg >= 0 ? "pos" : "neg") + '">' + chgTxt + "</span>" +
+        '<span class="cc-op-go">‹</span></div>';
+    }).join("");
+    return '<div class="panel cc-hot">' + head + body + "</div>";
+  }
+  // ===== Auto "market read" — a few high-signal insights, all derived from live scanner data =====
+  function _homeMarketRead() {
+    const rows = (SCAN && SCAN.rows) || [];
+    if (!rows.length) return "";
+    const items = [];
+    const green = rows.filter(r => (r.D || {}).c === "up").length;
+    const gp = Math.round(green / rows.length * 100);
+    items.push((gp >= 55 ? "🟢" : gp <= 45 ? "🔴" : "⚖️") + " היום <b>" + gp + "%</b> מהמניות בנר יומי ירוק — " +
+      (gp >= 55 ? "הטיה שורית רחבה" : gp <= 45 ? "הטיה דובית" : "שוק מאוזן") + ".");
+    const ftfc = rows.filter(r => r.ftfc).length;
+    if (ftfc) items.push("🥷 <b>" + ftfc + "</b> מניות בהמשכיות-טיימפריימים מלאה (FTFC) — יישור חזק בין הזמנים.");
+    const sl = (mktU().sectorLeaders || [])[0];
+    if (sl) items.push("🔝 הסקטור המוביל היום: <b>" + secHe(sl.name) + "</b> (" + ((sl.chg || 0) >= 0 ? "+" : "") + (sl.chg || 0).toFixed(2) + "%).");
+    const c52 = _brd52wCounts("sp");
+    if (c52) items.push("📈 <b>" + c52.hi + "</b> מניות בשיא 52 שבועות · <b>" + c52.lo + "</b> בשפל.");
+    const bs = _brdState(_brdReadings("sp"));
+    if (bs) items.push((bs.lbl.split(" ")[0] || "🧭") + " רוחב מעל ממוצעים: <b>" + bs.score + "%</b> — " + bs.lbl.replace(/^\S+\s*/, "") + ".");
+    return '<div class="panel cc-readp"><h3>💡 קריאת שוק</h3><div class="cc-read">' +
+      items.map(t => '<div class="cc-ri">' + t + "</div>").join("") + "</div></div>";
+  }
+  // ===== Home sector-flow heat map — sectors + indices + MAGS, colored by daily change =====
+  function _chgOf(sym) {
+    const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+    if (r) return (r.c != null) ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : null);
+    const i = ((LIVE && LIVE.indices) || []).find(x => x.sym === sym);
+    return i ? i.chg : null;
+  }
+  function _heatRow(items) {
+    return '<div class="mh-grid">' + items.map(it => {
+      const v = it.chg || 0;
+      const lvl = Math.min(3, Math.max(1, Math.ceil(Math.abs(v) / 1.0)));
+      const cls = v > 0.05 ? "mh-u" + lvl : v < -0.05 ? "mh-d" + lvl : "mh-flat";
+      return '<div class="mh-tile ' + cls + (it.chart ? ' tsym clickable" data-chart="' + it.chart + '" data-tf="D' : "") + '">' +
+        '<span class="mh-etf">' + it.label + "</span>" +
+        '<span class="mh-chg" style="color:' + (v >= 0 ? "var(--green)" : "var(--red)") + '">' + (v >= 0 ? "+" : "") + v.toFixed(2) + "%</span>" +
+        (it.he ? '<span class="mh-he">' + it.he + "</span>" : "") + "</div>";
+    }).join("") + "</div>";
+  }
+  const _HOME_IDX = ["SPY", "QQQ", "DIA", "IWM"];
+  const _HOME_MAGS = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA"];
+  function _homeSectorFlow() {
+    const secs = (LIVE && LIVE.sectors) || [];
+    const head = '<h3><span>🗺️ מפת חום · סקטורים, מדדים ו-MAGS</span><span class="cc-more" data-goto-heat="1">מפה מלאה →</span></h3>';
+    const secItems = secs.slice().sort((a, b) => ((b.chg || 0) - (a.chg || 0)))
+      .map(s => ({ label: etfFor(s.name) || secHe(s.name), chart: etfFor(s.name) || "", chg: s.chg || 0, he: secHe(s.name) }));
+    const idxItems = _HOME_IDX.map(s => { const i = ((LIVE && LIVE.indices) || []).find(x => x.sym === s); return { label: s, chart: s, chg: i ? (i.chg || 0) : 0 }; });
+    const magItems = _HOME_MAGS.map(s => ({ label: s, chart: s, chg: _chgOf(s) || 0 }));
+    let html = '<div class="panel cc-heatp">' + head + '<div class="cc-heat-body">';
+    if (secItems.length) html += _heatRow(secItems);
+    html += '<div class="cc-heat-lbl">📊 מדדים</div>' + _heatRow(idxItems);
+    html += '<div class="cc-heat-lbl">🏆 MAGS · מגה-קאפ</div>' + _heatRow(magItems);
+    return html + "</div></div>";
+  }
+  function renderHome() {
+    const live = LIVE && LIVE.updated;
+    const snap = '<div class="panel cc-leadp"><h3>🟢 מובילי השוק היום</h3>' + mkLead(live ? (mktU().leaders || []).slice(0, 5) : [], "up", false) +
+      '<h3 style="margin-top:14px">🔴 מפגרים היום</h3>' + mkLead(live ? (mktU().laggards || []).slice(0, 5) : [], "down", false) + "</div>";
+    return (
+      '<div class="page-head compact"><h1>מרכז בקרה <span class="mkt-live">' + (live ? "🟢 חי" : "🧪 דמו") + "</span></h1>" +
+        '<div class="sub">הכול במבט אחד — מצב השוק, ההזדמנויות החמות של היום, והמובילים.</div></div>' +
+      marketCockpit() +
+      '<div class="cc-dash">' + _hotOppsPanel() + _homeMarketRead() + "</div>" +
+      '<div class="cc-dash">' + _homeSectorFlow() + snap + "</div>"
+    );
+  }
+  function wireHome() {
+    document.querySelectorAll("#page [data-goto]").forEach(el => el.onclick = () => setPage(el.dataset.goto));
+    document.querySelectorAll("#page [data-goto-heat]").forEach(el => el.onclick = () => setPage("sp500"));
+    { const cb = document.getElementById("cockpitBreadth"); if (cb) cb.onclick = () => setPage("sp500"); }
+    if (typeof wireCharts === "function") wireCharts(document);
+  }
+  // סקירת שוק: compact sector heat-map (reuses LIVE.sectors — colored tiles by daily change)
+  function _marketSectorHeat() {
+    const secs = (LIVE && LIVE.sectors) || [];
+    if (!secs.length) return "";
+    const sorted = secs.slice().sort((a, b) => ((b.chg || 0) - (a.chg || 0)));
+    const tiles = sorted.map(s => {
+      const v = s.chg || 0;
+      const etf = etfFor(s.name) || "";
+      const he = secHe(s.name) || s.name;
+      const lvl = Math.min(3, Math.max(1, Math.ceil(Math.abs(v) / 1.0)));
+      const cls = v > 0.05 ? "mh-u" + lvl : v < -0.05 ? "mh-d" + lvl : "mh-flat";
+      // whole tile → sector drill table; the ETF ticker itself → ETF chart (wireCharts stops propagation so it won't also open the drill)
+      return '<div class="mh-tile ' + cls + ' clickable" data-mhsec="' + escAttr(s.name) + '" title="לחץ לטבלת הסקטור">' +
+        (etf ? '<span class="mh-etf tsym clickable" data-chart="' + etf + '" data-tf="D" title="' + etf + ' · גרף תעודת הסל">' + etf + "</span>"
+             : '<span class="mh-etf">' + he + "</span>") +
+        '<span class="mh-chg">' + (v >= 0 ? "+" : "") + v.toFixed(2) + "%</span>" +
+        '<span class="mh-he">' + he + "</span></div>";
+    }).join("");
+    return '<div class="panel mh-panel"><div class="mh-head"><h3>🗺️ מפת חום · סקטורים</h3><span class="mh-full" data-goto-heat="1">מפה מלאה →</span></div>' +
+      '<div class="mh-grid">' + tiles + "</div></div>";
+  }
+  // ============ MONEY-FLOW RADAR — distilled "where is INSTITUTIONAL money going NOW" ============
+  // Adi 2026-11-02: ONE place that fuses the whole site into a clear read — which SECTOR (and which
+  // STOCKS inside it) money is entering vs leaving right now. Weighted toward institutional CONVICTION,
+  // not just today's %: broad participation (how MANY of the sector's stocks move together) + higher-
+  // timeframe 2U continuity (accumulation, per the Strat philosophy) + money-flow (ETF move) + breadth.
+  const _MF_TFW = { D: 1, W: 1.5, M: 2.5, Q: 3.5, Y: 4 };   // higher TF = heavier = institutional accumulation
+  const _MF_TFS = ["D", "W", "M", "Q", "Y"];
+  const _MF_HTF = ["M", "Q", "Y"];                          // the "institutional" horizons
+  function _mfAo(r) {                                       // above today's open (intraday participation)
+    if (r.ao != null) return !!r.ao;
+    if (r.D && r.D.o != null && r.p != null) return r.p >= r.D.o;
+    return (r.c || 0) >= 0;
+  }
+  function _mfFtfcDir(r) {                                  // +1 full continuity up · −1 down · 0 none
+    if (!r.ftfc) return 0;
+    const c = r.D && r.D.c;
+    if (c === "up") return 1; if (c === "down") return -1;
+    return (r.c || 0) >= 0 ? 1 : -1;
+  }
+  function _mfStkEnergy(r) {                                // TF-weighted net 2U for ONE stock → [−1,1]
+    let sc = 0, w = 0;
+    _MF_TFS.forEach(tf => { const o = r[tf]; if (!o || !o.t) return; w += _MF_TFW[tf];
+      if (o.t === "2U") sc += _MF_TFW[tf]; else if (o.t === "2D") sc -= _MF_TFW[tf]; });
+    return w ? sc / w : 0;
+  }
+  function _mfStkScore(r) {                                 // per-stock conviction for ranking the members
+    const e = _mfStkEnergy(r), f = _mfFtfcDir(r), a = _mfAo(r) ? 1 : -1;
+    const d = Math.max(-1, Math.min(1, (r.c || 0) / 5));
+    return 0.45 * e + 0.25 * f + 0.15 * a + 0.15 * d;
+  }
+  function _mfTfBadge(r, dir) {                             // "⚡N" = N timeframes aligned (2U for in, 2D for out)
+    let n = 0; _MF_TFS.forEach(tf => { const o = r[tf]; if (!o) return; if (dir === "in" ? o.t === "2U" : o.t === "2D") n++; });
+    return n;
+  }
+  function marketFlowRadar() {
+    try {
+      if (!(SCAN && SCAN.rows && SCAN.rows.length) || !LIVE) return "";
+      const sp = marketUniverse === "sp500";
+      const rows = SCAN.rows.filter(r => { if (!r || !r.sec) return false; if (sp && !r.sp) return false; const he = secHe(r.sec); return he !== "אחר" && he !== "מדדים"; });
+      if (rows.length < 20) return "";
+      const flow = {}; ((LIVE && LIVE.sectors) || []).forEach(s => { if (s && s.name != null) flow[secHe(s.name)] = s.chg; });
+      const G = {};
+      rows.forEach(r => { const he = secHe(r.sec); (G[he] || (G[he] = { he, raw: r.sec, members: [] })).members.push(r); });
+      const secs = Object.keys(G).map(he => {
+        const g = G[he], m = g.members, n = m.length;
+        let aboveN = 0, ftU = 0, ftD = 0;
+        const tfU = {}, tfD = {}, tfN = {}; _MF_TFS.forEach(tf => { tfU[tf] = tfD[tf] = tfN[tf] = 0; });
+        m.forEach(r => {
+          if (_mfAo(r)) aboveN++;
+          const fd = _mfFtfcDir(r); if (fd > 0) ftU++; else if (fd < 0) ftD++;
+          _MF_TFS.forEach(tf => { const o = r[tf]; if (!o || !o.t) return; tfN[tf]++; if (o.t === "2U") tfU[tf]++; else if (o.t === "2D") tfD[tf]++; });
+        });
+        const fFlow = flow[he] == null ? 0 : Math.max(-1, Math.min(1, flow[he] / 2));
+        const fBreadth = n ? (aboveN / n - 0.5) * 2 : 0;
+        const fCont = n ? (ftU - ftD) / n : 0;
+        let enW = 0, enS = 0; _MF_TFS.forEach(tf => { if (!tfN[tf]) return; enW += _MF_TFW[tf]; enS += _MF_TFW[tf] * ((tfU[tf] - tfD[tf]) / tfN[tf]); });
+        const fEnergy = enW ? enS / enW : 0;
+        let hUp = 0, hDn = 0, hW = 0; _MF_HTF.forEach(tf => { if (!tfN[tf]) return; hW++; const net = tfU[tf] - tfD[tf]; if (net > 0) hUp++; else if (net < 0) hDn++; });
+        const comp = 0.35 * fFlow + 0.30 * fEnergy + 0.20 * fBreadth + 0.15 * fCont;
+        return { he, raw: g.raw, n, aboveN, ftU, ftD, flowPct: flow[he], fFlow, fBreadth, fCont, fEnergy, htfUp: hW ? hUp / hW : 0, htfDn: hW ? hDn / hW : 0, comp, members: m };
+      }).filter(s => s.n >= 4);
+      if (secs.length < 2) return "";
+      secs.sort((a, b) => b.comp - a.comp);
+      const win = secs[0], lose = secs[secs.length - 1];
+      // HEAD-TO-HEAD: when the race is tight, surface the runner-up sector too (Adi: "XLF/XLY ראש בראש למי נכנס הכסף; XLE/XLK ראש בראש למי יוצא").
+      const _VS_GAP = 0.10;                                                           // close enough in composite to call it a tie
+      const inUp = secs[1];                                                           // 2nd-highest comp (inflow runner)
+      const inRunner = (inUp && inUp.comp > 0.03 && (win.comp - inUp.comp) <= _VS_GAP) ? inUp : null;
+      const outUp = secs[secs.length - 2];                                            // 2nd-lowest comp (outflow runner)
+      const outRunner = (outUp && outUp.comp < -0.03 && (outUp.comp - lose.comp) <= _VS_GAP) ? outUp : null;
+      // COMPACT: one line per side (sector · ETF% · strength · participation); FULL detail (+ runner-up) on hover.
+      return '<div class="mf-bar">' + _mfPill(win, "in", inRunner) + _mfPill(lose, "out", outRunner) + "</div>";
+    } catch (e) { return ""; }
+  }
+  function _mfStrength(s, dir) {                            // how STRONG & INSTITUTIONAL is the signal
+    const mag = dir === "in" ? s.comp : -s.comp;
+    const part = dir === "in" ? s.aboveN / s.n : (s.n - s.aboveN) / s.n;   // broad participation
+    const htf = dir === "in" ? s.htfUp : s.htfDn;                          // higher-TF alignment = institutional
+    if (mag >= 0.4 && part >= 0.6 && htf >= 0.5) return { lbl: "אות חזק", short: "חזק", ic: "🔥", cls: "s3" };
+    if (mag >= 0.2 && part >= 0.45) return { lbl: "אות בינוני", short: "בינוני", ic: "⚡", cls: "s2" };
+    return { lbl: "אות מתהווה", short: "חלש", ic: "•", cls: "s1" };
+  }
+  function _mfStkChip(r, dir) {
+    const inflow = dir === "in", tfn = _mfTfBadge(r, dir), ft = _mfFtfcDir(r), ftOn = inflow ? ft > 0 : ft < 0;
+    const cs = (r.c >= 0 ? "+" : "") + (r.c == null ? 0 : r.c).toFixed(1) + "%";
+    return '<span class="mf-stk tsym clickable" data-chart="' + escAttr(r.s) + '" data-tf="D" title="' + escAttr((r.name || r.nm || r.s)) + '">' +
+      '<span class="mf-stk-sym">' + escHtml(r.s) + "</span>" +
+      (tfn ? '<span class="mf-stk-tf">⚡' + tfn + "</span>" : "") +
+      (ftOn ? '<span class="mf-stk-ft">🔗</span>' : "") +
+      '<span class="mf-stk-chg ' + (r.c >= 0 ? "pos" : "neg") + '">' + cs + "</span></span>";
+  }
+  function _mfPopSection(s, dir, isRunner) {               // ONE sector's detail block (leader or runner-up) inside the popover
+    const inflow = dir === "in";
+    const sign = inflow ? "pos" : "neg";
+    const etf = etfFor(s.raw) || etfFor(s.he) || "";
+    const scored = s.members.map(r => ({ r, sc: _mfStkScore(r) }));
+    const aligned = scored.filter(o => inflow ? o.sc > 0.05 : o.sc < -0.05).sort((a, b) => inflow ? b.sc - a.sc : a.sc - b.sc);
+    const top = aligned.slice(0, isRunner ? 6 : 8);
+    const alignedN = aligned.length;
+    const flowTxt = s.flowPct == null ? "" : " " + (s.flowPct >= 0 ? "+" : "") + s.flowPct.toFixed(2) + "%";
+    const fac = (lbl, v) => { const pos = inflow ? v > 0 : v < 0; const mag = Math.min(100, Math.abs(v) * 100);
+      return '<span class="mf-fac ' + (pos ? "on" : "off") + '"><span class="mf-fac-l">' + lbl + '</span><span class="mf-fac-bar"><i style="width:' + mag.toFixed(0) + '%"></i></span></span>'; };
+    const facs = '<div class="mf-facs">' + fac("💰 תזרים", s.fFlow) + fac("⚡ 2\'ים", s.fEnergy) + fac("📊 רוחב", s.fBreadth) + fac("🔗 המשכיות", s.fCont) + "</div>";
+    const stocks = top.length ? top.map(r => _mfStkChip(r.r, dir)).join("") : '<span class="muted" style="font-size:12px">—</span>';
+    const head = isRunner
+      ? '🥈 ' + escHtml(s.he) + (etf ? ' · ' + etf + flowTxt : '') + ' · ' + alignedN + "/" + s.n + ' מניות'
+      : (inflow ? "💰 נכנס אל " : "🩸 יוצא מ-") + escHtml(s.he) + ' · ' + alignedN + "/" + s.n + ' מניות ' + (inflow ? "בכיוון" : "בירידה");
+    return '<div class="mf-pop-sec' + (isRunner ? ' mf-pop-runner' : '') + '">' +
+      '<div class="mf-pop-h ' + sign + '">' + head + '</div>' +
+      facs + '<div class="mf-stocks">' + stocks + "</div>" +
+      '<div class="mf-pop-all" data-mfdrill="' + escAttr(s.raw) + '">כל המניות של ' + escHtml(s.he) + " →</div></div>";
+  }
+  function _mfPill(s, dir, runner) {
+    const inflow = dir === "in";
+    const etf = etfFor(s.raw) || etfFor(s.he) || "";
+    const scored = s.members.map(r => ({ r, sc: _mfStkScore(r) }));
+    const aligned = scored.filter(o => inflow ? o.sc > 0.05 : o.sc < -0.05);
+    const alignedN = aligned.length;
+    const broad = alignedN >= Math.max(5, Math.ceil(s.n * 0.5));
+    const str = _mfStrength(s, dir);
+    const sign = inflow ? "pos" : "neg";
+    const arrow = inflow ? "▲" : "▼";
+    const flowTxt = s.flowPct == null ? "" : " " + (s.flowPct >= 0 ? "+" : "") + s.flowPct.toFixed(2) + "%";
+    const rEtf = runner ? (etfFor(runner.raw) || etfFor(runner.he) || "") : "";
+    const vs = runner ? '<span class="mf-pill-vs" title="ראש בראש — ' + escAttr(runner.he) + '">⚖️ ' + escHtml(rEtf || runner.he) + '</span>' : "";
+    const pop = '<div class="mf-pop">' + _mfPopSection(s, dir, false) +
+      (runner ? '<div class="mf-pop-vs">⚖️ ראש בראש</div>' + _mfPopSection(runner, dir, true) : "") + "</div>";
+    return '<div class="mf-pill mf-' + dir + '" data-mfsec="' + escAttr(s.raw) + '" tabindex="0">' +
+      '<span class="mf-pill-dir ' + sign + '">' + (inflow ? "💰 כסף נכנס" : "🩸 כסף יוצא") + "</span>" +
+      '<span class="mf-pill-sec">' + escHtml(s.he) + "</span>" +
+      (etf ? '<span class="mf-pill-etf ' + sign + '">' + etf + " " + arrow + flowTxt + "</span>" : "") +
+      vs +
+      '<span class="mf-pill-str ' + str.cls + '">' + str.ic + " " + str.short + "</span>" +
+      '<span class="mf-pill-part ' + (broad ? "broad" : "narrow") + '">' + alignedN + "/" + s.n + " · " + (broad ? "רחב·מוסדי" : "ממוקד") + "</span>" +
+      '<span class="mf-pop-hint">⌄</span>' + pop + "</div>";
+  }
+  function renderMarket() {
+    const uniSwitch = '<div class="uni-switch" title="החלף בין עולם המניות של StratNinja ל-S&P 500">' +
+      '<span class="uni-lbl">עולם המניות:</span>' +
+      '<button class="uni-btn' + (marketUniverse === "sp500" ? " on" : "") + '" data-uni="sp500">S&P 500</button>' +
+      '<button class="uni-btn' + (marketUniverse === "all" ? " on" : "") + '" data-uni="all">כל היקום</button>' +
+      "</div>";
+    const dSecUp = [{ name: "חומרי גלם", chg: 1.9 }, { name: "תקשורת", chg: 1.2 }, { name: "אנרגיה", chg: 0.8 }];
+    const dSecDn = [{ name: "מוצרי צריכה", chg: -1.4 }, { name: "בריאות", chg: -0.9 }, { name: "שירותים", chg: -0.5 }];
+    const dStkUp = [{ s: "SMCI", c: 6.2 }, { s: "PLTR", c: 4.1 }, { s: "MARA", c: 3.3 }];
+    const dStkDn = [{ s: "SNAP", c: -5.1 }, { s: "LCID", c: -3.2 }, { s: "NIO", c: -2.4 }];
+    return (
+      '<div class="page-head compact"><h1>סקירת שוק <span class="mkt-live">' + (LIVE && LIVE.updated ? "🟢 חי" : "🧪 דמו") + '</span></h1><div class="sub">תמונת השוק במבט אחד: מצב השוק, רוחב, VIX, המדדים, ומי חזק או חלש היום.</div></div>' +
+      marketFlowRadar() +   // 🎯 distilled institutional in/out — compact, at the top under the live header (hover → stocks)
+      uniSwitch +
+      '<div class="mkt-dash mkt-dash-tight' + (_mktFlip ? " uni-flip" : "") + '">' +
+        marketCockpit() +   // indexCards() now rendered inside the cockpit (above the breadth bar) — no separate row
+        _marketSectorHeat() +
+        '<div class="mkt-sec-title">מובילים ומפגרים היום</div>' +
+        '<div class="mkt-rank-grid">' +
+          '<div class="panel"><h3>🟢 סקטורים מובילים</h3>' + mkLead(LIVE ? (mktU().sectorLeaders || []).slice(0, 5) : dSecUp, "up", true) + "</div>" +
+          '<div class="panel"><h3>🔴 סקטורים בפיגור</h3>' + mkLead(LIVE ? (mktU().sectorLaggards || []).slice(0, 5) : dSecDn, "down", true) + "</div>" +
+          '<div class="panel"><h3>🟢 מניות מובילות</h3>' + mkLead(LIVE ? (mktU().leaders || []).slice(0, 5) : dStkUp, "up", false) + "</div>" +
+          '<div class="panel"><h3>🔴 מניות בפיגור</h3>' + mkLead(LIVE ? (mktU().laggards || []).slice(0, 5) : dStkDn, "down", false) + "</div>" +
+        "</div>" +
+        gappersMini() +
+      "</div>"
+    );
+  }
+  function wireMarket() {
+    const bb = $("#breadthBar"); if (bb) bb.onclick = () => setPage("sp500");
+    document.querySelectorAll("#page [data-goto-heat]").forEach(el => el.onclick = () => setPage("sp500"));
+    { const pb = $("#pulseBreadth"); if (pb) pb.onclick = () => setPage("sp500"); }
+    { const cb = $("#cockpitBreadth"); if (cb) cb.onclick = () => setPage("sp500"); }
+    { const ga = $("#gapAll"); if (ga) ga.onclick = () => { techState.gapDir = "any"; if (!(parseFloat(techState.gapPct) > 0)) techState.gapPct = 3; setPage("scanner"); }; }   // gappers page retired → open the scanner with the gap filter on
+    document.querySelectorAll("[data-idxmode]").forEach(b => b.onclick = () => { _idxChartMode = b.dataset.idxmode; reRender(); });
+    document.querySelectorAll("[data-cmb]").forEach(el => el.onclick = () => openCandleMapDrill(el.dataset.cmb, el.dataset.cmtf));
+    // sector heat tile → that sector's drill table (the ETF ticker inside opens the ETF chart via wireCharts, which stops propagation)
+    document.querySelectorAll(".mh-tile[data-mhsec]").forEach(el => el.onclick = (ev) => {
+      if (ev.target.closest("[data-chart]")) return;                          // clicked the ETF chip → chart, not the drill
+      if (typeof renderSp500Drill === "function") renderSp500Drill(el.dataset.mhsec, false);
+    });
+    // 🎯 money-flow radar (compact): hover shows the popover via CSS; tap toggles it (touch); "כל המניות" → sector table
+    document.querySelectorAll(".mf-pill[data-mfsec]").forEach(el => el.onclick = (ev) => {
+      if (ev.target.closest(".mf-stk")) return;                               // stock chip → chart grid (wireCharts stops propagation; popover closed by its own listener below)
+      const drill = ev.target.closest("[data-mfdrill]");
+      if (drill) { ev.stopPropagation(); const he = secHe(drill.dataset.mfdrill); const sec = ((LIVE && LIVE.sectors) || []).find(x => secHe(x.name) === he); if (sec && typeof renderSp500Drill === "function") renderSp500Drill(sec.name, false); return; }
+      document.querySelectorAll(".mf-pill.open").forEach(p => { if (p !== el) p.classList.remove("open"); });
+      el.classList.toggle("open");
+    });
+    // clicking a stock chip opens the chart grid → close OUR popover so it doesn't float over the modal.
+    // (wireCharts' own onclick calls stopPropagation, so this must be a separate listener ON the chip, not on the pill.)
+    document.querySelectorAll(".mf-pill .mf-stk").forEach(chip => chip.addEventListener("click", () => {
+      document.querySelectorAll(".mf-pill.open").forEach(p => p.classList.remove("open"));
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // drop :focus-within (pill is tabindex=0)
+    }));
+    // (universe buttons are wired globally via click delegation in boot — no per-render wiring needed)
+    _mktFlip = false;   // one-shot: the flip animation only plays on the switch render
+    // rotating "did you know" Candle Map insight
+    if (_cmTimer) { clearInterval(_cmTimer); _cmTimer = null; }
+    if (_cmFacts && _cmFacts.length > 1) {
+      let idx = _cmFacts.indexOf((document.getElementById("cmInsightText") || {}).innerHTML);
+      _cmTimer = setInterval(() => {
+        const el = document.getElementById("cmInsightText");
+        if (!el) { clearInterval(_cmTimer); _cmTimer = null; return; }
+        idx = (idx + 1) % _cmFacts.length;
+        el.style.opacity = "0";
+        setTimeout(() => { el.innerHTML = _cmFacts[idx]; el.style.opacity = "1"; }, 250);
+      }, 10000);
+    }
+  }
+
+  // ========== MARKET BREADTH — % of stocks ABOVE their moving averages (oversold radar) ==========
+  // LOW reading = few stocks above their MAs = washed-out / oversold → historically a BUY zone.
+  // Charts are OUR own (computed server-side from the universe, id='breadth') so they update intraday;
+  // if that data isn't there yet we fall back to TradingView breadth indices (S5xx / NDxx).
+  let breadthUni = "sp";
+  let BREADTH_DATA = null;   // { sp:{"20":[{d,v}],…}, ndx:{…}, updated }
+  const BRD_MAS = ["20", "50", "100", "150", "200"];
+  const BRD_W = { "20": 1, "50": 2, "100": 3, "150": 4, "200": 5 };   // heavier weight to the longer MAs
+  const BREADTH_TV = {
+    sp:  [["S5TW", "20"], ["S5FI", "50"], ["S5OH", "100"], ["S5OF", "150"], ["S5TH", "200"]],
+    ndx: [["NDTW", "20"], ["NDFI", "50"], ["NDOH", "100"], ["NDOF", "150"], ["NDTH", "200"]],
+  };
+  async function loadBreadth() {
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!cfg || !cfg.SUPABASE_URL) return;
+      const j = await snCachedFetch("market_snapshot", "breadth");
+      const d = j && j[0] && j[0].data;
+      if (d && (d.sp || d.ndx)) { BREADTH_DATA = d; if (state.page === "breadth") reRender(); }
+    } catch (e) { /* keep last / fall back to TV */ }
+  }
+  // current reading per MA. S&P: computed LIVE from the scanner (updates intraday). Else: server last point.
+  function _brdReadings(uni) {
+    if (uni === "sp" && SCAN && SCAN.rows && SCAN.rows.length) {
+      const acc = {}; BRD_MAS.forEach(n => acc[n] = [0, 0]);
+      SCAN.rows.forEach(r => {
+        if (!r.sp) return; const dm = r.tech && r.tech.dsma; if (!dm) return;
+        BRD_MAS.forEach(n => { const v = dm[n]; if (v != null) { acc[n][1]++; if (v > 0) acc[n][0]++; } });
+      });
+      if (acc["50"][1] > 50) { const o = {}; BRD_MAS.forEach(n => o[n] = acc[n][1] ? acc[n][0] / acc[n][1] * 100 : null); return o; }
+    }
+    const d = BREADTH_DATA && BREADTH_DATA[uni]; if (!d) return null;
+    const o = {}; BRD_MAS.forEach(n => { const s = d[n] || []; o[n] = s.length ? s[s.length - 1].v : null; }); return o;
+  }
+  // weighted market-state summary (longer MAs weigh more)
+  function _brdState(readings) {
+    if (!readings) return null;
+    let sw = 0, sv = 0;
+    BRD_MAS.forEach(n => { if (readings[n] != null) { sw += BRD_W[n]; sv += readings[n] * BRD_W[n]; } });
+    if (!sw) return null;
+    const score = sv / sw;
+    let lbl, cls;
+    if (score <= 20) { lbl = "🟢 Oversold עמוק · אזור קנייה"; cls = "pos"; }
+    else if (score <= 40) { lbl = "🟢 חלש · מתקרב ל-oversold"; cls = "pos"; }
+    else if (score <= 60) { lbl = "🟡 ניטרלי"; cls = "zero"; }
+    else if (score <= 80) { lbl = "🔴 רחב · מתקרב ל-overbought"; cls = "neg"; }
+    else { lbl = "🔴 Overbought"; cls = "neg"; }
+    return { score: Math.round(score), lbl, cls };
+  }
+  // S&P stocks at their 52-week HIGH / LOW (extreme radar). ONE shared threshold (within 1%) so the
+  // count, the clickable table and the scanner's "52w high" filter (ext52Pct=1) all AGREE.
+  const EXT52_PCT = 1.0;
+  function _ext52Rows(kind) {
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) return [];
+    return SCAN.rows.filter(r => {
+      if (!r.sp) return false; const t = r.tech; if (!t) return false;
+      return kind === "high" ? (t.dhi52 != null && t.dhi52 >= -EXT52_PCT) : (t.dlo52 != null && t.dlo52 <= EXT52_PCT);
+    });
+  }
+  function _brd52wCounts(uni) {
+    if (uni !== "sp" || !(SCAN && SCAN.rows && SCAN.rows.length)) return null;
+    const tot = SCAN.rows.filter(r => r.sp && r.tech).length;
+    return tot ? { hi: _ext52Rows("high").length, lo: _ext52Rows("low").length, tot } : null;
+  }
+  // clickable table of the stocks at the 52-week high / low — sortable by any header
+  let _ext52Sort = { col: "dist", dir: 1 };
+  function _ext52Val(r, col, isHi) {
+    if (col === "sym") return r.s;
+    if (col === "chg") return r.c == null ? -999 : r.c;
+    if (col === "price") return r.p || (r.tech ? r.tech.px : 0) || 0;
+    return (isHi ? r.tech.dhi52 : r.tech.dlo52);   // dist
+  }
+  function _ext52Modal(kind) {
+    const isHi = kind === "high";
+    const all = _ext52Rows(kind);
+    if (!all.length) { snToast && snToast("אין כרגע מניות " + (isHi ? "בשיא" : "בשפל") + " 52 שבועות"); return; }
+    const col = _ext52Sort.col, dir = _ext52Sort.dir;
+    const rows = all.slice().sort((a, b) => {
+      const va = _ext52Val(a, col, isHi), vb = _ext52Val(b, col, isHi);
+      if (typeof va === "string") return dir * va.localeCompare(vb);
+      return dir * ((va == null ? -999 : va) - (vb == null ? -999 : vb));
+    });
+    const th = (label, c, start) => { const ar = _ext52Sort.col === c ? (_ext52Sort.dir < 0 ? " ▼" : " ▲") : ""; return '<th class="sortable" data-ext52sort="' + c + '" style="cursor:pointer;user-select:none' + (start ? ";text-align:start" : "") + '">' + label + ar + "</th>"; };
+    const body = rows.map(r => {
+      const dist = isHi ? r.tech.dhi52 : r.tech.dlo52;
+      const cs = (r.c >= 0 ? "+" : "") + (r.c == null ? 0 : r.c).toFixed(2) + "%";
+      return "<tr><td class='sym'><span class='tsym clickable' data-chart='" + r.s + "' data-tf='D'>" + r.s + "</span>" +
+        (r.sec ? " <span class='tname'>" + secHe(r.sec) + "</span>" : "") + "</td>" +
+        "<td class='" + (r.c > 0 ? "pos" : r.c < 0 ? "neg" : "") + "'>" + cs + "</td>" +
+        "<td>" + money(r.p || (r.tech ? r.tech.px : 0)) + "</td>" +
+        "<td class='muted'>" + (dist == null ? "—" : (dist >= 0 ? "+" : "") + dist.toFixed(2) + "%") + "</td></tr>";
+    }).join("");
+    const syms = rows.map(r => r.s).join(", ");
+    modal((isHi ? "📈 מניות בשיא 52 שבועות" : "📉 מניות בשפל 52 שבועות") + " · " + rows.length,
+      '<div class="drill-bar"><button class="btn ghost" id="ext52Copy" style="font-size:12px;font-weight:600">📋 העתק ' + rows.length + ' טיקרים</button><span class="muted" style="font-size:12px">לחץ כותרת למיון · סימבול לגרף</span></div>' +
+      "<div class='tablewrap'><table class='scan-table'><thead><tr>" + th("סימבול", "sym", true) + th("תנועה", "chg") + th("מחיר", "price") + th(isHi ? "Δ שיא" : "Δ שפל", "dist") + "</tr></thead><tbody>" + body + "</tbody></table></div>");
+    wireCharts(document);
+    document.querySelectorAll("[data-ext52sort]").forEach(h => h.onclick = () => {
+      const c = h.dataset.ext52sort;
+      if (_ext52Sort.col === c) _ext52Sort.dir *= -1; else { _ext52Sort.col = c; _ext52Sort.dir = c === "sym" ? 1 : -1; }
+      _ext52Modal(kind);
+    });
+    const cp = $("#ext52Copy");
+    if (cp) cp.onclick = () => copyToClipboard(syms, () => { cp.textContent = "✓ הועתקו " + rows.length; setTimeout(() => cp.textContent = "📋 העתק " + rows.length + " טיקרים", 1600); });
+  }
+  function _brdZoneCls(v) { return v <= 25 ? "pos" : v >= 75 ? "neg" : (v >= 45 && v <= 55 ? "zero" : ""); }
+  // corner badge per MA card: 🧊 Oversold (≤20) · 🟢 BUY ZONE (≤25) · ⚡ BOUNCE (recently ≤25 and now rising out)
+  function _brdBadge(cur, series) {
+    if (cur == null) return null;
+    if (cur <= 20) return { cls: "bz-os", html: '<span class="brd-badge bz-os-b">🧊 OVERSOLD ' + cur.toFixed(0) + "%</span>" };
+    if (cur <= 25) return { cls: "bz-buy", html: '<span class="brd-badge bz-buy-b">🟢 BUY ZONE ' + cur.toFixed(0) + "%</span>" };
+    const tail = (series || []).slice(-12).map(p => p && p.v).filter(v => v != null);
+    const recentMin = tail.length ? Math.min.apply(null, tail) : 999;
+    if (recentMin <= 25 && cur <= 32) return { cls: "bz-bounce", html: '<span class="brd-badge bz-bounce-b">⚡ BOUNCE ' + cur.toFixed(0) + "%</span>" };
+    return null;
+  }
+  function _brdChartSvg(series, cur) {
+    const W = 300, H = 150, padT = 6, padB = 4, padL = 2, padR = 2;
+    const iw = W - padL - padR, ih = H - padT - padB;
+    const y = v => padT + (1 - v / 100) * ih;
+    const n = series.length;
+    const x = i => padL + (n <= 1 ? iw : (i / (n - 1)) * iw);
+    let d = ""; series.forEach((p, i) => d += (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p.v).toFixed(1) + " ");
+    const zone = (a, b, c) => '<rect x="' + padL + '" y="' + y(b).toFixed(1) + '" width="' + iw + '" height="' + (y(a) - y(b)).toFixed(1) + '" fill="' + c + '"/>';
+    const gl = (v, c, dash) => '<line x1="' + padL + '" y1="' + y(v).toFixed(1) + '" x2="' + (padL + iw) + '" y2="' + y(v).toFixed(1) + '" stroke="' + c + '" stroke-width="1" vector-effect="non-scaling-stroke"' + (dash ? ' stroke-dasharray="3 3"' : "") + ' opacity="0.5"/>';
+    const col = cur != null ? (cur <= 25 ? "#17c08a" : cur >= 75 ? "#e0524f" : (cur >= 45 && cur <= 55 ? "#e6b800" : "var(--ink)")) : "var(--ink)";
+    const svg = '<svg class="brd-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">' +
+      zone(0, 25, "rgba(23,192,138,.13)") + zone(75, 100, "rgba(224,82,79,.13)") +
+      gl(0, "rgba(255,255,255,.28)") + gl(25, "#17c08a") + gl(50, "#e6b800", 1) + gl(75, "#e0524f") + gl(100, "rgba(255,255,255,.28)") +
+      '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="1.7" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>' +
+      (n ? '<circle cx="' + x(n - 1).toFixed(1) + '" cy="' + y(series[n - 1].v).toFixed(1) + '" r="2.6" fill="' + col + '" vector-effect="non-scaling-stroke"/>' : "") +
+      "</svg>";
+    // hover overlay: highlight a zone + show its range (0~25% green / 50% yellow / 75~100% red)
+    const hz = '<span class="brd-hz brd-hz-red" data-r="75~100%"></span>' +
+      '<span class="brd-hz brd-hz-yel" data-r="50%"></span>' +
+      '<span class="brd-hz brd-hz-grn" data-r="0~25%"></span>';
+    return '<div class="brd-plot">' + svg + hz + "</div>";
+  }
+  function _brdSection(uni, name) {
+    const readings = _brdReadings(uni), st = _brdState(readings);
+    const stateBadge = st ? '<span class="brd-state ' + st.cls + '" title="שקלול 5 הממוצעים, משקל כבד יותר לארוכים (200/150)">' + st.lbl + ' · ' + st.score + "%</span>" : "";
+    const ex = _brd52wCounts(uni);
+    const exStrip = ex ? '<span class="brd-extremes"><span class="be-hi">📈 <b>' + ex.hi + '</b> בשיא 52ש׳</span><span class="be-lo">📉 <b>' + ex.lo + '</b> בשפל 52ש׳</span></span>' : "";
+    // MFI extremes (overbought >80 / oversold <20) — server-computed per universe (sp / ndx), same line (Adi)
+    const _mfiC = (BREADTH_DATA && BREADTH_DATA.mfi && BREADTH_DATA.mfi[uni]) || null;
+    const mfiStrip = _mfiC ? '<span class="brd-extremes brd-mfi"><span class="be-ob" title="מניות עם MFI מעל 80 — overbought (תזרים כסף קיצוני)">🔥 <b>' + _mfiC.ob + '</b> מעל 80 MFI</span><span class="be-os" title="מניות עם MFI מתחת 20 — oversold (מכירת יתר)">🧊 <b>' + _mfiC.os + '</b> מתחת 20 MFI</span></span>' : "";
+    const data = BREADTH_DATA && BREADTH_DATA[uni];
+    const haveOurs = data && BRD_MAS.some(n => (data[n] || []).length > 2);
+    let charts;
+    if (haveOurs) {
+      charts = '<div class="brd-charts">' + BRD_MAS.map(n => {
+        let s = (data[n] || []).slice();
+        if (readings && readings[n] != null && s.length) s[s.length - 1] = { d: s[s.length - 1].d, v: readings[n] };   // live last point
+        const cur = readings && readings[n] != null ? readings[n] : (s.length ? s[s.length - 1].v : null);
+        const prev = s.length >= 2 ? s[s.length - 2].v : null;   // yesterday's reading
+        const dchg = (cur != null && prev != null) ? (cur - prev) : null;   // today's move (percentage points)
+        const dchgHtml = dchg != null
+          ? '<span class="brd-dchg ' + (dchg > 0.05 ? "pos" : dchg < -0.05 ? "neg" : "zero") + '" title="שינוי יומי מול אתמול">' + (dchg >= 0 ? "▲ +" : "▼ ") + Math.abs(dchg).toFixed(1) + "</span>"
+          : "";
+        const _bdg = _brdBadge(cur, s);
+        return '<div class="brd-chart' + (_bdg ? " " + _bdg.cls : "") + '"><div class="idx-chart-lbl">% מעל ממוצע <span class="idx-chart-sym">' + n + " ימים</span>" +
+          (cur != null ? '<span class="brd-cur ' + _brdZoneCls(cur) + '">' + cur.toFixed(0) + "%</span>" : "") + dchgHtml + "</div>" +
+          _brdChartSvg(s, cur) + (_bdg ? _bdg.html : "") + "</div>";
+      }).join("") + "</div>";
+    } else {
+      charts = '<div class="note" style="margin:6px 0 4px">טוען נתונים… (יופיע אחרי הסריקה הבאה בשרת)</div>';
+    }
+    return '<div class="brd-section"><div class="brd-sec-head"><h2>' + name + "</h2>" + stateBadge + exStrip + mfiStrip + "</div>" + charts + "</div>";
+  }
+  function renderBreadth() {
+    const header = '<div class="page-head"><h1>רוחב שוק · מעל הממוצעים</h1><div class="sub">כמה מהמניות בכל מדד נמצאות <b>מעל</b> הממוצע הנע שלהן (20 / 50 / 100 / 150 / 200 יום). ' +
+      '<b class="pos">קריאה נמוכה</b> = <b>מעט</b> מניות מעל הממוצעים = אזור <b>oversold</b> (נוטה להיות אזור קנייה). <b class="pos">ירוק ≤25%</b> · צהוב ~50% · <b class="neg">אדום ≥75%</b>.</div></div>';
+    const sections = _brdSection("sp", "S&P 500") + _brdSection("ndx", "Nasdaq 100");
+    const foot = '<div class="note" style="margin-top:6px;font-size:11px">💡 הגרפים שלנו — 180 יום, מתעדכנים תוך-יומי (S&P חי מהסורק). אינו ייעוץ השקעות.</div>';
+    return header + sections + foot;
+  }
+  function wireBreadth() {
+    if (!BREADTH_DATA) loadBreadth();
+  }
+  function mountBreadthCharts() {
+    if (!document.getElementById("bw0")) return;
+    _loadTV().then(() => {
+      const theme = document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+      (BREADTH_TV[breadthUni] || BREADTH_TV.sp).forEach(([sym], i) => {
+        const el = document.getElementById("bw" + i);
+        if (!el) return;
+        el.innerHTML = "";
+        try {
+          new TradingView.widget({
+            container_id: "bw" + i, symbol: sym, interval: "D", timezone: "America/New_York",
+            theme: theme, style: "1", locale: "he_IL", autosize: true,
+            hide_side_toolbar: true, allow_symbol_change: false, save_image: false, withdateranges: true,
+            backgroundColor: theme === "light" ? "#ffffff" : "#12171f",
+          });
+        } catch (e) { el.innerHTML = '<div class="muted tvfallback">הגרף לא זמין כרגע</div>'; }
+      });
+    }).catch(() => {
+      (BREADTH_TV[breadthUni] || BREADTH_TV.sp).forEach((_, i) => { const el = document.getElementById("bw" + i); if (el) el.innerHTML = '<div class="muted tvfallback">הגרף לא זמין כרגע</div>'; });
+    });
+  }
+
+  // ========== S&P 500 BREADTH ==========
+  // color a tile by daily % move: neutral → green (up) / red (down); darker = stronger move
+  function chgColor(c) {
+    const m = Math.max(-3, Math.min(3, c == null ? 0 : c)) / 3; // -1..1
+    const N = [40, 46, 58], G = [20, 168, 110], R = [222, 55, 55];
+    const tgt = m >= 0 ? G : R, t = Math.abs(m);
+    return "rgb(" + Math.round(N[0] + (tgt[0] - N[0]) * t) + "," + Math.round(N[1] + (tgt[1] - N[1]) * t) + "," + Math.round(N[2] + (tgt[2] - N[2]) * t) + ")";
+  }
+  // neon/glow heat-map style toggle ("אפי" ↔ "קלאסי")
+  let hmStyle = "neon"; try { hmStyle = localStorage.getItem("sn_hm_style") || "neon"; } catch (e) {}
+  let _hmShareClean = false;   // when true (share card): sector tabs show only Hebrew name + ETF (no English / breadth% / 🔍)
+  let _hmShareGrid = false;    // when true (share card): each sector body is a UNIFORM grid → equal, clean tiles
+  function _heatNeon() { return hmStyle === "neon" ? " hm-neon" : ""; }
+  function _heatStyleBtn() { return '<button class="uni-btn hm-style-toggle' + (hmStyle === "neon" ? " on" : "") + '" id="hmStyleToggle" title="מראה אפי (ניאון/זוהר) או קלאסי">' + (hmStyle === "neon" ? "✨ אפי" : "◻️ קלאסי") + "</button>"; }
+  // per-tile CSS vars for the neon look: --bg = fill color, --gi = glow intensity (0..1 by |move|), --gc = glow color
+  function _glowVars(cv) {
+    const mag = Math.min(1, Math.abs(cv || 0) / 4);                  // saturate the glow at ±4%
+    const gc = (cv || 0) >= 0 ? "52,227,155" : "255,70,90";
+    return "--bg:" + chgColor(cv == null ? 0 : cv) + ";--gi:" + mag.toFixed(2) + ";--gc:rgba(" + gc + ",.7)";
+  }
+  // squarified treemap (Bruls et al.) — lays out items by .value inside rect [X,Y,W,H]; returns [{item,x,y,w,h}]
+  function _worst(areas, side) {
+    let sum = 0, mn = Infinity, mx = 0;
+    for (const a of areas) { sum += a; if (a < mn) mn = a; if (a > mx) mx = a; }
+    if (sum <= 0) return Infinity;
+    const s2 = side * side, sum2 = sum * sum;
+    return Math.max(s2 * mx / sum2, sum2 / (s2 * mn));
+  }
+  function squarify(items, X, Y, W, H) {
+    const data = items.filter(d => d.value > 0).slice().sort((a, b) => b.value - a.value);
+    const out = [];
+    const total = data.reduce((s, d) => s + d.value, 0);
+    if (total <= 0 || W <= 0 || H <= 0) return out;
+    const scale = (W * H) / total;
+    const areas = data.map(d => d.value * scale);
+    let x = X, y = Y, w = W, h = H, i = 0;
+    while (i < areas.length) {
+      const side = Math.min(w, h);
+      let row = [areas[i]], j = i + 1;
+      while (j < areas.length && _worst(row.concat(areas[j]), side) <= _worst(row, side)) { row.push(areas[j]); j++; }
+      const rowSum = row.reduce((a, b) => a + b, 0), thick = rowSum / side;
+      if (w >= h) { let py = y; for (let k = i; k < j; k++) { const len = areas[k] / thick; out.push({ item: data[k], x: x, y: py, w: thick, h: len }); py += len; } x += thick; w -= thick; }
+      else { let px = x; for (let k = i; k < j; k++) { const len = areas[k] / thick; out.push({ item: data[k], x: px, y: y, w: len, h: thick }); px += len; } y += thick; h -= thick; }
+      i = j;
+    }
+    return out;
+  }
+  // rotating "did you know?" facts for the market map — sector + sub-sector breadth insights
+  let _spFacts = [], _spTimer = null;
+  function sp500Facts() {
+    const secs = (LIVE && LIVE.sectors) ? LIVE.sectors : null;
+    if (!secs || !secs.length) return [];
+    const b = LIVE.breadth, facts = [];
+    const pc = (a, t) => t ? Math.round(a / t * 100) : 0;
+    if (b && b.total) facts.push("🟢 <b>" + b.above + "</b> מתוך " + b.total + " מניות מעל מחיר הפתיחה (<b>" + pc(b.above, b.total) + "%</b> מהשוק).");
+    const big = secs.filter(s => s.total >= 10).slice().sort((x, y) => pc(y.above, y.total) - pc(x.above, x.total));
+    if (big[0]) facts.push("הסקטור הכי <b>חזק</b> היום: <b>" + secHe(big[0].name) + "</b> — " + pc(big[0].above, big[0].total) + "% מעל הפתיחה (" + big[0].above + "/" + big[0].total + ").");
+    if (big.length > 1) { const w = big[big.length - 1]; facts.push("הסקטור הכי <b>חלש</b> היום: <b>" + secHe(w.name) + "</b> — רק " + pc(w.above, w.total) + "% מעל הפתיחה."); }
+    const totAbove = secs.reduce((a, s) => a + s.above, 0);
+    const topGreen = secs.slice().sort((x, y) => y.above - x.above)[0];
+    if (topGreen && totAbove) facts.push("<b>" + Math.round(topGreen.above / totAbove * 100) + "%</b> מכלל המניות שמעל הפתיחה הן מסקטור <b>" + secHe(topGreen.name) + "</b> (" + topGreen.above + " מניות).");
+    // sub-sector (industry) breadth
+    const byInd = {};
+    secs.forEach(s => (s.stocks || []).forEach(x => { const k = (x.ind || "").trim(); if (!k) return; const o = byInd[k] || (byInd[k] = { a: 0, t: 0, sec: s.name }); o.t++; if (x.ao) o.a++; }));
+    const inds = Object.keys(byInd).map(k => ({ ind: k, a: byInd[k].a, t: byInd[k].t, sec: byInd[k].sec })).filter(o => o.t >= 6);
+    if (inds.length) {
+      const strong = inds.slice().sort((x, y) => (y.a / y.t) - (x.a / x.t))[0];
+      facts.push("<b>" + strong.a + "</b> מניות מתת-סקטור <b>" + strong.ind + "</b> (" + secHe(strong.sec) + ") מעל מחיר הפתיחה — <b>" + pc(strong.a, strong.t) + "%</b> מהתת-סקטור.");
+      const weak = inds.slice().sort((x, y) => (x.a / x.t) - (y.a / y.t))[0];
+      if (weak && weak.ind !== strong.ind) facts.push("תת-סקטור <b>" + weak.ind + "</b> חלש היום — רק " + pc(weak.a, weak.t) + "% מעל הפתיחה.");
+    }
+    // mega-cap breadth
+    const all = []; secs.forEach(s => (s.stocks || []).forEach(x => { if (x.mc) all.push(x); }));
+    const mega = all.sort((x, y) => y.mc - x.mc).slice(0, 12);
+    if (mega.length >= 6) facts.push("מבין <b>12 החברות הגדולות</b> בשוק, <b>" + mega.filter(x => x.ao).length + "</b> מעל מחיר הפתיחה.");
+    return facts;
+  }
+  // S&P 500 tab views, toggled by a button: "heat" (treemap) | "risk" (volatile map) | "sectors" (breadth ladder).
+  // Default = HEAT MAP so landing on the page lands straight on the map (Adi) — and remembers the last choice.
+  let sp500View = "heat"; try { sp500View = localStorage.getItem("sn_sp_view") || "heat"; } catch (e) {}
+  if (["heat", "risk", "sectors"].indexOf(sp500View) < 0) sp500View = "heat";
+  function sp500ViewSwitch() {
+    return '<div class="sp-view-switch">' +
+      '<button class="uni-btn' + (sp500View === "sectors" ? " on" : "") + '" data-spview="sectors">📊 לפי סקטור</button>' +
+      '<button class="uni-btn' + (sp500View === "heat" ? " on" : "") + '" data-spview="heat">🔥 HEAT MAP</button>' +
+      '<button class="uni-btn' + (sp500View === "risk" ? " on" : "") + '" data-spview="risk">⚡ RISK ON/OFF</button></div>';
+  }
+  // the 500-square heatmap: every S&P 500 stock = one square, green (up) / red (down), sorted so
+  // the up/down proportion is visible at a glance. Each square is clickable → its chart.
+  function sp500Grid() {
+    const secs = (LIVE && LIVE.sectors) || [];
+    const all = [];
+    secs.forEach(s => (s.stocks || []).forEach(x => all.push(x)));
+    all.sort((a, b) => (b.c == null ? -999 : b.c) - (a.c == null ? -999 : a.c));
+    const up = all.filter(x => (x.c || 0) > 0).length;
+    const down = all.filter(x => (x.c || 0) < 0).length;
+    const flat = all.length - up - down;
+    const upPct = all.length ? Math.round(up / all.length * 100) : 0;
+    const squares = all.map(x => {
+      const cs = (x.c >= 0 ? "+" : "") + (x.c == null ? 0 : x.c).toFixed(2) + "%";
+      return '<span class="spq clickable" data-chart="' + x.s + '" data-tf="D" title="' + x.s + " " + cs + '" style="background:' + chgColor(x.c) + '"></span>';
+    }).join("");
+    return '<div class="sp-grid-head"><span class="pos">🟢 ' + up + ' עולות</span> · <span class="neg">🔴 ' + down + ' יורדות</span>' +
+      (flat ? ' · <span class="muted">⚪ ' + flat + " ללא שינוי</span>" : "") +
+      ' · <span class="muted">' + all.length + " מניות · " + upPct + "% ירוקות</span></div>" +
+      '<div class="sp-grid">' + squares + "</div>";
+  }
+  // ── HEAT MAP (finviz-style sector treemap) ──────────────────────────────────
+  // every stock = a tile sized by market cap, colored by today's move; each sector gets a
+  // WHITE frame + a BLACK name tab; click a sector tab (🔍) to ZOOM into its sub-sectors.
+  let spHeatSector = null;                       // when set → zoomed into this sector
+  let spHeatAvg = false;                          // "מיצוע" mode → one color per sector (avg move)
+  try { spHeatAvg = localStorage.getItem("sn_hm_avg") === "1"; } catch (e) {}
+  // heat-map timeframe (color period). 1D/1W/1M are live client-side; Q/Y/MTD/QTD/YTD need server returns.
+  let spHeatTf = "1d"; try { spHeatTf = localStorage.getItem("sn_hm_tf") || "1d"; } catch (e) {}
+  // heat-map move filter — dim tiles outside the range. up = show gainers ≥ up% · down = show losers ≥ down% (both magnitudes)
+  let spHeatUp = "", spHeatDown = "";
+  try { spHeatUp = localStorage.getItem("sn_hm_up") || ""; spHeatDown = localStorage.getItem("sn_hm_down") || ""; } catch (e) {}
+  // ATR% minimum — removes low-volatility names from the S&P heat map (0 = off). Same idea as the RISK map (Adi).
+  let spHeatAtr = 0; try { const _ha = parseFloat(localStorage.getItem("sn_hm_atr")); if (!isNaN(_ha) && _ha > 0) spHeatAtr = _ha; } catch (e) {}
+  // ATR% per symbol (from the scanner rows) for the heat-map volatility filter
+  let _atrpMapKey = null, _atrpMapV = null;
+  function _atrpMap() { const key = (SCAN && SCAN.rows) ? SCAN.rows.length : 0; if (_atrpMapV && _atrpMapKey === key) return _atrpMapV; const m = {}; ((SCAN && SCAN.rows) || []).forEach(r => { if (r.tech && r.tech.atrp != null) m[r.s] = r.tech.atrp; }); _atrpMapKey = key; _atrpMapV = m; return m; }
+  function _hmAtrPass(x) { if (!spHeatAtr) return true; const a = _atrpMap()[x.s]; return a != null && a >= spHeatAtr; }
+  // combined heat-map stock filter: ATR% AND move% both REMOVE non-matching tiles (resize the map), per Adi
+  function _hmPass(x) { return _hmAtrPass(x) && _hmMoveMatch(_hmChg(x)); }
+  function _hmMoveMatch(cv) {
+    const up = parseFloat(spHeatUp), dn = parseFloat(spHeatDown);
+    const hasUp = !isNaN(up), hasDn = !isNaN(dn);
+    if (!hasUp && !hasDn) return true;              // no filter → everything visible
+    if (cv == null) return false;
+    return (hasUp && cv >= up) || (hasDn && cv <= -Math.abs(dn));   // gainers ≥ up%  OR  losers ≥ down%
+  }
+  // standard rolling / to-date TFs + FIXED calendar ranges (date filter): current-year quarters + last full year
+  const _hmCYr = new Date().getFullYear(), _hmYY = "'" + String(_hmCYr).slice(-2);
+  const HM_TFS_STD = ["1d", "1w", "WTD", "1m", "MTD", "1Q", "QTD", "1Y", "YTD"];
+  const HM_TFS_CAL = ["cq1", "cq2", "cq3", "cq4", "ply"];   // Q1–Q4 of the current year + the previous full year
+  const HM_TFS = HM_TFS_STD.concat(["ext"], HM_TFS_CAL), HM_TFS_SOON = [];
+  const HM_TFL = { "1d": "1D", "1w": "1W", "WTD": "WTD", "1m": "1M", "MTD": "MTD", "1Q": "1Q", "QTD": "QTD", "1Y": "1Y", "YTD": "YTD",
+    "ext": "⚡ פרה/אפטר",
+    "cq1": "Q1 " + _hmYY, "cq2": "Q2 " + _hmYY, "cq3": "Q3 " + _hmYY, "cq4": "Q4 " + _hmYY, "ply": String(_hmCYr - 1) };
+  const HM_TF_KEY = { "1w": "c5", "WTD": "cwtd", "1m": "c20", "MTD": "cmtd", "1Q": "c63", "QTD": "cqtd", "1Y": "c252", "YTD": "cytd",
+    "cq1": "cq1", "cq2": "cq2", "cq3": "cq3", "cq4": "cq4", "ply": "ply" };   // scanner tech field per TF
+  // shared TF-bar builder (S&P heat + risk map) — standard TFs, then a 📅 divider, then the fixed calendar ranges
+  function _hmTfButtons(active, attr) {
+    const _ew = (typeof LIVE !== "undefined" && LIVE) ? LIVE.extWin : null;
+    const extLbl = _ew === "post" ? "⚡ אפטר-מרקט" : _ew === "pre" ? "⚡ פרה-מרקט" : "⚡ פרה/אפטר";
+    const btn = (k, lbl) => '<button class="flow-tf-btn hm-tf' + (k === active ? " on" : "") + '" ' + attr + '="' + k + '">' + (lbl || HM_TFL[k]) + "</button>";
+    return HM_TFS_STD.map(k => btn(k)).join("") + btn("ext", extLbl) + '<span class="hm-tf-sep" title="טווחי תאריך קבועים — ביצועים לפי תקופה">📅</span>' + HM_TFS_CAL.map(k => btn(k)).join("");
+  }
+  if (HM_TFS.indexOf(spHeatTf) < 0) spHeatTf = "1d";
+  // per-stock change over the selected TF. Everything except 1D is joined from the scanner rows (tech.*) by symbol.
+  let _hmScanMap = null, _hmScanKey = null;
+  function _hmSMap() {
+    const key = (SCAN && SCAN.rows) ? SCAN.rows.length : 0;
+    if (_hmScanMap && _hmScanKey === key) return _hmScanMap;
+    const m = {}; if (SCAN && SCAN.rows) SCAN.rows.forEach(r => { if (r.tech) m[r.s] = r.tech; });
+    _hmScanMap = m; _hmScanKey = key; return m;
+  }
+  function _hmChg(x) {
+    if (spHeatTf === "1d") return x.c;
+    if (spHeatTf === "ext") { const e = _extChgMap()[x.s]; return e != null ? e : 0; }   // extended-hours move; no ext trade = flat (no movement)
+    const t = _hmSMap()[x.s]; if (!t) return null;
+    const v = t[HM_TF_KEY[spHeatTf]];
+    return v == null ? null : v;
+  }
+  // EQUAL squares (RSP-style) — Adi prefers a clean, readable grid over cap-weighted tiles.
+  // Every tile has the same weight, so each sector's area just reflects its number of stocks.
+  function _hmValue() { return 1; }
+  function _hmTiles(stocks) {
+    // sort by the ACTIVE timeframe's move (gainers → losers) so each sector shows a clean green→red
+    // gradient at every timeframe, not just 1D. nulls (no data for this TF) sink to the end.
+    const sorted = (stocks || []).slice().sort((a, b) => {
+      const va = _hmChg(a), vb = _hmChg(b);
+      if (va == null && vb == null) return 0;
+      if (va == null) return 1;
+      if (vb == null) return -1;
+      return vb - va;
+    });
+    const items = sorted.map(x => ({ value: 1, stk: x }));
+    return squarify(items, 0, 0, 1000, 600).map(c => {
+      const x = c.item.stk;
+      const cv = _hmChg(x);                          // change over the selected timeframe (1D/1W/1M)
+      const left = c.x / 1000 * 100, top = c.y / 600 * 100, w = c.w / 1000 * 100, h = c.h / 600 * 100;
+      const cs = cv == null ? "—" : (cv >= 0 ? "+" : "") + cv.toFixed(2) + "%";
+      // tiered labels: big tiles show ticker + move, mid tiles show just the ticker, tiny → tooltip only
+      let lbl = "", cls = "hm-tile clickable" + (Math.abs(cv || 0) >= 2 ? " hm-glow" : "");
+      if (c.w > 66 && c.h > 40) { lbl = '<span class="hm-t-sym">' + x.s + '</span><span class="hm-t-chg">' + cs + "</span>"; }
+      else if (c.w > 30 && c.h > 20) { lbl = '<span class="hm-t-sym hm-t-sm">' + x.s + "</span>"; cls += " hm-tile-sm"; }
+      return '<span class="' + cls + '" data-chart="' + x.s + '" data-tf="D" title="' + x.s + " · " + cs + (x.mc ? " · " + fmtCap(x.mc) : "") +
+        '" style="left:' + left.toFixed(3) + "%;top:" + top.toFixed(3) + "%;width:" + w.toFixed(3) + "%;height:" + h.toFixed(3) + "%;" + _glowVars(cv) + '">' + lbl + "</span>";
+    }).join("");
+  }
+  function _hmFrame(name, stocks, opts) {
+    opts = opts || {};
+    const en = opts.en ? ' <span class="hm-sec-en">' + escHtml(opts.en) + "</span>" : "";
+    const etf = opts.etf ? ' <span class="hm-sec-etf">' + escHtml(opts.etf) + "</span>" : "";
+    // share card = a CLEAN tab: just the Hebrew name + ETF (no English, no breadth %, no 🔍)
+    const tab = _hmShareClean
+      ? '<div class="hm-sec-tab">' + name + etf + "</div>"
+      : (opts.zoom
+        ? '<div class="hm-sec-tab hm-sec-zoom clickable" data-hmsector="' + encodeURIComponent(opts.key || name) + '" title="לחץ לזום לתתי-הסקטורים">' + name + en + etf + (opts.pct != null ? ' <span class="hm-sec-pct">' + opts.pct + "%</span>" : "") + " 🔍</div>"
+        : '<div class="hm-sec-tab" title="' + escAttr(name) + '">' + name + en + etf + "</div>");
+    let body;
+    if (spHeatAvg) {
+      // one color for the whole sector = the ETF's move (cap-weighted, matches TradingView / the strength panels).
+      // Falls back to the member average only when the ETF move for this TF isn't available.
+      const arr = (stocks || []).map(x => _hmChg(x)).filter(v => v != null);
+      const avg = (opts.secChg != null) ? opts.secChg : (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+      const cs = (avg >= 0 ? "+" : "") + avg.toFixed(2) + "%";
+      body = '<div class="hm-sec-body hm-avg" style="background:' + chgColor(avg * 2.2) + '"><span class="hm-avg-pct">' + cs + "</span></div>";   // ×2.2: sector avgs are small, boost saturation for a clearer money-flow read
+    } else if (_hmShareGrid) {
+      // UNIFORM grid (share card) — equal cells; columns ≈ √(n·1.3) so blocks read wide, not tall
+      // sort by % DESCENDING → biggest gainer first (top-left, grid is LTR), biggest loser last (bottom-right)
+      const st = (stocks || []).slice().sort((a, b) => (_hmChg(b) == null ? -1e9 : _hmChg(b)) - (_hmChg(a) == null ? -1e9 : _hmChg(a)));
+      // columns ≈ √(n·1.3) → cells come out WIDER than tall, so the ticker + % read nicely (Adi)
+      const cols = Math.max(1, Math.min(st.length, Math.round(Math.sqrt(st.length * 1.3))));
+      body = '<div class="hm-sec-body hm-gridbody" style="grid-template-columns:repeat(' + cols + ',1fr)">' +
+        st.map(x => { const cv = _hmChg(x), cs = cv == null ? "—" : (cv >= 0 ? "+" : "") + cv.toFixed(2) + "%";
+          return '<span class="hm-tile hm-gcell' + (Math.abs(cv || 0) >= 2 ? " hm-glow" : "") + '" data-chart="' + x.s + '" data-tf="D" style="' + _glowVars(cv) + '"><span class="hm-t-sym">' + x.s + '</span><span class="hm-t-chg">' + cs + "</span></span>"; }).join("") + "</div>";
+    } else {
+      body = '<div class="hm-sec-body">' + _hmTiles(stocks) + "</div>";
+    }
+    return '<div class="hm-sec" style="left:' + opts.left.toFixed(3) + "%;top:" + opts.top.toFixed(3) + "%;width:" + opts.w.toFixed(3) + "%;height:" + opts.h.toFixed(3) + '%">' +
+      tab + body + "</div>";
+  }
+  function spHeatmap() {
+    const secs = (LIVE && LIVE.sectors) || [];
+    // ZOOM view: one sector broken into its sub-sectors (.ind)
+    if (spHeatSector) {
+      const sec = secs.find(s => s.name === spHeatSector);
+      if (sec) {
+        const subMap = {};
+        (sec.stocks || []).filter(_hmPass).forEach(x => { const k = (x.ind && x.ind !== "אחר" && x.ind !== "מדדים") ? x.ind : "אחר"; (subMap[k] = subMap[k] || []).push(x); });
+        const subs = Object.keys(subMap).map(k => ({ name: k, stocks: subMap[k], value: subMap[k].reduce((a, b) => a + _hmValue(b), 0) }));
+        const frames = squarify(subs, 0, 0, 1000, 600).map(r =>
+          _hmFrame(r.item.name, r.item.stocks, { etf: subEtfFor(r.item.name), left: r.x / 1000 * 100, top: r.y / 600 * 100, w: r.w / 1000 * 100, h: r.h / 600 * 100 })).join("");
+        return '<div class="hm-zoom-bar"><button class="btn ghost" id="hmBack">← חזרה למפה המלאה</button>' +
+          '<span class="hm-zoom-title">' + secHe(sec.name) + " · " + (sec.stocks || []).length + " מניות · חלוקה לתתי-סקטורים</span></div>" +
+          '<div class="sp-heat">' + frames + "</div>";
+      }
+      spHeatSector = null;
+    }
+    // FULL view: all sectors framed, stocks inside (ATR% filter removes low-volatility names when active)
+    const _hmFiltered = spHeatAtr || spHeatUp !== "" || spHeatDown !== "";
+    const list = secs.filter(s => s.name !== "מדדים").map(s => { const st = (s.stocks || []).filter(_hmPass); return { sec: s, stocks: st, value: _hmShareGrid ? Math.max(st.length, 1.8) : st.length }; }).filter(o => o.stocks.length);
+    const frames = squarify(list, 0, 0, 1000, 600).map(r => {
+      const s = r.item.sec, st = r.item.stocks;
+      const above = _hmFiltered ? st.filter(x => x.ao).length : s.above, totl = _hmFiltered ? st.length : s.total;
+      const p = totl ? Math.round(above / totl * 100) : null;
+      const secChg = spHeatTf === "1d" ? s.chg : (spHeatTf === "1w" ? s.chg5d : (spHeatTf === "1m" ? s.chg20d : null));
+      return _hmFrame(secHe(s.name), st, { zoom: true, key: s.name, pct: p, en: s.name, etf: etfFor(s.name), secChg: secChg, left: r.x / 1000 * 100, top: r.y / 600 * 100, w: r.w / 1000 * 100, h: r.h / 600 * 100 });
+    }).join("");
+    return '<div class="sp-heat">' + frames + "</div>";
+  }
+  // ── RISK ON/OFF heat map: only the VOLATILE names (ATR% ≥ threshold) from the WHOLE universe (1300+),
+  //    grouped by sector, colored by TODAY's move. Sea of green = risk-on · sea of red = risk-off. ──
+  let riskAtrMin = 5; try { const _rv = parseFloat(localStorage.getItem("sn_risk_atr")); if (!isNaN(_rv) && _rv > 0) riskAtrMin = _rv; } catch (e) {}
+  // risk-map timeframe (which period's move colors the tiles) — modular, reuses the heat-map TF set
+  let riskTf = "1d"; try { riskTf = localStorage.getItem("sn_risk_tf") || "1d"; } catch (e) {} if (HM_TFS.indexOf(riskTf) < 0) riskTf = "1d";
+  // move% filter on the RISK map — show only gainers ≥ up% and/or losers ≥ down% (removes the rest), same as the S&P heat map (Adi)
+  let riskUp = "", riskDown = "";
+  try { riskUp = localStorage.getItem("sn_risk_up") || ""; riskDown = localStorage.getItem("sn_risk_down") || ""; } catch (e) {}
+  let riskZoomSec = null;   // when set → zoom into one sector's volatile stocks (bigger tiles)
+  function _riskAtrp(r) { const k = r.tech; return (k && k.atrp != null) ? k.atrp : null; }
+  // live 1D change per symbol (from the LIVE snapshot — includes PRE/POST-market), so the risk map reacts in
+  // extended hours exactly like the S&P map. Falls back to the scanner's change for names not in LIVE.
+  let _liveChgObj = null, _liveChgMapV = null;
+  function _liveChgMap() {
+    if (_liveChgObj === LIVE && _liveChgMapV) return _liveChgMapV;
+    const m = {}; ((LIVE && LIVE.sectors) || []).forEach(s => (s.stocks || []).forEach(x => { if (x.c != null) m[x.s] = x.c; }));
+    _liveChgObj = LIVE; _liveChgMapV = m; return m;
+  }
+  // extended-hours (pre/post) move per symbol — covers the WHOLE universe (not just S&P), so the risk map
+  // reacts to pre/after-market movers like COIN/PLTR etc. that aren't in LIVE.sectors. Empty during RTH.
+  function _extChgMap() { return (LIVE && LIVE.extWin && LIVE.ext) ? LIVE.ext : {}; }
+  function _riskExt() { return !!(LIVE && LIVE.extWin); }
+  // the move over the selected risk-map timeframe. 1D = extended-hours move (pre/post, full universe) when
+  // an extended session is live, else the live RTH move (S&P) / scanner change. Other TFs = scanner tech.
+  function _riskChg(x) {
+    if (riskTf === "ext") { const e = _extChgMap()[x.s]; return e != null ? e : 0; }   // dedicated pre/after tab; no ext trade = flat (no movement)
+    if (riskTf === "1d") {
+      const lc = _liveChgMap()[x.s]; if (lc != null) return lc;                // live RTH move (S&P) during market hours
+      return x.c != null ? x.c : null;                                          // scanner change = last completed session (clean 1D, no pre/post mixing)
+    }
+    const t = x.tech || _hmSMap()[x.s]; if (!t) return null; const v = t[HM_TF_KEY[riskTf]]; return v == null ? null : v;
+  }
+  // move% filter (over the selected risk TF) — gainers ≥ up% OR losers ≥ down%; non-matching tiles are REMOVED
+  function _riskMoveMatch(cv) {
+    const up = parseFloat(riskUp), dn = parseFloat(riskDown);
+    const hasUp = !isNaN(up), hasDn = !isNaN(dn);
+    if (!hasUp && !hasDn) return true;
+    if (cv == null) return false;
+    return (hasUp && cv >= up) || (hasDn && cv <= -Math.abs(dn));
+  }
+  // map each sub-sector (.ind) → its majority GICS sector, for stocks whose own .sec isn't one of the 11 GICS
+  let _riskIndParentCache = null, _riskIndParentKey = null;
+  function _riskIndParent() {
+    const key = (SCAN && SCAN.rows) ? SCAN.rows.length : 0;
+    if (_riskIndParentCache && _riskIndParentKey === key) return _riskIndParentCache;
+    const byInd = {};
+    ((SCAN && SCAN.rows) || []).forEach(r => { const ind = (r.ind || "").trim(); if (!ind || !etfFor(r.sec)) return; (byInd[ind] = byInd[ind] || {})[r.sec] = (byInd[ind][r.sec] || 0) + 1; });
+    const out = {}; Object.keys(byInd).forEach(ind => { out[ind] = Object.keys(byInd[ind]).sort((a, b) => byInd[ind][b] - byInd[ind][a])[0]; });
+    _riskIndParentCache = out; _riskIndParentKey = key; return out;
+  }
+  // nearest GICS sector for any stock — real sector → itself; else its sub-sector's majority sector; else the fallback (never "אחר")
+  function _riskSecOf(r, fallback) {
+    if (etfFor(r.sec)) return r.sec;
+    const p = _riskIndParent()[(r.ind || "").trim()];
+    return p || fallback;
+  }
+  function _riskVol() {
+    const rows = (SCAN && SCAN.rows) ? SCAN.rows : [];
+    return rows.filter(r => { const a = _riskAtrp(r); return a != null && a >= riskAtrMin && _riskChg(r) != null && _riskMoveMatch(_riskChg(r)); });
+  }
+  function _riskTiles(stocks) {
+    const sorted = stocks.slice().sort((a, b) => { const va = _riskChg(a), vb = _riskChg(b); return (vb == null ? -999 : vb) - (va == null ? -999 : va); });
+    const items = sorted.map(x => ({ value: 1, stk: x }));
+    return squarify(items, 0, 0, 1000, 600).map(c => {
+      const x = c.item.stk, cv = _riskChg(x), a = _riskAtrp(x);
+      const left = c.x / 1000 * 100, top = c.y / 600 * 100, w = c.w / 1000 * 100, h = c.h / 600 * 100;
+      const cs = cv == null ? "—" : (cv >= 0 ? "+" : "") + cv.toFixed(2) + "%";
+      const as = a != null ? a.toFixed(1) + "% ATR" : "";
+      let lbl = "", cls = "hm-tile clickable" + (Math.abs(cv || 0) >= 2 ? " hm-glow" : "");
+      if (c.w > 66 && c.h > 40) lbl = '<span class="hm-t-sym">' + x.s + '</span><span class="hm-t-chg">' + cs + "</span>";
+      else if (c.w > 30 && c.h > 20) { lbl = '<span class="hm-t-sym hm-t-sm">' + x.s + "</span>"; cls += " hm-tile-sm"; }
+      return '<span class="' + cls + '" data-chart="' + x.s + '" data-tf="D" title="' + x.s + " · " + cs + " · " + as + '" style="left:' + left.toFixed(3) + "%;top:" + top.toFixed(3) + "%;width:" + w.toFixed(3) + "%;height:" + h.toFixed(3) + "%;" + _glowVars(cv) + '">' + lbl + "</span>";
+    }).join("");
+  }
+  function riskHeatmap() {
+    const vol = _riskVol();
+    if (!vol.length) return '<div class="panel"><div class="stub"><div class="big">⚡</div><h2>אין כרגע מניות עם ATR% ≥ ' + riskAtrMin + '%</h2><p>הורד את הסף או חזור בשעות המסחר.</p></div></div>';
+    const secCount = {}; vol.forEach(r => { if (etfFor(r.sec)) secCount[r.sec] = (secCount[r.sec] || 0) + 1; });
+    const domSec = Object.keys(secCount).sort((a, b) => secCount[b] - secCount[a])[0] || "Technology";   // fallback bucket (never "אחר")
+    const bySec = {}; vol.forEach(r => { const s = _riskSecOf(r, domSec); (bySec[s] = bySec[s] || []).push(r); });
+    // ZOOM view: one sector's volatile stocks fill the whole area (bigger tiles)
+    if (riskZoomSec && bySec[riskZoomSec] && bySec[riskZoomSec].length) {
+      const stocks = bySec[riskZoomSec];
+      return '<div class="hm-zoom-bar"><button class="btn ghost" id="riskBack">← חזרה למפה המלאה</button>' +
+        '<span class="hm-zoom-title">' + secHe(riskZoomSec) + " · " + stocks.length + " מניות תנודתיות · זום</span></div>" +
+        '<div class="sp-heat"><div class="hm-sec" style="left:0;top:0;width:100%;height:100%">' +
+        '<div class="hm-sec-tab" title="' + escAttr(secHe(riskZoomSec)) + '">' + secHe(riskZoomSec) + (etfFor(riskZoomSec) ? ' <span class="hm-sec-etf">' + etfFor(riskZoomSec) + "</span>" : "") + "</div>" +
+        '<div class="hm-sec-body">' + _riskTiles(stocks) + "</div></div></div>";
+    }
+    riskZoomSec = null;
+    const list = Object.keys(bySec).map(name => ({ name: name, stocks: bySec[name], value: bySec[name].length }));
+    const frames = squarify(list, 0, 0, 1000, 600).map(fr => {
+      const nm = fr.item.name, stocks = fr.item.stocks;
+      const up = stocks.filter(x => (_riskChg(x) || 0) > 0).length, tot = stocks.length;
+      const tab = '<div class="hm-sec-tab hm-sec-zoom clickable" data-riskzoom="' + encodeURIComponent(nm) + '" title="לחץ לזום על הסקטור">' + secHe(nm) +
+        ' <span class="hm-sec-en">' + escHtml(nm) + "</span>" + (etfFor(nm) ? ' <span class="hm-sec-etf">' + etfFor(nm) + "</span>" : "") +
+        ' <span class="hm-sec-pct">' + up + "/" + tot + " 🟢</span> 🔍</div>";
+      return '<div class="hm-sec" style="left:' + (fr.x / 1000 * 100).toFixed(3) + "%;top:" + (fr.y / 600 * 100).toFixed(3) + "%;width:" + (fr.w / 1000 * 100).toFixed(3) + "%;height:" + (fr.h / 600 * 100).toFixed(3) + '%">' +
+        tab + '<div class="hm-sec-body">' + _riskTiles(stocks) + "</div></div>";
+    }).join("");
+    return '<div class="sp-heat">' + frames + "</div>";
+  }
+  // ---- broad-market / thematic COMPOSITES (LIVE.singles) shared across all pulse tabs ----
+  // kind 'macro' → the "מדדים ושונות" row under the 11 GICS sectors · 'sub' → an extra sub-sector (WGMI).
+  function _singlesOf(kind) { return (LIVE && LIVE.singles) ? LIVE.singles.filter(s => s.kind === kind) : []; }
+  // FTFC direction of a single ETF over the given timeframes (all up / all down / else null)
+  function _singleFtfc(s, tfs) {
+    const ds = (tfs && tfs.length ? tfs : ["M", "Q", "Y"]).map(t => (s.tfs || {})[t]).filter(Boolean);
+    if (!ds.length) return null;
+    if (ds.every(d => d === "up")) return "up";
+    if (ds.every(d => d === "down")) return "down";
+    return null;
+  }
+  // a full-width divider inside a .bcell-list grid, labelling the macro-composites block
+  function _bcellDivider(label) { return '<div class="bcell-div"><span>' + label + "</span></div>"; }
+  // keep only the 11 real GICS sectors (those with a SPDR sector ETF) — crypto/commodities/אחר are shown
+  // instead as single-ETF composites in the "מדדים ושונות" row, so they never appear twice.
+  function _gicsSecs(arr) { return (arr || []).filter(s => s && s.name !== "אחר" && s.name !== "מדדים" && etfFor(s.name)); }
+  // click a broad-market composite → drill into its constituent stocks (from the live scan), sorted by move.
+  // ETFs that hold no stocks in our universe (IBIT=bitcoin, COMT=commodity futures) → open the ETF chart.
+  const _MAGS7 = ["AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA"];
+  function openCompositeDrill(name, etf) {
+    const rows = (SCAN && SCAN.rows) ? SCAN.rows : [];
+    let members = [], note = "";
+    if (etf === "MAGS") { members = rows.filter(r => _MAGS7.indexOf(r.s) >= 0); note = "7 המניות הגדולות"; }
+    else if (etf === "SPY" || etf === "RSP") { members = rows.filter(r => r.sp); note = etf === "RSP" ? "S&P 500 · שווה-משקל" : "S&P 500"; }
+    else if (etf === "QQQ") { members = rows.filter(r => r.sp && ["Technology", "Communication", "Consumer Disc."].indexOf(r.sec) >= 0); note = 'ייצוג נאסד"ק 100 (טק · תקשורת · צריכה)'; }
+    else if (etf === "IBIT" || etf === "WGMI") { members = rows.filter(r => r.sec === "Crypto" || /קריפטו|בלוקצ|crypto/i.test(r.ind || "")); note = "קריפטו ובלוקצ'יין"; }
+    else if (etf === "COMT") { members = rows.filter(r => r.sec === "סחורות" || /סחורות|commod/i.test(r.ind || "")); note = "סחורות"; }
+    if (!members.length) { if (typeof openChart === "function") openChart(etf, "D"); else snToast("אין מניות מרכיבות זמינות"); return; }
+    compSort = { col: "chg", dir: -1 };                       // fresh sort each open (default: today's move ↓)
+    openMembersDrill(name + (etf ? " · " + etf : ""), members, etf, note);
+  }
+
+  function renderSp500() {
+    const secs = (LIVE && LIVE.sectors) ? LIVE.sectors : null;
+    if (!secs || !secs.length) {
+      return '<div class="page-head"><h1>S&P 500 · מפת שוק</h1><div class="sub">מפת חום של המדד: כל ריבוע = מניה, הגודל = שווי השוק, הצבע = התנועה היום. מבט מהיר על מי מוביל ומי נופל.</div></div>' +
+        '<div class="panel"><div class="stub"><div class="big">🗺️</div><h2>ממתין לנתוני מסחר</h2><p>המפה מחושבת בשעות המסחר (מעל/מתחת לפתיחת היום). חזור כשהשוק פתוח.</p></div></div>';
+    }
+    const b = LIVE.breadth;
+    _spFacts = sp500Facts();
+    const firstFact = _spFacts.length ? _spFacts[Math.floor(Math.random() * _spFacts.length)] : "";
+    const insightBox = _spFacts.length ? '<div class="cm-insight"><span class="cm-bulb">💡</span><span id="spInsightText">' + firstFact + "</span></div>" : "";
+    // overall S&P 500 breadth bar (same green/red visual as the market-overview breadth panel) — Adi
+    // wanted the bar on this page too, not just the text summary in the header.
+    const apTop = (b && b.total) ? (b.above / b.total * 100) : 0;
+    const breadthTopBar = (b && b.total)
+      ? '<div class="panel breadth-panel"><h3>רוחב שוק · Breadth <span class="muted" style="font-size:12px">S&P 500 · ' + b.total + ' מניות</span></h3>' +
+        '<div class="bigbreadth"><span class="bseg up" style="width:' + apTop.toFixed(1) + '%"></span><span class="bseg down" style="width:' + (100 - apTop).toFixed(1) + '%"></span></div>' +
+        '<div class="bkey" style="margin-top:10px;font-size:13px"><span class="pos">🟢 ' + b.above + ' מעל פתיחה</span><span class="neg">🔴 ' + b.below + ' מתחת</span><span class="muted">' + apTop.toFixed(0) + '% ירוקים</span></div></div>'
+      : "";
+    // ── HEAT MAP VIEW: sector-framed treemap (toggle) ──
+    if (sp500View === "heat") {
+      const ex = _brd52wCounts("sp");
+      const countsStrip = '<div class="hm-counts">' +
+        (ex
+          ? '<span class="be-hi clickable" data-ext52="high" title="לחץ לרשימת המניות בשיא">📈 <b>' + ex.hi + "</b> בשיא 52 שבועות</span><span class=\"be-lo clickable\" data-ext52=\"low\" title=\"לחץ לרשימת המניות בשפל\">📉 <b>" + ex.lo + "</b> בשפל 52 שבועות</span>"
+          : '<span class="muted">נתוני שיא/שפל נטענים…</span>') +
+        '<span class="hm-legend"><span class="hml neg"></span> ירידה<span class="hml zero"></span> ללא שינוי<span class="hml pos"></span> עלייה · הצבע = התנועה ב' + HM_TFL[spHeatTf] + '</span></div>';
+      const avgBtn = '<button class="uni-btn hm-avg-toggle' + (spHeatAvg ? " on" : "") + '" id="hmAvgToggle" title="צבע אחד לכל סקטור לפי תנועת תעודת-הסל (XLK/XLF… · משוקלל כמו TradingView) — לראות מיד לאן הכסף נכנס">🌡️ תנועת סקטור</button>';
+      const tfBtns = '<div class="hm-tfbar">' + _hmTfButtons(spHeatTf, "data-hmtf") +
+        HM_TFS_SOON.map(k => '<button class="flow-tf-btn hm-tf hm-tf-soon" disabled title="בקרוב — דורש עדכון שרת">' + k + "</button>").join("") + "</div>";
+      // move filter: show only gainers ≥ (מעל)% and/or losers ≥ (מתחת)% — the rest dim out
+      const mfOn = spHeatUp !== "" || spHeatDown !== "";
+      const moveFilter = '<div class="hm-movefilter' + (mfOn ? " on" : "") + '" title="הצג רק מניות שעלו/ירדו מעל האחוז שתמלא — השאר מוסרות מהמפה">' +
+        '<span class="hm-mf-lbl">סינון תנועה %</span>' +
+        '<span class="hm-mf-field hm-mf-up"><span class="hm-mf-ico">▲</span><input type="number" step="0.5" min="0" inputmode="decimal" id="hmMoveUp" placeholder="עולות מעל" value="' + escAttr(spHeatUp) + '"></span>' +
+        '<span class="hm-mf-field hm-mf-down"><span class="hm-mf-ico">▼</span><input type="number" step="0.5" min="0" inputmode="decimal" id="hmMoveDown" placeholder="יורדות מעל" value="' + escAttr(spHeatDown) + '"></span>' +
+        (mfOn ? '<button class="hm-mf-clear" id="hmMoveClear" title="נקה סינון">✕</button>' : "") + "</div>";
+      // ATR% volatility filter — removes low-volatility names from the map (Adi, same as the RISK map)
+      const atrFilter = '<div class="hm-movefilter hm-atrfilter' + (spHeatAtr ? " on" : "") + '" title="הצג רק מניות עם תנודתיות (ATR%) מעל הסף — השאר מוסרות מהמפה">' +
+        '<span class="hm-mf-lbl">תנודתיות מינ׳ · ATR%</span>' +
+        '<span class="hm-mf-field"><input type="number" step="0.5" min="0" inputmode="decimal" id="hmAtrMin" placeholder="0" value="' + escAttr(spHeatAtr ? String(spHeatAtr) : "") + '"></span>' +
+        (spHeatAtr ? '<button class="hm-mf-clear" id="hmAtrClear" title="נקה">✕</button>' : "") + "</div>";
+      return '<div class="page-head hm-head"><h1>S&P 500 · HEAT MAP</h1><div class="sub">כל ריבוע = מניה, הצבע לפי התנועה בטווח הנבחר · לחץ שם סקטור (🔍) לזום · מניה לגרף · מונה שיא/שפל לרשימה.</div></div>' +
+        '<div class="sp-view-row">' + sp500ViewSwitch() + avgBtn + _heatStyleBtn() + "</div>" +
+        '<div class="hm-controls">' + tfBtns + moveFilter + atrFilter + countsStrip + "</div>" +
+        '<div class="panel sp-heat-panel' + _heatNeon() + '">' + spHeatmap() + "</div>";
+    }
+    // ── RISK ON/OFF VIEW: volatile names (ATR% ≥ threshold) from the whole universe, colored by today's move ──
+    if (sp500View === "risk") {
+      const rowsN = (SCAN && SCAN.rows) ? SCAN.rows.length : 0;
+      const vol = _riskVol();
+      const up = vol.filter(r => (_riskChg(r) || 0) > 0).length, dn = vol.filter(r => (_riskChg(r) || 0) < 0).length;
+      // in the ⚡ ext tab, flat (no-trade) names shouldn't dilute the verdict — count only names actually moving extended-hours
+      const tot = riskTf === "ext" ? (up + dn) : vol.length;
+      const upPct = tot ? up / tot * 100 : 0;
+      // pre/post now has its own "⚡ פרה/אפטר" tab, so 1D is a clean daily move (no pre-market mislabel).
+      const tfl = riskTf === "ext"
+        ? ((LIVE && LIVE.extWin === "post") ? "⚡ אפטר-מרקט" : "⚡ פרה-מרקט")
+        : (HM_TFL[riskTf] || riskTf);
+      let verdict, vcls;
+      if (riskTf === "ext" && tot < 5) { verdict = "אין מסחר מורחב משמעותי כעת"; vcls = "risk-mid"; }
+      else if (tot < 5) { verdict = "מעט מדי מניות תנודתיות"; vcls = "risk-mid"; }
+      else if (upPct >= 60) { verdict = "RISK ON 🟢"; vcls = "risk-on"; }
+      else if (upPct <= 40) { verdict = "RISK OFF 🔴"; vcls = "risk-off"; }
+      else { verdict = "מעורב · זהירות 🟡"; vcls = "risk-mid"; }
+      // verdict sits on the SAME line as the RISK ON/OFF title (Adi) — compact chip
+      const verdictInline = '<span class="risk-verdict-chip ' + vcls + '"><span class="risk-v-val">' + verdict + "</span>" +
+        '<span class="risk-v-sub"><span class="pos">🟢 ' + up + "</span> · <span class=\"neg\">🔴 " + dn + "</span> · " + tot + " תנודתיות · " + upPct.toFixed(0) + "% ירוקות · " + tfl + "</span></span>";
+      const tfBtns = '<div class="hm-tfbar">' + _hmTfButtons(riskTf, "data-risktf") + "</div>";
+      // move% filter — show only gainers ≥ (מעל)% and/or losers ≥ (מתחת)% over the selected TF; the rest are removed
+      const rMfOn = riskUp !== "" || riskDown !== "";
+      const riskMoveFilter = '<div class="hm-movefilter' + (rMfOn ? " on" : "") + '" title="הצג רק מניות שעלו/ירדו מעל האחוז שתמלא — השאר מוסרות מהמפה">' +
+        '<span class="hm-mf-lbl">סינון תנועה %</span>' +
+        '<span class="hm-mf-field hm-mf-up"><span class="hm-mf-ico">▲</span><input type="number" step="0.5" min="0" inputmode="decimal" id="riskMoveUp" placeholder="עולות מעל" value="' + escAttr(riskUp) + '"></span>' +
+        '<span class="hm-mf-field hm-mf-down"><span class="hm-mf-ico">▼</span><input type="number" step="0.5" min="0" inputmode="decimal" id="riskMoveDown" placeholder="יורדות מעל" value="' + escAttr(riskDown) + '"></span>' +
+        (rMfOn ? '<button class="hm-mf-clear" id="riskMoveClear" title="נקה סינון">✕</button>' : "") + "</div>";
+      const ctl = '<div class="hm-controls risk-controls">' + tfBtns + riskMoveFilter +
+        '<div class="risk-atr-field"><span class="hm-mf-lbl">תנודתיות מינימלית · ATR%</span>' +
+        '<input type="number" step="0.5" min="0" inputmode="decimal" id="riskAtrInput" value="' + escAttr(String(riskAtrMin)) + '">' +
+        '<span class="muted" style="font-size:12px">ככל שהסף גבוה יותר → רק המניות הכי תנודתיות</span></div>' +
+        '<span class="hm-legend"><span class="hml neg"></span> יורדת<span class="hml zero"></span> ללא שינוי<span class="hml pos"></span> עולה · הצבע = התנועה ב' + tfl + "</span></div>";
+      return '<div class="page-head hm-head risk-head"><div class="risk-head-row"><h1>⚡ מפת סיכון · RISK ON / OFF</h1>' + verdictInline + "</div>" +
+        '<div class="sub">רק המניות <b>התנודתיות</b> (ATR% ≥ ' + riskAtrMin + '%) מכל היקום (' + rowsN + ' מניות), מקובצות לפי סקטור וצבועות לפי <b>התנועה ב' + tfl + '</b>. ים של ירוק = תיאבון לסיכון · ים של אדום = בריחה מסיכון · לחץ סקטור (🔍) לזום · מניה לגרף.</div></div>' +
+        '<div class="sp-view-row">' + sp500ViewSwitch() + _heatStyleBtn() + "</div>" +
+        ctl +
+        '<div class="panel sp-heat-panel' + _heatNeon() + '">' + riskHeatmap() + "</div>";
+    }
+    // ── SECTOR / SUB-SECTOR "strength ladder" (battery-cell style, like the money-flow page) ──
+    // ranked by breadth = % of the sector's stocks above their open. Leaders/laggards moved into the click.
+    const _breadthTier = p => p == null ? "t-n" : p >= 70 ? "t-vg" : p >= 55 ? "t-mg" : p > 45 ? "t-n" : p > 30 ? "t-mr" : "t-vr";
+    const _breadthRow = (o, isSub) => {
+      const p = (o.total && !o.thin) ? o.above / o.total * 100 : null;
+      const etf = isSub ? subEtfFor(o.name) : etfFor(o.name);
+      const name = isSub ? o.name : secHe(o.name);
+      const chip = '<span class="bc-etf flow-etf' + (etf ? "" : " bc-noetf") + '" data-secetf="' + escAttr(etf || "") +
+        '" data-secname="' + escAttr(o.name) + '" data-secsub="' + (isSub ? "1" : "") + '" title="אפשרויות סקטור">' + (etf ? etf + " ▾" : "▾") + "</span>";
+      const w = p == null ? 0 : Math.max(4, Math.min(100, p));
+      return '<div class="bc-card bc-clickable ' + _breadthTier(p) + '" data-spdrill="' + encodeURIComponent(o.name) + '" data-spsub="' + (isSub ? "1" : "") + '">' +
+        '<div class="bcc-head">' + chip + '<span class="bcc-name">' + name + "</span></div>" +
+        '<div class="bcc-mid"><span class="bcc-pct">' + (p == null ? "—" : p.toFixed(0) + "%") + '</span><span class="bcc-usd">' + o.above + "/" + o.total + "</span></div>" +
+        '<div class="bcc-bar"><span class="bcc-fill" style="width:' + w.toFixed(0) + '%"></span></div></div>';
+    };
+    const _breadthLadder = (arr, isSub) => {
+      const _sv = o => o.thin ? -1 : (o.total ? o.above / o.total : 0);   // thin sub-sectors (breadth = noise) sink to the bottom
+      const rows = arr.slice().sort((a, c) => _sv(c) - _sv(a));
+      return rows.length ? rows.map(o => _breadthRow(o, isSub)).join("") : '<div class="muted" style="padding:10px">—</div>';
+    };
+    // sub-sector breadth: group the S&P stocks by sub-sector (.ind), count above-open
+    const subMap = {};
+    secs.forEach(s => (s.stocks || []).forEach(x => { const ind = x.ind; if (!ind || ind === "אחר" || ind === "מדדים") return; const o = subMap[ind] = subMap[ind] || { name: ind, above: 0, total: 0 }; o.total++; if (x.ao) o.above++; }));
+    // ALL 18 SPDR sub-sectors (from the live map) so every pulse tab carries the SAME assets.
+    // BREADTH is only meaningful with enough S&P members (10+, the SPDR-industry design target):
+    // thin thematic/merged ETFs like GDX/TAN hold ~1 S&P constituent → a "1/1" is noise, not breadth.
+    // Hide them HERE only — they stay on the money-flow / continuity tabs where the ETF's own move counts.
+    // Mirror the money-flow (תזרים) sub-sector set, but on THIS breadth tab show ONLY groups with enough
+    // S&P members for breadth to mean anything: Adi 2026-11-02 — hide every sub-sector/sector with <10
+    // members (was: render thin ones as "—" and sink them). Thin thematic/merged ETFs (GDX/TAN/OIH/JETS…)
+    // hold ~1 S&P constituent → a "1/1" is noise, not breadth. They stay on תזרים/המשכיות where the ETF's
+    // OWN move counts; they're just filtered out of both breadth ladders here (subsLadder + sectorsLadder).
+    const _SUB_BREADTH_MIN = 10;
+    const subArr = (LIVE && LIVE.subsectors && LIVE.subsectors.length)
+      ? LIVE.subsectors.map(ss => subMap[ss.ind] || { name: ss.ind, above: 0, total: 0 })
+      : Object.keys(subMap).map(k => subMap[k]);
+    subArr.forEach(o => { o.thin = o.total < _SUB_BREADTH_MIN; });
+    const secGridBtn = '<button class="btn ghost" id="spSectorGrid" style="font-size:12px;font-weight:600" title="פתח את כל תעודות-הסל של הסקטורים בתצוגת גרפים">📊 כל הסקטורים בגרפים</button>';
+    // single-ETF composite card (macro row + WGMI): bar/tier by the ETF's own above-open, big number = day move
+    const _brdSingle = s => {
+      const up = s.above == null ? ((s.chg || 0) >= 0) : s.above;
+      const c = s.chg, pct = c == null ? "—" : (c >= 0 ? "+" : "−") + Math.abs(c).toFixed(2) + "%";
+      const chip = '<span class="bc-etf flow-etf" data-secetf="' + escAttr(s.etf) + '" data-secname="' + escAttr(s.name) + '" data-secsub="0" title="אפשרויות">' + s.etf + " ▾</span>";
+      return '<div class="bc-card single-card bc-clickable ' + (up ? "t-vg" : "t-vr") + '" data-compdrill="' + escAttr(s.etf) + '" data-compname="' + escAttr(s.name) + '" title="' + escAttr(s.name) + " · " + s.etf + ' · לחץ למניות">' +
+        '<div class="bcc-head">' + chip + '<span class="bcc-name">' + escHtml(s.name) + "</span></div>" +
+        '<div class="bcc-mid"><span class="bcc-pct">' + pct + '</span><span class="bcc-usd">' + (up ? "🟢 מעל" : "🔴 מתחת") + "</span></div>" +
+        '<div class="bcc-bar"><span class="bcc-fill" style="width:100%"></span></div></div>';
+    };
+    const macroCards = _singlesOf("macro").slice().sort((a, c) => ((c.chg == null ? -99 : c.chg)) - ((a.chg == null ? -99 : a.chg))).map(_brdSingle).join("");
+    const sectorsLadder = '<div class="panel td-flow"><h3 class="tdf-head"><span>🗂️ עוצמת סקטורים · רוחב</span></h3>' +
+      '<div class="muted tdf-sub">מדורג לפי אחוז המניות מעל הפתיחה · לחץ שורה לכל המניות</div>' +
+      '<div class="bcell-list" data-spladder="sec">' + _breadthLadder(secs.filter(s => s.name !== "אחר" && s.name !== "מדדים" && (s.total || 0) >= _SUB_BREADTH_MIN), false) + (macroCards ? _bcellDivider("מדדים ושונות") + macroCards : "") + "</div></div>";
+    const subsLadder = '<div class="panel td-flow"><h3 class="tdf-head"><span>🏭 עוצמת תתי-סקטורים · רוחב</span></h3>' +
+      '<div class="muted tdf-sub">מדורג לפי רוחב · לחץ ענף לכל המניות</div>' +
+      '<div class="bcell-list" data-spladder="sub">' + _breadthLadder(subArr.filter(o => o.total >= _SUB_BREADTH_MIN), true) + "</div></div>";
+    return '<div class="page-head"><h1>רוחב סקטוריאלי · S&P 500</h1><div class="sub">🟢 ' + b.above + " מעל פתיחה · 🔴 " + b.below + ' מתחת · <b>כמה מהמניות בכל סקטור/תת-סקטור נמצאות מעל מחיר הפתיחה</b> (לא התנועה היומית) — מדורג מהחזק לחלש. לחץ על שורה לכל המניות.</div></div>' +
+      '<div class="sp-view-row">' + sp500ViewSwitch() + secGridBtn + "</div>" +
+      '<div class="sp-toprow"><div class="sp-topside">' + insightBox + liveBanner() + "</div>" + breadthTopBar + "</div>" +
+      '<div class="td-flow2">' + sectorsLadder + subsLadder + "</div>";
+  }
+  let spDrillSort = { col: "c", dir: -1 };
+  function spDrillVal(x, col) {
+    if (col === "sym") return x.s;
+    if (col === "ao") return x.ao ? 1 : 0;
+    if (col === "c") return x.c == null ? -999 : x.c;
+    if (col === "mc") return x.mc || 0;
+    return 0;
+  }
+  function renderSp500Drill(secName, isSub) {
+    // works for a SECTOR (LIVE.sectors[].stocks) or a SUB-SECTOR (all stocks whose .ind matches)
+    let s0, above, total, title;
+    if (isSub) {
+      s0 = []; ((LIVE && LIVE.sectors) || []).forEach(sec => (sec.stocks || []).forEach(x => { if ((x.ind || "") === secName) s0.push(x); }));
+      if (!s0.length) return;
+      above = s0.filter(x => x.ao).length; total = s0.length; title = secName;
+    } else {
+      const sec = ((LIVE && LIVE.sectors) || []).find(x => x.name === secName);
+      if (!sec) return;
+      s0 = sec.stocks; above = sec.above; total = sec.total; title = secHe(sec.name);
+    }
+    const col = spDrillSort.col, dir = spDrillSort.dir;
+    const st = s0.slice().sort((a, b) => {
+      const va = spDrillVal(a, col), vb = spDrillVal(b, col);
+      if (typeof va === "string") return dir * va.localeCompare(vb);
+      return dir * (va - vb);
+    });
+    const th = (label, c, start) => { const arrow = spDrillSort.col === c ? (spDrillSort.dir < 0 ? " ▼" : " ▲") : ""; return '<th class="sortable" data-spsort="' + c + '" style="cursor:pointer;user-select:none' + (start ? ";text-align:start" : "") + '">' + label + arrow + "</th>"; };
+    const rows = st.map(x => {
+      const cs = (x.c >= 0 ? "+" : "") + (x.c == null ? 0 : x.c).toFixed(2) + "%";
+      return "<tr><td class='sym'><span class='tsym clickable' data-chart='" + x.s + "' data-tf='D'>" + x.s + "</span>" + (x.ind ? ' <span class="tname">' + x.ind + "</span>" : "") + "</td><td>" + (x.ao ? "🟢" : "🔴") + "</td><td class='" + (x.c > 0 ? "pos" : x.c < 0 ? "neg" : "") + "'>" + cs + "</td><td>" + fmtCap(x.mc) + "</td></tr>";
+    }).join("");
+    const ap = above / (total || 1) * 100;
+    const syms = st.map(x => x.s).join(", ");
+    modal(title + " · " + above + "/" + total + " מעל פתיחה (" + ap.toFixed(0) + "%)",
+      '<div class="drill-bar"><button class="btn ghost" id="spGrid" style="font-size:12px;font-weight:600">📊 תצוגת גרפים</button>' +
+      '<button class="btn ghost" id="spCopy" style="font-size:12px;font-weight:600">📋 העתק ' + st.length + " טיקרים</button><span class=\"muted\" style=\"font-size:12px\">לחץ על כותרת למיון</span></div>" +
+      "<div class='tablewrap'><table class='scan-table'><thead><tr>" + th("סימבול", "sym", true) + th("מעל פתיחה", "ao") + th("תנועה", "c") + th("שווי", "mc") + "</tr></thead><tbody>" + rows + "</tbody></table></div>");
+    document.querySelectorAll("[data-spsort]").forEach(h => h.onclick = () => {
+      const c = h.dataset.spsort;
+      if (spDrillSort.col === c) spDrillSort.dir *= -1; else { spDrillSort.col = c; spDrillSort.dir = c === "sym" ? 1 : -1; }
+      renderSp500Drill(secName, isSub);
+    });
+    const cp = $("#spCopy");
+    if (cp) cp.onclick = () => copyToClipboard(syms, () => { cp.textContent = "✓ הועתקו " + st.length; setTimeout(() => cp.textContent = "📋 העתק " + st.length + " טיקרים", 1600); });
+    const gb = $("#spGrid");
+    if (gb) gb.onclick = () => openChartGrid(st.map(x => {
+      const r = (SCAN && SCAN.rows) ? SCAN.rows.find(rr => rr.s === x.s) : null;
+      return { sym: x.s, sector: secName, ind: x.ind, price: r ? (r.p || 0) : 0, chg: x.c };
+    }), { title: secHe(s.name) });
+  }
+  function wireSp500() {
+    wireCharts(document);
+    document.querySelectorAll("[data-spview]").forEach(b => b.onclick = () => {
+      if (sp500View === b.dataset.spview) return;
+      sp500View = b.dataset.spview; spHeatSector = null; riskZoomSec = null;
+      try { localStorage.setItem("sn_sp_view", sp500View); } catch (e) {}
+      reRender();
+    });
+    // HEAT MAP: zoom into a sector's sub-sectors / back to the full map
+    document.querySelectorAll("[data-hmsector]").forEach(el => el.onclick = e => { e.stopPropagation(); spHeatSector = decodeURIComponent(el.dataset.hmsector); reRender(); });
+    { const hb = $("#hmBack"); if (hb) hb.onclick = () => { spHeatSector = null; reRender(); }; }
+    { const av = $("#hmAvgToggle"); if (av) av.onclick = () => { spHeatAvg = !spHeatAvg; try { localStorage.setItem("sn_hm_avg", spHeatAvg ? "1" : "0"); } catch (e) {} reRender(); }; }
+    { const st = $("#hmStyleToggle"); if (st) st.onclick = () => { hmStyle = hmStyle === "neon" ? "classic" : "neon"; try { localStorage.setItem("sn_hm_style", hmStyle); } catch (e) {} reRender(); }; }
+    document.querySelectorAll("[data-hmtf]").forEach(b => b.onclick = () => { spHeatTf = b.dataset.hmtf; try { localStorage.setItem("sn_hm_tf", spHeatTf); } catch (e) {} reRender(); });
+    // RISK map: modular timeframe + volatility threshold + sector zoom
+    document.querySelectorAll("[data-risktf]").forEach(b => b.onclick = () => { riskTf = b.dataset.risktf; try { localStorage.setItem("sn_risk_tf", riskTf); } catch (e) {} reRender(); });
+    { const ra = $("#riskAtrInput"); if (ra) ra.onchange = () => { const v = parseFloat(ra.value); if (!isNaN(v) && v >= 0) { riskAtrMin = v; try { localStorage.setItem("sn_risk_atr", String(v)); } catch (e) {} reRender(); } }; }
+    { const ru = $("#riskMoveUp"); if (ru) ru.onchange = () => { riskUp = ru.value.trim(); try { localStorage.setItem("sn_risk_up", riskUp); } catch (e) {} reRender(); }; }
+    { const rd = $("#riskMoveDown"); if (rd) rd.onchange = () => { riskDown = rd.value.trim(); try { localStorage.setItem("sn_risk_down", riskDown); } catch (e) {} reRender(); }; }
+    { const rc = $("#riskMoveClear"); if (rc) rc.onclick = () => { riskUp = ""; riskDown = ""; try { localStorage.removeItem("sn_risk_up"); localStorage.removeItem("sn_risk_down"); } catch (e) {} reRender(); }; }
+    document.querySelectorAll("[data-riskzoom]").forEach(el => el.onclick = e => { e.stopPropagation(); riskZoomSec = decodeURIComponent(el.dataset.riskzoom); reRender(); });
+    { const rb = $("#riskBack"); if (rb) rb.onclick = () => { riskZoomSec = null; reRender(); }; }
+    // S&P heat map: ATR% volatility filter (removes low-volatility names)
+    { const am = $("#hmAtrMin"); if (am) am.onchange = () => { const v = parseFloat(am.value); spHeatAtr = (!isNaN(v) && v > 0) ? v : 0; try { if (spHeatAtr) localStorage.setItem("sn_hm_atr", String(spHeatAtr)); else localStorage.removeItem("sn_hm_atr"); } catch (e) {} reRender(); }; }
+    { const ac = $("#hmAtrClear"); if (ac) ac.onclick = () => { spHeatAtr = 0; try { localStorage.removeItem("sn_hm_atr"); } catch (e) {} reRender(); }; }
+    // heat-map move filter (dim tiles outside the % range) — onchange fires on blur/Enter so it doesn't re-render mid-typing
+    { const up = $("#hmMoveUp"); if (up) up.onchange = () => { spHeatUp = up.value.trim(); try { localStorage.setItem("sn_hm_up", spHeatUp); } catch (e) {} reRender(); }; }
+    { const dn = $("#hmMoveDown"); if (dn) dn.onchange = () => { spHeatDown = dn.value.trim(); try { localStorage.setItem("sn_hm_down", spHeatDown); } catch (e) {} reRender(); }; }
+    { const cl = $("#hmMoveClear"); if (cl) cl.onclick = () => { spHeatUp = ""; spHeatDown = ""; try { localStorage.removeItem("sn_hm_up"); localStorage.removeItem("sn_hm_down"); } catch (e) {} reRender(); }; }
+    document.querySelectorAll("[data-ext52]").forEach(el => el.onclick = () => _ext52Modal(el.dataset.ext52));
+    document.querySelectorAll("[data-spdrill]").forEach(c => c.onclick = () => renderSp500Drill(decodeURIComponent(c.dataset.spdrill), c.dataset.spsub === "1"));
+    // ETF chip inside a ladder cell → the sector menu (analyze ETF · charts · scanner · table), not the row drill
+    document.querySelectorAll(".bcell-list .flow-etf[data-secetf]").forEach(el => el.onclick = e => { e.stopPropagation(); openSecMenu(el); });
+    document.querySelectorAll(".bcell-list [data-compdrill]").forEach(el => el.onclick = e => { if (e.target.closest(".flow-etf")) return; openCompositeDrill(el.dataset.compname, el.dataset.compdrill); });
+    // "עוד N" — reveal/hide the collapsed sector cards inside each column
+    document.querySelectorAll("[data-sssection]").forEach(bt => bt.onclick = e => {
+      e.stopPropagation();
+      const col = bt.closest(".ss-col"); if (!col) return;
+      const open = col.classList.toggle("expanded");
+      bt.textContent = open ? "פחות ↑" : ("עוד " + col.querySelectorAll(".ss-extra").length + " ↓");
+    });
+    { const sg = $("#spSectorGrid"); if (sg) sg.onclick = () => openSectorChartGrid(); }
+    if (_spTimer) { clearInterval(_spTimer); _spTimer = null; }
+    if (_spFacts && _spFacts.length > 1) {
+      let idx = _spFacts.indexOf((document.getElementById("spInsightText") || {}).innerHTML);
+      _spTimer = setInterval(() => {
+        const el = document.getElementById("spInsightText");
+        if (!el) { clearInterval(_spTimer); _spTimer = null; return; }
+        idx = (idx + 1) % _spFacts.length;
+        el.style.opacity = "0";
+        setTimeout(() => { el.innerHTML = _spFacts[idx]; el.style.opacity = "1"; }, 250);
+      }, 10000);
+    }
+  }
+  // open all the SPDR sector ETFs (XLK/XLF/...) as a chart grid — a visual view of every sector at once
+  function openSectorChartGrid() {
+    const secs = (LIVE && LIVE.sectors) || [];
+    const seen = {}, rows = [];
+    secs.forEach(s => { const etf = etfFor(s.name); if (etf && !seen[etf]) { seen[etf] = 1; rows.push({ sym: etf, sector: secHe(s.name), ind: "", price: 0, chg: s.chg != null ? s.chg : 0 }); } });
+    if (!rows.length) { snToast("אין נתוני סקטורים כרגע"); return; }
+    openChartGrid(rows, { title: "כל הסקטורים" });
+  }
+  function pctSpanBare(v) { v = v == null ? 0 : v; return '<span class="' + (v > 0 ? "pos" : v < 0 ? "neg" : "zero") + '">' + (v >= 0 ? "+" : "") + v.toFixed(2) + "%</span>"; }
+  // 5-tier move classification for the Market Cockpit: extreme up / up / neutral / down / extreme down (+ ▲▼)
+  function _moveTier(v) { v = v || 0; if (v >= 5) return "u2"; if (v > 0.05) return "u1"; if (v <= -5) return "d2"; if (v < -0.05) return "d1"; return "neu"; }
+  function _arrow(v) { v = v || 0; return v > 0.05 ? "▲" : v < -0.05 ? "▼" : "▬"; }
+  function extSpan(r) {
+    if (r == null || r.ext == null || r.extChg == null) return "";
+    const lbl = r.extType === "pre" ? "Pre" : "After";
+    const s = (r.extChg >= 0 ? "+" : "") + r.extChg.toFixed(2) + "%";
+    return ' <span class="ext-hours" title="מסחר מוקדם/מאוחר (' + (r.extType === "pre" ? "לפני פתיחה" : "אחרי סגירה") + ') — לא הסגירה הרשמית">(' + lbl + " " + money(r.ext) + " · " + s + ")</span>";
+  }
+  function colorLegend() {
+    return '<div class="muted" style="font-size:11px;margin-top:12px;display:flex;gap:14px;flex-wrap:wrap;align-items:center">' +
+      '<span><b>צבע</b> = כיוון הנר: 🟢 סגירה מעל הפתיחה · 🔴 סגירה מתחת</span>' +
+      '<span><b>ספרה</b> = סוג נר לפי Strat —</span>' +
+      '<span>' + tf(cell("1", "doji")) + ' נר פנימי (Inside · לא פרץ את השיא/שפל של הנר הקודם)</span>' +
+      '<span>' + tf(cell("2U", "up")) + ' שיא חדש בלבד</span>' +
+      '<span>' + tf(cell("2D", "down")) + ' שפל חדש בלבד</span>' +
+      '<span>' + tf(cell("3", "up")) + ' נר חיצוני (Outside · פרץ גם שיא וגם שפל)</span>' +
+    "</div>";
+  }
+
+  // ========== SCANNER ==========
+  // expanded Strat timeframes the user can add via ➕ (computed on the server, TheStrat-agnostic)
+  const EXTRA_TFS = ["2D", "3D", "5D", "2W", "3W", "6W", "2M", "4M", "6M"];
+  // intraday Strat timeframes (session-anchored, server-computed) — same cell format as D/W/M
+  const INTRADAY_TFS = ["15m", "30m", "60m", "65m", "2H", "130m", "3H", "195m", "4H"];
+  const XTRA_ALL = EXTRA_TFS.concat(INTRADAY_TFS);          // every user-addable custom TF
+  const ALL_TFS = ["Y", "Q", "M", "W", "D"].concat(XTRA_ALL);
+  const _isTfCol = c => ALL_TFS.indexOf(c) >= 0;
+  // sector / subsec are MULTI-select: arrays of selected names (empty = "all")
+  const scanState = { tfs: ["D"], tfsExtra: [], patterns: [], dir: "all", shape: [], broad: "off", seq: { c2: [], c1: [], cc: [], c2col: "", c1col: "", cccol: "" }, inforce: "off", sigShape: [], ifcType: [], sector: [], subsec: [], universe: "all", sym: "", ftfc: false, priceMin: "", priceMax: "", capMin: "", capMax: "", mtfOpen: false, indOpen: false, favTop: false, mtf: newMtf() };
+  // normalize a stored sector/subsec value (old presets held a string "all"/name) to a selection array
+  function _toSelArr(v) { return Array.isArray(v) ? v.slice() : (v && v !== "all" ? [v] : []); }
+  // parse a market-cap input like "2B" / "60B" / "500M" / "1.5T" → dollars. Bare number = billions.
+  function _parseCap(s) {
+    s = String(s == null ? "" : s).trim().toUpperCase().replace(/[$,\s]/g, "");
+    if (!s) return null;
+    const m = s.match(/^([\d.]+)([TBMK]?)$/);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (isNaN(n)) return null;
+    return n * ({ T: 1e12, B: 1e9, M: 1e6, K: 1e3, "": 1e9 }[m[2]]);
+  }
+  let _selPreset = "";   // id of the saved-scan currently chosen in the dropdown (survives reRender so delete/duplicate work)
+  let _presetWheelTs = 0;   // throttle for wheel-cycling presets (module scope so it survives reRender)
+  // optional result columns the user can add/remove. key undefined = never touched (a filter may auto-add it);
+  // true/false = explicit user choice (so removal always sticks, even for filter columns).
+  // Persisted per-device so each trader keeps their own table layout across visits.
+  const colState = {};
+  try { const _cs = JSON.parse(localStorage.getItem("sn_cols") || "{}"); if (_cs && typeof _cs === "object") Object.assign(colState, _cs); } catch (e) {}
+  function saveCols() { try { localStorage.setItem("sn_cols", JSON.stringify(colState)); } catch (e) {} }
+  // base (default-on) table columns that are now also toggleable, keyed by their sort id
+  const BASE_COLS = [["sec", "סקטור"], ["etf", 'ת"ס'], ["price", "מחיר"], ["mc", "שווי"], ["chg", "%"], ["Y", "Y"], ["Q", "Q"], ["M", "M"], ["W", "W"], ["D", "D"], ["ftfc", "FTFC"]];
+  const showCol = k => colState[k] !== false;   // base cols default ON (undefined = shown)
+  // multi-timeframe per-TF conditions: {D:{t,c}, W:{t,c}, ...}  (t = bar type "1/2U/2D/3", c = color "up/down", "" = any)
+  const MTF_TFS = ["D", "W", "M", "Q", "Y"];
+  const MTF_TF_HE = { D: "יומי", W: "שבועי", M: "חודשי", Q: "רבעוני", Y: "שנתי" };
+
+  // ---- guide videos (YouTube): a collapsible "איזור לימוד" per page + a centralized grid on the Learn page ----
+  const VID = {
+    intro:   { id: "B2JJyEf6epw", t: "כל השוק במסך אחד · אינטרו" },
+    market:  { id: "hPLOC19gTNs", t: "מה קורה בשוק? · סקירת שוק" },
+    sp500:   { id: "ZR76J-TTjLw", t: "הראלי אמיתי? · רוחב שוק" },
+    sectors: { id: "1OnfHj_hu6Y", t: "מי מוביל היום? · סקטורים" },
+    today:   { id: "nHVENnlTl2E", t: "לאן הכסף זורם?" },
+    scan1:   { id: "mKyKglzpng0", t: "הסורק · חלק 1 — סינון Strat" },
+    scan2:   { id: "TzWduQ783BA", t: "הסורק · חלק 2 — פילטרים טכניים" },
+    scan3:   { id: "10Z11_k3U7o", t: "הסורק · חלק 3 — התראות" },
+    journal: { id: "KauU0b-cBAc", t: "יומן מסחר" },
+  };
+  // 2026-10-11: YouTube channel terminated → ALL guide/course videos hidden sitewide until re-recorded.
+  // To restore: set GUIDES_OFF = false and update the video IDs in VID (+ the playlist link in guidesPanel).
+  const GUIDES_OFF = true;
+  const GUIDE_BY_PAGE = { market: ["market"], sp500: ["sp500"], sectors: ["sectors"], today: ["today"], scanner: ["scan1", "scan2", "scan3"], favorites: ["scan3"], journal: ["journal"] };
+  const GUIDE_ALL = ["intro", "market", "sp500", "sectors", "today", "scan1", "scan2", "scan3", "journal"];
+  function ytFacade(key) {
+    const v = VID[key]; if (!v) return "";
+    const th = "https://i.ytimg.com/vi/" + v.id + "/hqdefault.jpg";
+    return '<div class="yt-embed"><div class="yt-facade" data-yt="' + v.id + '" onclick="snPlayYT(this)" style="background-image:url(' + th + ')" title="' + escAttr(v.t) + '"><button class="yt-play" aria-label="נגן">▶</button><span class="yt-title">' + escHtml(v.t) + "</span></div></div>";
+  }
+  // click a facade → swap the thumbnail for the real YouTube iframe (lazy: nothing loads until clicked)
+  window.snPlayYT = function (el) {
+    const id = el.getAttribute("data-yt"); if (!id) return;
+    el.parentElement.innerHTML = '<iframe src="https://www.youtube.com/embed/' + id + '?autoplay=1&rel=0&modestbranding=1" title="StratNinja" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>';
+  };
+  function guideSection(page) {
+    if (GUIDES_OFF) return "";
+    const keys = GUIDE_BY_PAGE[page]; if (!keys || !keys.length) return "";
+    const multi = keys.length > 1;
+    return '<details class="guide-sec"><summary>🎥 <b>איזור לימוד</b> — צפה במדריך' + (multi ? " (" + keys.length + " חלקים)" : "") + ' לעמוד זה</summary><div class="guide-body' + (multi ? " multi" : "") + '">' + keys.map(ytFacade).join("") + "</div></details>";
+  }
+  window.snGuide = guideSection;   // exposed so the separate journal module can drop in its own guide
+  function guidesPanel() {
+    if (GUIDES_OFF) return "";
+    return '<div class="panel lrn-guides"><h3 style="margin:0 0 4px">🎥 סרטוני מדריך — כל הסדרה</h3>' +
+      '<div class="muted" style="font-size:13px;margin-bottom:12px">סרטון קצר לכל עמוד באתר — לחץ לצפייה. <a href="https://www.youtube.com/playlist?list=PLduENm0L_4tM" target="_blank" rel="noopener" style="color:var(--accent)">פתח את הפלייליסט המלא ב-YouTube ↗</a></div>' +
+      '<div class="guide-grid">' + GUIDE_ALL.map(ytFacade).join("") + "</div></div>";
+  }
+  function newMtf() { const o = {}; ["D", "W", "M", "Q", "Y"].forEach(function (k) { o[k] = { t: [], c: "" }; }); return o; }
+  // migrate any config where a TF's bar-type was a single string (legacy) into the multi-select array form
+  function _normMtf(m) { ["D", "W", "M", "Q", "Y"].forEach(function (k) { const o = m[k] || (m[k] = { t: [], c: "" }); if (!Array.isArray(o.t)) o.t = o.t ? [o.t] : []; if (o.c == null) o.c = ""; }); return m; }
+  function mtfActiveCount() { let n = 0; MTF_TFS.forEach(function (k) { const o = scanState.mtf[k]; if ((o.t && o.t.length) || o.c) n++; }); return n; }
+  // ---- scanner panel visibility (declutter): hide whole filter areas per trader ----
+  const SCAN_PANELS = [{ k: "filters", t: "Strat" }, { k: "mtf", t: "MTF" }, { k: "tech", t: "טכני" }, { k: "ind", t: "אינדיקטורים" }];
+  // ---- share a preset (link/code, no server) + reorder manager ----
+  function _b64e(s) { return btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); }
+  function _b64d(c) { let s = c.replace(/-/g, "+").replace(/_/g, "/"); while (s.length % 4) s += "="; return decodeURIComponent(escape(atob(s))); }
+  // strip default/empty values so the shared link stays short — applyScanConfig() re-fills every default on import
+  function _minObj(o) {
+    if (Array.isArray(o)) { const a = o.map(_minObj).filter(x => x !== undefined); return a.length ? a : undefined; }
+    if (o && typeof o === "object") { const r = {}; for (const k in o) { const v = _minObj(o[k]); if (v !== undefined) r[k] = v; } return Object.keys(r).length ? r : undefined; }
+    if (o === "" || o === "all" || o === "off" || o === false || o == null) return undefined;
+    return o;
+  }
+  // long, self-contained fallback link (whole preset packed into the URL) — used when the short-link service is unavailable
+  function presetShareLink(p) { try { return location.origin + "/?p=" + _b64e(JSON.stringify({ n: p.name, c: _minObj(p.cfg) || {} })); } catch (e) { return ""; } }
+  // short code: lowercase + digits, no look-alikes (0/o/1/l/i removed)
+  function _randCode(n) { const a = "abcdefghijkmnpqrstuvwxyz23456789"; let s = ""; for (let i = 0; i < n; i++) s += a[Math.floor(Math.random() * a.length)]; return s; }
+  // store the preset in Supabase under a short code → returns stratninja.win/?s=<code> (or "" so the caller falls back to the long link)
+  async function _shortenPreset(p) {
+    const cfg = window.SN_CONFIG || {};
+    if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) return "";
+    const name = String(p.name || "פריסט").slice(0, 120);
+    const body = { name, cfg: _minObj(p.cfg) || {} };   // no email stored — the table is publicly readable
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = _randCode(6);
+      try {
+        const res = await fetch(cfg.SUPABASE_URL + "/rest/v1/shared_presets", {
+          method: "POST",
+          headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
+          body: JSON.stringify(Object.assign({ code }, body)),
+        });
+        if (res.ok) return location.origin + "/?s=" + code;
+        if (res.status === 409) continue;   // rare code collision → try another
+        return "";                          // other error (e.g. table missing) → fall back to long link
+      } catch (e) { return ""; }
+    }
+    return "";
+  }
+  async function _fetchSharedPreset(code) {
+    const cfg = window.SN_CONFIG || {};
+    if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) return null;
+    try {
+      const res = await fetch(cfg.SUPABASE_URL + "/rest/v1/shared_presets?code=eq." + encodeURIComponent(code) + "&select=name,cfg&limit=1",
+        { headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY } });
+      if (!res.ok) return null;
+      const arr = await res.json();
+      return (arr && arr[0]) || null;
+    } catch (e) { return null; }
+  }
+  // the pasted text carries the NAME above the link, so the community sees what the preset is before opening it
+  function _presetShareText(name, link) { return "📊 " + (name || "פריסט") + "\n" + link; }
+  function _showPresetShareModal(name, link, isShort) {
+    const shareTxt = _presetShareText(name, link);
+    modal("🔗 שיתוף פריסט", '' +
+      '<div class="ps-share">' +
+        '<div class="ps-share-lead">העתק ושלח לקהילה — הנמען יראה את השם ויוכל להוסיף את הפריסט בלחיצה אחת:</div>' +
+        '<div class="ps-share-name">📊 <b>' + escHtml(name || "פריסט") + '</b></div>' +
+        '<input id="psShareLink" class="ps-share-link" readonly value="' + escAttr(link) + '">' +
+        '<div class="ps-share-actions">' +
+          '<button class="btn" id="psCopy">📋 העתק קישור + שם</button>' +
+          (isShort ? '<span class="ps-share-badge">קישור קצר ✓</span>' : '<span class="ps-share-badge warn" title="שירות הקיצור לא זמין כרגע — זה קישור מלא שעובד בכל מקרה">קישור מלא</span>') +
+        '</div>' +
+      '</div>');
+    const cp = document.getElementById("psCopy");
+    if (cp) cp.onclick = () => { copyToClipboard(shareTxt, () => { cp.textContent = "✓ הועתק"; snToast("🔗 הקישור + שם הפריסט הועתקו — הדבק בדיסקורד/לקהילה"); setTimeout(() => { cp.textContent = "📋 העתק קישור + שם"; }, 1600); }); };
+    const inp = document.getElementById("psShareLink"); if (inp) inp.onclick = () => inp.select();
+  }
+  async function sharePreset(p) {
+    if (!p) return;
+    snToast("⏳ יוצר קישור…");
+    let link = ""; try { link = await _shortenPreset(p); } catch (e) {}
+    const isShort = !!link;
+    if (!link) link = presetShareLink(p);             // fall back to the long self-contained link
+    if (!link) { snToast("שגיאה ביצירת הקישור"); return; }
+    _showPresetShareModal(p.name, link, isShort);
+  }
+  async function checkSharedPresetInUrl() {
+    try {
+      const ms = location.search.match(/[?&]s=([A-Za-z0-9]+)/);
+      const mp = location.search.match(/[?&]p=([^&]+)/);
+      let name = "", cfgObj = null;
+      if (ms) {
+        const rec = await _fetchSharedPreset(ms[1]);
+        history.replaceState(null, "", location.pathname);   // clean URL so a refresh won't re-prompt
+        if (!rec || !rec.cfg) { snToast("הקישור לא נמצא או שפג תוקפו"); return; }
+        name = String(rec.name || "פריסט משותף").slice(0, 60); cfgObj = rec.cfg;
+      } else if (mp) {
+        const obj = JSON.parse(_b64d(decodeURIComponent(mp[1])));
+        history.replaceState(null, "", location.pathname);
+        if (!obj || !obj.c) return;
+        name = String(obj.n || "פריסט משותף").slice(0, 60); cfgObj = obj.c;
+      } else return;
+      if (confirm('קיבלת פריסט משותף:\n"' + name + '"\n\nלהוסיף אותו לסריקות השמורות שלך?')) {
+        const rec = window.Prefs.importScanPreset(name, cfgObj);
+        if (rec) { _selPreset = rec.id; setPage("scanner"); snToast('הפריסט "' + rec.name + '" נוסף ✓'); }
+      }
+    } catch (e) {}
+  }
+  function _pmIds() { return (window.Prefs.scanPresets() || []).map(p => p.id); }
+  function pmBodyHtml() {
+    const list = window.Prefs.scanPresets() || [];
+    let _ab = null; try { _ab = JSON.parse(localStorage.getItem((window.Prefs.KEY || "stratninja_prefs_v1") + "__autobak") || "null"); } catch (e) {}
+    const _abN = (_ab && _ab.data && (_ab.data.scanPresets || []).length) || 0;
+    const abBtn = _abN ? '<button class="btn ghost" id="pmAutoBak" title="שחזר מהגיבוי האוטומטי האחרון (' + (function () { try { return new Date(_ab.ts).toLocaleString("he-IL"); } catch (e) { return ""; } })() + ') — נשמר אוטומטית לפני כל סנכרון">♻️ גיבוי אוטומטי (' + _abN + ")</button>" : "";
+    const _cloudOn = !!(window.SNCloud && window.SNCloud.ready && window.SNCloud.ready());
+    const syncBar = _cloudOn
+      ? '<span class="pm-syncbar"><b class="pm-sync-lbl">☁️ סנכרון:</b>' +
+        '<button class="btn ghost pm-sync-push" id="pmCloudPush" title="דחוף את הפריסטים של המכשיר הזה לענן — הענן יתעדכן למצב של המכשיר הזה (עשה זאת במכשיר עם הפריסטים הנכונים)">⬆️ דחוף לענן</button>' +
+        '<button class="btn ghost pm-sync-pull" id="pmCloudPull" title="משוך מהענן — המכשיר הזה יתעדכן למצב שבענן (דורס את המקומי)">⬇️ משוך מהענן</button></span>'
+      : "";
+    const ioBar = '<div class="pm-io">' +
+        (list.length ? '<button class="btn ghost" id="pmExport" title="שמור את כל הסריקות לקובץ במחשב">💾 גבה לקובץ</button>' : "") +
+        '<button class="btn ghost" id="pmImportBtn" title="שחזר סריקות מקובץ גיבוי (מתווסף לקיימות)">📂 שחזר מקובץ</button>' +
+        (list.length ? '<button class="btn ghost" id="pmDedupe" title="הסר סריקות כפולות (הגדרה זהה) — שומר את השם הנקי">🧹 נקה כפילויות</button>' : "") +
+        (list.length ? '<button class="btn ghost" id="pmSuggestCat" title="הצע קטגוריה אוטומטית לפי שם הסריקה — רק לסריקות שעוד לא מקוטלגות">🪄 הצע קטגוריות</button>' : "") +
+        (list.length ? '<button class="btn ghost" id="pmSortCat" title="סדר את כל הרשימה מקובצת לפי קטגוריה (לפי רמות)">📂 מיין לפי קטגוריה</button>' : "") +
+        '<button class="btn ghost" id="pmManageCats" title="נהל קטגוריות אישיות (הוסף / מחק)">🗂️ קטגוריות</button>' +
+        abBtn + syncBar +
+        '<input type="file" id="pmImportFile" accept=".json,application/json" style="display:none"></div>';
+    if (!list.length) return ioBar + '<div class="muted" style="padding:14px">אין עדיין סריקות שמורות. שמור סריקה כדי לסדר ולשתף — או שחזר מקובץ גיבוי למעלה.</div>';
+    // DUPLICATE DETECTION BY CONFIG (not name): group presets whose cfg is byte-identical, number each group.
+    const _dupG = {}; list.forEach(p => { const k = JSON.stringify(p.cfg); (_dupG[k] = _dupG[k] || []).push(p.id); });
+    const _dupNum = {}; let _dn = 0, _dupTot = 0;
+    Object.keys(_dupG).forEach(k => { if (_dupG[k].length > 1) { _dn++; _dupTot += _dupG[k].length; _dupG[k].forEach(id => { _dupNum[id] = _dn; }); } });
+    const dupSummary = _dupTot
+      ? '<div class="note" style="margin-bottom:9px;border-color:#e0a24f;color:#e8c08a">⚠️ נמצאו <b>' + _dupTot + '</b> סריקות עם <b>הגדרה זהה</b> (' + _dn + ' קבוצות) — מסומנות למטה ב"כפילות #". מחק את המיותרות, או "🧹 נקה כפילויות".</div>'
+      : '<div class="note" style="margin-bottom:9px;color:#7ee2b8">✓ אין כפילויות הגדרה — כל הסריקות ייחודיות.</div>';
+    const _catSel = p => '<select class="pm-cat" data-pmcat="' + escAttr(p.id) + '" title="קטגוריה — לקיבוץ ההתראות בפופאפ ובפיד">' +
+      '<option value=""' + (!p.cat ? " selected" : "") + ">📂 ללא קטגוריה</option>" +
+      ALERT_CATS.map(c => '<option value="' + c.k + '"' + (p.cat === c.k ? " selected" : "") + ">" + escHtml(_catLabel(c.k)) + "</option>").join("") +
+      _customCats().map(c => '<option value="' + escAttr(c) + '"' + (p.cat === c ? " selected" : "") + ">" + escHtml(_catLabel(c)) + "</option>").join("") +
+      '<option value="__new__">➕ קטגוריה חדשה…</option>' + "</select>";
+    const _collapsed = _pmCollapsed();
+    // GROUPED by category (immune to fragmentation when a preset's category changes); category order = first appearance
+    const _catSeq = []; const _byCat = {};
+    list.forEach(p => { const c = p.cat || ""; if (_catSeq.indexOf(c) < 0) _catSeq.push(c); (_byCat[c] = _byCat[c] || []).push(p); });
+    let rowsHtml = "";
+    _catSeq.forEach((c, ci) => {
+      const group = _byCat[c], isCol = _collapsed.has(c);
+      rowsHtml += '<div class="pm-cathead" draggable="true" data-pmcathead="' + escAttr(c) + '" title="לחץ לקיפול/פתיחה · גרור לסידור הקטגוריות (כמה מקומות בבת אחת)">' +
+        '<span class="pm-cat-caret">' + (isCol ? "▸" : "▾") + "</span>" +
+        '<span class="pm-cat-lbl">' + _catLabel(c) + ' <span class="pm-catn">(' + group.length + ")</span></span>" +
+        '<span class="pm-cat-move">' +
+          '<button class="btn ghost pm-btn" data-pmcatup="' + escAttr(c) + '"' + (ci <= 0 ? " disabled" : "") + ' title="הזז קטגוריה למעלה">▲</button>' +
+          '<button class="btn ghost pm-btn" data-pmcatdn="' + escAttr(c) + '"' + (ci >= _catSeq.length - 1 ? " disabled" : "") + ' title="הזז קטגוריה למטה">▼</button>' +
+          (c ? '<button class="btn ghost pm-btn" data-pmcatren="' + escAttr(c) + '" title="שנה שם קטגוריה">✏️</button>' : "") +
+          (c ? '<button class="btn ghost pm-btn pm-del" data-pmcatdel="' + escAttr(c) + '" title="מחק קטגוריה (הסריקות יעברו ל-ללא קטגוריה)">🗑</button>' : "") +
+        "</span></div>";
+      if (isCol) return;   // collapsed → header only
+      group.forEach((p, gi) => {
+        const dupBadge = _dupNum[p.id] ? ' <span class="pm-dupbadge" title="הגדרה זהה לסריקה אחרת בקבוצה זו">כפילות #' + _dupNum[p.id] + "</span>" : "";
+        rowsHtml += '<div class="pm-row' + (_dupNum[p.id] ? " pm-dup" : "") + '" draggable="true" data-pmid="' + escAttr(p.id) + '">' +
+          '<span class="pm-grip" title="גרור לסידור">⠿</span>' +
+          '<span class="pm-tgls">' +
+            '<span class="al-tgl-ico" title="התראה (מחשב)">🔔</span><label class="ios-switch" title="התראה כשמניה מהמועדפים נכנסת לסריקה זו"><input type="checkbox" data-alp="' + escAttr(p.id) + '"' + (p.alert ? " checked" : "") + '><span class="ios-slider"></span></label>' +
+            '<span class="al-phone-wrap"' + (p.alert ? "" : ' style="display:none"') + '><span class="al-tgl-ico" title="גם לפלאפון">📱</span><label class="ios-switch" title="שלח את ההתראה גם לפלאפון"><input type="checkbox" data-alpphone="' + escAttr(p.id) + '"' + (p.phone !== false ? " checked" : "") + '><span class="ios-slider"></span></label></span>' +
+          "</span>" +
+          '<span class="pm-name">' + escHtml(p.name) + dupBadge + "</span>" +
+          _catSel(p) +
+          '<span class="pm-acts">' +
+            '<button class="btn ghost pm-btn" data-pmup="' + escAttr(p.id) + '"' + (gi === 0 ? " disabled" : "") + ' title="הזז למעלה">▲</button>' +
+            '<button class="btn ghost pm-btn" data-pmdn="' + escAttr(p.id) + '"' + (gi === group.length - 1 ? " disabled" : "") + ' title="הזז למטה">▼</button>' +
+            '<button class="btn ghost pm-btn" data-pmren="' + escAttr(p.id) + '" title="שנה שם">✏️</button>' +
+            '<button class="btn ghost pm-btn" data-pmshare="' + escAttr(p.id) + '" title="העתק קישור שיתוף">🔗</button>' +
+            '<button class="btn ghost pm-btn pm-del" data-pmdel="' + escAttr(p.id) + '" title="מחק סריקה">🗑</button>' +
+          "</span></div>";
+      });
+    });
+    return ioBar + dupSummary + '<div class="pm-list">' + rowsHtml + "</div>" +
+      '<div class="note" style="margin-top:10px;font-size:12px">גרור בעזרת ⠿ · או ▲▼ להזזה · ✏️ שינוי שם · 🔗 קישור שיתוף · 📂 מיין לפי קטגוריה</div>';
+  }
+  let _pmScanRRTimer = null;
+  function _pmScheduleScanReRender() {   // keep the scanner's "טען פריסט" dropdown order in sync with the hub — debounced, behind the modal
+    if (_pmScanRRTimer) clearTimeout(_pmScanRRTimer);
+    _pmScanRRTimer = setTimeout(() => { if (state.page === "scanner") reRender(); }, 600);
+  }
+  function pmRefresh() {
+    const b = document.getElementById("pmBody"); if (!b) return;
+    const sc = document.getElementById("hubBody"), y = sc ? sc.scrollTop : 0;   // keep scroll position so reordering doesn't jump to top
+    b.innerHTML = pmBodyHtml(); pmWire();
+    if (sc) sc.scrollTop = y;
+    _pmScheduleScanReRender();
+  }
+  function _pmApply(ids) { window.Prefs.setScanPresetsOrder(ids); pmRefresh(); }   // scanner (behind the modal) refreshes on its own next render
+  function pmWire() {
+    // manual cloud sync — deterministic push/pull (fixes a phone↔PC divergence by hand)
+    { const pb = document.getElementById("pmCloudPush"); if (pb) pb.onclick = async () => {
+        if (!confirm("לדחוף את הפריסטים של המכשיר הזה לענן?\nהמכשירים האחרים יתעדכנו למצב הזה כשתמשוך בהם / בטעינה הבאה.\n(עשה זאת במכשיר עם הפריסטים הנכונים.)")) return;
+        pb.disabled = true; const _t = pb.textContent; pb.textContent = "⏳ דוחף…";
+        let r = {}; try { r = await window.SNCloud.push(); } catch (e) {}
+        snToast(r && r.ok ? "✅ נדחף לענן — עכשיו לחץ \"⬇️ משוך מהענן\" במכשיר השני" : "❌ " + ((r && r.msg) || "שגיאה"));
+        pb.disabled = false; pb.textContent = _t;
+      }; }
+    { const pl = document.getElementById("pmCloudPull"); if (pl) pl.onclick = async () => {
+        if (!confirm("למשוך מהענן?\nהפריסטים במכשיר הזה יוחלפו במה שנמצא בענן.")) return;
+        pl.disabled = true; const _t = pl.textContent; pl.textContent = "⏳ מושך…";
+        let r = {}; try { r = await window.SNCloud.pull(); } catch (e) {}
+        snToast(r && r.ok ? "✅ נמשך מהענן בהצלחה" : "❌ " + ((r && r.msg) || "שגיאה"));
+        pmRefresh(); if (state.page === "scanner" || state.page === "favorites") reRender();
+      }; }
+    document.querySelectorAll("[data-pmup]").forEach(b => b.onclick = () => { _pmMovePreset(b.dataset.pmup, -1); pmRefresh(); });
+    document.querySelectorAll("[data-pmdn]").forEach(b => b.onclick = () => { _pmMovePreset(b.dataset.pmdn, 1); pmRefresh(); });
+    document.querySelectorAll("[data-pmshare]").forEach(b => b.onclick = () => { const p = (window.Prefs.scanPresets() || []).find(x => x.id === b.dataset.pmshare); sharePreset(p); });
+    document.querySelectorAll("[data-pmren]").forEach(b => b.onclick = () => {
+      const p = (window.Prefs.scanPresets() || []).find(x => x.id === b.dataset.pmren); if (!p) return;
+      const nn = prompt("שם חדש לסריקה:", p.name); if (nn == null) return;
+      const t = nn.trim(); if (!t || t === p.name) return;
+      window.Prefs.renameScanPreset(p.id, t); pmRefresh(); if (state.page === "scanner") reRender();
+    });
+    let dragId = null, _pmDragCat = null;
+    document.querySelectorAll(".pm-row").forEach(row => {
+      row.addEventListener("dragstart", () => { dragId = row.dataset.pmid; _pmDragCat = null; row.classList.add("pm-dragging"); });
+      row.addEventListener("dragend", () => row.classList.remove("pm-dragging"));
+      row.addEventListener("dragover", e => { if (dragId) { e.preventDefault(); row.classList.add("pm-over"); } });
+      row.addEventListener("dragleave", () => row.classList.remove("pm-over"));
+      row.addEventListener("drop", e => {
+        e.preventDefault(); row.classList.remove("pm-over");
+        const tgt = row.dataset.pmid; if (!dragId || dragId === tgt) return;
+        const ids = _pmIds(); ids.splice(ids.indexOf(dragId), 1); ids.splice(ids.indexOf(tgt), 0, dragId); _pmApply(ids);
+      });
+    });
+    // DRAG a whole category header onto another to reorder categories by ANY distance (the ▲▼ stay for one step)
+    document.querySelectorAll(".pm-cathead").forEach(h => {
+      h.addEventListener("dragstart", e => { _pmDragCat = h.dataset.pmcathead; dragId = null; h.classList.add("pm-dragging"); });
+      h.addEventListener("dragend", () => h.classList.remove("pm-dragging"));
+      h.addEventListener("dragover", e => { if (_pmDragCat != null) { e.preventDefault(); h.classList.add("pm-over"); } });
+      h.addEventListener("dragleave", () => h.classList.remove("pm-over"));
+      h.addEventListener("drop", e => {
+        e.preventDefault(); h.classList.remove("pm-over");
+        const tgt = h.dataset.pmcathead;
+        if (_pmDragCat == null || _pmDragCat === tgt) { _pmDragCat = null; return; }
+        _pmReorderCatTo(_pmDragCat, tgt); _pmDragCat = null; pmRefresh();
+      });
+    });
+    document.querySelectorAll("[data-pmdel]").forEach(b => b.onclick = () => {
+      const p = (window.Prefs.scanPresets() || []).find(x => x.id === b.dataset.pmdel); if (!p) return;
+      if (!confirm('למחוק את הסריקה "' + p.name + '"?')) return;
+      window.Prefs.deleteScanPreset(p.id); pmRefresh(); if (state.page === "scanner") reRender();
+    });
+    { const dd = document.getElementById("pmDedupe"); if (dd) dd.onclick = () => {
+      const n = window.Prefs.dedupeScanPresets ? window.Prefs.dedupeScanPresets() : 0;
+      snToast(n ? "🧹 הוסרו " + n + " כפילויות" : "אין כפילויות למחיקה");
+      pmRefresh(); if (state.page === "scanner") reRender();
+    }; }
+    // per-preset ALERT toggles (🔔 desktop / 📱 phone) — merged into the row; flip in place (no full re-render)
+    document.querySelectorAll("[data-alp]").forEach(b => b.onchange = () => {
+      const on = window.Prefs.togglePresetAlert(b.dataset.alp); requestNotifyPerm(); updateAlertBell();
+      const row = b.closest(".pm-row"), pw = row && row.querySelector(".al-phone-wrap");
+      if (pw) pw.style.display = on ? "" : "none";
+    });
+    document.querySelectorAll("[data-alpphone]").forEach(b => b.onchange = () => { window.Prefs.togglePresetPhone(b.dataset.alpphone); });
+    // per-preset category — set without a full re-render so the list doesn't jump; "➕ קטגוריה חדשה…" prompts + adds
+    document.querySelectorAll("[data-pmcat]").forEach(sel => sel.onchange = () => {
+      if (sel.value === "__new__") {
+        const nm = (prompt("שם קטגוריה חדשה (אפשר להוסיף אימוג׳י):") || "").trim();
+        if (!nm) { sel.value = window.Prefs.presetCat(sel.dataset.pmcat) || ""; return; }   // cancelled → revert
+        window.Prefs.addAlertCat(nm); window.Prefs.setPresetCat(sel.dataset.pmcat, nm);
+        pmRefresh();   // rebuild so the new category appears in every preset's dropdown
+        return;
+      }
+      window.Prefs.setPresetCat(sel.dataset.pmcat, sel.value);
+      pmRefresh();   // regroup: the preset moves into its new category section (scroll is preserved)
+    });
+    { const mc = document.getElementById("pmManageCats"); if (mc) mc.onclick = () => openCatManager(); }
+    // 📂 group the list by category WITHOUT losing the user's arranged order:
+    // category order = the order each category FIRST appears in the current list (his order),
+    // and within a category the existing relative order is kept. Scattered same-category presets
+    // are merged up to that category's first occurrence — "merge only where needed", never a fixed resort.
+    { const sb = document.getElementById("pmSortCat"); if (sb) sb.onclick = () => {
+      const presets = window.Prefs.scanPresets() || [];
+      const firstSeen = {}; presets.forEach((p, i) => { const c = p.cat || ""; if (!(c in firstSeen)) firstSeen[c] = i; });
+      const ids = presets.map((p, i) => ({ id: p.id, o: firstSeen[p.cat || ""], i: i }))
+        .sort((a, b) => (a.o - b.o) || (a.i - b.i)).map(x => x.id);
+      window.Prefs.setScanPresetsOrder(ids); pmRefresh(); if (state.page === "scanner") reRender();
+      snToast("📂 הקטגוריות קובצו — הסדר שלך נשמר");
+    }; }
+    // collapse/expand a category section (click its header) — ▲▼ have their own handlers
+    document.querySelectorAll("[data-pmcathead]").forEach(h => h.onclick = (e) => {
+      if (e.target.closest("[data-pmcatup],[data-pmcatdn]")) return;
+      _pmToggleCollapse(h.dataset.pmcathead); pmRefresh();
+    });
+    // move a whole category block up/down (also groups it)
+    document.querySelectorAll("[data-pmcatup]").forEach(b => b.onclick = (e) => { e.stopPropagation(); _pmMoveCat(b.dataset.pmcatup, -1); pmRefresh(); });
+    document.querySelectorAll("[data-pmcatdn]").forEach(b => b.onclick = (e) => { e.stopPropagation(); _pmMoveCat(b.dataset.pmcatdn, 1); pmRefresh(); });
+    document.querySelectorAll("[data-pmcatren]").forEach(b => b.onclick = (e) => {
+      e.stopPropagation();
+      const c = b.dataset.pmcatren;
+      const nn = prompt("שם חדש לקטגוריה (ריק = חזרה לשם ברירת-המחדל):", _catLabel(c));
+      if (nn == null) return;
+      window.Prefs.setCatLabel(c, nn.trim());
+      pmRefresh(); if (state.page === "scanner") reRender();
+    });
+    document.querySelectorAll("[data-pmcatdel]").forEach(b => b.onclick = (e) => {
+      e.stopPropagation();
+      const c = b.dataset.pmcatdel;
+      if (!confirm('למחוק את הקטגוריה "' + _catLabel(c) + '"?\nהסריקות שבה יעברו ל"ללא קטגוריה" (הן לא יימחקו).')) return;
+      _pmDeleteCat(c); pmRefresh(); if (state.page === "scanner") reRender();
+    });
+    // 🪄 auto-suggest a category from each untagged preset's name (non-destructive to ones already tagged)
+    { const sc = document.getElementById("pmSuggestCat"); if (sc) sc.onclick = () => {
+      const ps = window.Prefs.scanPresets() || []; let n = 0;
+      ps.forEach(p => { if (!p.cat) { const g = _suggestCat(p.name); if (g) { window.Prefs.setPresetCat(p.id, g); n++; } } });
+      snToast(n ? "🪄 קוטלגו אוטומטית " + n + " סריקות — אפשר לשנות ידנית בכל שורה" : "לא נמצאו סריקות לא-מקוטלגות לזיהוי אוטומטי");
+      pmRefresh();
+    }; }
+    { const ab = document.getElementById("pmAutoBak"); if (ab) ab.onclick = () => {
+      let d = null; try { d = JSON.parse(localStorage.getItem((window.Prefs.KEY || "stratninja_prefs_v1") + "__autobak") || "null"); } catch (e) {}
+      const ps = (d && d.data && d.data.scanPresets) || [];
+      if (!ps.length) { snToast("אין גיבוי אוטומטי"); return; }
+      if (!confirm("לשחזר " + ps.length + " סריקות מהגיבוי האוטומטי? (יתווספו לקיימות)")) return;
+      let n = 0; ps.forEach(p => { if (p && p.cfg && p.name) { window.Prefs.importScanPreset(p.name, p.cfg); n++; } });
+      snToast("♻️ שוחזרו " + n + " סריקות מהגיבוי האוטומטי");
+      pmRefresh(); if (state.page === "scanner") reRender();
+    }; }
+    { const ex = document.getElementById("pmExport"); if (ex) ex.onclick = () => exportPresets(); }
+    { const ib = document.getElementById("pmImportBtn"), inp = document.getElementById("pmImportFile");
+      if (ib && inp) { ib.onclick = () => inp.click(); inp.onchange = () => { if (inp.files && inp.files[0]) importPresetsFromFile(inp.files[0]); inp.value = ""; }; } }
+  }
+  // backup ALL presets to a .json file / restore from one (merges — never wipes existing)
+  function exportPresets() {
+    const presets = window.Prefs.scanPresets() || [];
+    if (!presets.length) { snToast("אין סריקות לגבות"); return; }
+    const payload = { app: "stratninja", type: "presets", version: 1, exported: new Date().toISOString(), presets: presets };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = "stratninja-presets-" + new Date().toISOString().slice(0, 10) + ".json"; a.click();
+    snToast("💾 גובו " + presets.length + " סריקות לקובץ");
+  }
+  function importPresetsFromFile(file) {
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const obj = JSON.parse(r.result);
+        const arr = Array.isArray(obj) ? obj : (obj.presets || []);
+        let n = 0;
+        arr.forEach(p => { if (p && p.cfg && p.name) { window.Prefs.importScanPreset(p.name, p.cfg); n++; } });
+        if (!n) { snToast("לא נמצאו סריקות תקינות בקובץ"); return; }
+        snToast("📂 שוחזרו " + n + " סריקות"); pmRefresh(); if (state.page === "scanner") reRender();
+      } catch (e) { snToast("קובץ לא תקין"); }
+    };
+    r.readAsText(file);
+  }
+  function openPresetManager() { openAlertsFeed("presets"); }   // unified: the preset manager is now a tab of the alerts hub
+  // manage alert categories. Lists BOTH the fixed built-in categories AND the user's custom ones — the
+  // same set offered in each preset's category picker — each with a (count) of how many presets use it.
+  // Only custom categories can be deleted (built-ins are fixed).
+  function openCatManager() {
+    const inpCss = "flex:1;background:#141b30;color:#cfd6e2;border:1px solid rgba(255,255,255,.14);border-radius:8px;padding:7px 10px;font-size:13px";
+    const cats = _customCats();
+    // count presets per category (by the manually-chosen cat key)
+    const presets = (window.Prefs && window.Prefs.scanPresets) ? (window.Prefs.scanPresets() || []) : [];
+    const counts = {};
+    presets.forEach(p => { const c = _presetCat(p); counts[c] = (counts[c] || 0) + 1; });
+    const _catRow = (key, deletable) =>
+      '<div class="pm-row" style="justify-content:space-between"><span class="pm-name">' + escHtml(_catLabel(key)) +
+        ' <span class="pm-catn">(' + (counts[key] || 0) + ')</span>' +
+        (deletable ? "" : ' <span class="muted" style="font-size:11px">· מובנית</span>') + "</span>" +
+        (deletable ? '<button class="btn ghost pm-del" data-catdel="' + escAttr(key) + '" title="מחק קטגוריה">🗑</button>' : "") + "</div>";
+    const builtinRows = ALERT_CATS.map(c => _catRow(c.k, false)).join("");
+    const customRows = cats.length
+      ? cats.map(c => _catRow(c, true)).join("")
+      : '<div class="muted" style="padding:10px">אין עדיין קטגוריות אישיות משלך. הוסף למטה, או דרך בורר הקטגוריה של כל סריקה → "➕ קטגוריה חדשה…".</div>';
+    const rows =
+      '<div class="muted" style="font-size:12px;margin:2px 0 6px">קטגוריות מובנות</div>' + builtinRows +
+      '<div class="muted" style="font-size:12px;margin:14px 0 6px">הקטגוריות שלך</div>' + customRows +
+      _catRow("", false);   // "ללא קטגוריה" with its count, so you can see how many presets are untagged
+    modal("🗂️ קטגוריות",
+      '<div class="note" style="margin-bottom:10px">אלה כל הקטגוריות שאפשר לשייך אליהן סריקה (מובנות + שלך), עם מספר הסריקות בכל אחת. קטגוריה שתמחק — הסריקות שבה יחזרו ל"ללא קטגוריה".</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:12px"><input id="catNewName" placeholder="שם קטגוריה חדשה (אפשר אימוג׳י)" style="' + inpCss + '"><button class="btn primary" id="catAddBtn">➕ הוסף</button></div>' +
+      '<div class="pm-list" id="catList">' + rows + "</div>" +
+      '<div style="margin-top:12px"><button class="btn ghost" id="catBackBtn">← חזרה לניהול הסריקות</button></div>');
+    const add = () => { const inp = document.getElementById("catNewName"); const nm = (inp && inp.value || "").trim(); if (!nm) return; window.Prefs.addAlertCat(nm); openCatManager(); };
+    { const ab = document.getElementById("catAddBtn"); if (ab) ab.onclick = add; }
+    { const inp = document.getElementById("catNewName"); if (inp) { inp.focus(); inp.onkeydown = e => { if (e.key === "Enter") add(); }; } }
+    { const bb = document.getElementById("catBackBtn"); if (bb) bb.onclick = () => openPresetManager(); }
+    document.querySelectorAll("[data-catdel]").forEach(b => b.onclick = () => {
+      const c = b.dataset.catdel;
+      if (!confirm('למחוק את הקטגוריה "' + c + '"?\nסריקות שהשתמשו בה יחזרו ל"ללא קטגוריה".')) return;
+      window.Prefs.removeAlertCat(c); openCatManager();
+    });
+  }
+  // ☁️ manual device sync — deterministic push/pull, accessible straight from the sidebar
+  function openCloudSync() {
+    const on = !!(window.SNCloud && window.SNCloud.ready && window.SNCloud.ready());
+    const body = on
+      ? '<div class="cloudsync-modal">' +
+          '<p class="cs-intro">הפריסטים, המועדפים וההתראות מסונכרנים אוטומטית בין המכשירים. אם משהו לא תואם בין הטלפון למחשב — סנכרן ידנית:</p>' +
+          '<div class="cs-btns">' +
+            '<button class="btn primary cs-push" id="csPush">⬆️ דחוף לענן<small>המכשיר הזה ← הענן · עשה זאת במכשיר עם המצב הנכון</small></button>' +
+            '<button class="btn cs-pull" id="csPull">⬇️ משוך מהענן<small>הענן ← המכשיר הזה · דורס את המקומי</small></button>' +
+          '</div>' +
+          '<p class="cs-tip">💡 לתיקון אי-התאמה: לחץ <b>"דחוף לענן"</b> במכשיר הנכון, ואז <b>"משוך מהענן"</b> בשני.</p></div>'
+      : '<div class="cloudsync-modal"><p class="cs-intro">כדי לסנכרן בין מכשירים צריך להתחבר לחשבון. התחבר (כפתור ההתחברות למעלה) ונסה שוב.</p></div>';
+    modal("☁️ סנכרון בין מכשירים", body);
+    if (!on) return;
+    { const pb = document.getElementById("csPush"); if (pb) pb.onclick = async () => {
+        if (!confirm("לדחוף את המצב של המכשיר הזה לענן?\nהמכשירים האחרים יתעדכנו כשתמשוך בהם.")) return;
+        pb.disabled = true; const _t = pb.innerHTML; pb.innerHTML = "⏳ דוחף…";
+        let r = {}; try { r = await window.SNCloud.push(); } catch (e) {}
+        snToast(r && r.ok ? "✅ נדחף לענן — עכשיו \"⬇️ משוך מהענן\" במכשיר השני" : "❌ " + ((r && r.msg) || "שגיאה"));
+        pb.disabled = false; pb.innerHTML = _t; }; }
+    { const pl = document.getElementById("csPull"); if (pl) pl.onclick = async () => {
+        if (!confirm("למשוך מהענן?\nהמצב במכשיר הזה יוחלף במה שנמצא בענן.")) return;
+        pl.disabled = true; const _t = pl.innerHTML; pl.innerHTML = "⏳ מושך…";
+        let r = {}; try { r = await window.SNCloud.pull(); } catch (e) {}
+        snToast(r && r.ok ? "✅ נמשך מהענן בהצלחה" : "❌ " + ((r && r.msg) || "שגיאה"));
+        pl.disabled = false; pl.innerHTML = _t; closeModal(); reRender(); }; }
+  }
+  function panelVis() {
+    // All four filter panels are ALWAYS visible now — the compact filter-bar makes them cheap,
+    // so the show/hide toggles were removed (Adi 2026-09-29). (Ignores any legacy saved scanPanels.)
+    return { filters: true, mtf: true, tech: true, ind: true };
+  }
+  function togglePanel(k) {
+    const v = panelVis(); v[k] = !v[k];
+    if (window.Prefs && window.Prefs.setScanPanels) window.Prefs.setScanPanels(v);
+    reRender();
+  }
+  // which of the 4 filter panels currently hold an active filter (used to auto-open on preset select)
+  function panelActiveMap() {
+    return {
+      filters: !!(scanState.patterns.length || scanState.dir !== "all" || scanState.shape.length || scanState.broad !== "off" || _pivActive() || scanState.inforce !== "off" ||
+        scanState.sector.length || scanState.subsec.length || scanState.sym || scanState.ftfc ||
+        scanState.priceMin !== "" || scanState.priceMax !== "" || scanState.capMin !== "" || scanState.capMax !== "" || scanState.tfs.length > 1),
+      mtf: mtfActiveCount() > 0,
+      tech: techActiveCount() > 0,
+      ind: indActiveCount() > 0,
+    };
+  }
+  // on preset select: show only the panels this preset actually uses, hide the empty ones
+  function autoOpenPanels() {
+    const pa = panelActiveMap();
+    if (!(pa.filters || pa.mtf || pa.tech || pa.ind)) return;   // safety: never hide every panel
+    if (window.Prefs && window.Prefs.setScanPanels) window.Prefs.setScanPanels(pa);
+  }
+  const ALL_PANELS_ON = { filters: true, mtf: true, tech: true, ind: true };
+  // ---- scan presets ("must-have scans"): snapshot + restore the full filter config ----
+  function scanConfigSnapshot() {
+    const s = scanState;
+    return {
+      s: { tfs: s.tfs.slice(), tfsExtra: s.tfsExtra.slice(), patterns: s.patterns.slice(), dir: s.dir, shape: s.shape.slice(), broad: s.broad, seq: JSON.parse(JSON.stringify(s.seq)), inforce: s.inforce, sigShape: s.sigShape.slice(), ifcType: s.ifcType.slice(),
+        sector: s.sector.slice(), subsec: s.subsec.slice(), sym: s.sym, ftfc: s.ftfc, priceMin: s.priceMin, priceMax: s.priceMax,
+        capMin: s.capMin, capMax: s.capMax, mtf: JSON.parse(JSON.stringify(s.mtf)) },
+      t: Object.assign({}, techState),
+    };
+  }
+  function applyScanConfig(cfg) {
+    if (!cfg) return;
+    const s = cfg.s || {}, t = cfg.t || {};
+    // FULL reset first, so a preset never inherits leftover filters from the previous view — especially
+    // the technical/indicator + MTF tabs. (Older presets don't even include the newer filter keys, so
+    // without this reset they'd silently keep whatever was set → contaminated results + wrong alerts.)
+    // Universe scope and panel open/close are NOT filters → preserved.
+    const keepUni = scanState.universe, keepMtfOpen = scanState.mtfOpen, keepIndOpen = scanState.indOpen, keepTechOpen = techState.techOpen;
+    resetScan();
+    scanState.universe = keepUni; scanState.mtfOpen = keepMtfOpen; scanState.indOpen = keepIndOpen; techState.techOpen = keepTechOpen;
+    ["dir", "broad", "inforce", "sym", "ftfc", "priceMin", "priceMax", "capMin", "capMax"].forEach(k => { if (s[k] !== undefined) scanState[k] = s[k]; });
+    if (s.sector !== undefined) scanState.sector = _toSelArr(s.sector);   // migrate old string presets → array
+    if (s.subsec !== undefined) scanState.subsec = _toSelArr(s.subsec);
+    if (s.shape !== undefined) scanState.shape = _toSelArr(s.shape);      // shape/sigShape: old scalar ("hammer"/"all") → array
+    if (s.sigShape !== undefined) scanState.sigShape = _toSelArr(s.sigShape);
+    if (s.ifcType !== undefined) scanState.ifcType = _toSelArr(s.ifcType);   // IN FORCE reference-bar type (1/2U/2D/3)
+    scanState.seq = s.seq ? { c2: (s.seq.c2 || []).slice(), c1: (s.seq.c1 || []).slice(), cc: (s.seq.cc || []).slice(), c2col: s.seq.c2col || "", c1col: s.seq.c1col || "", cccol: s.seq.cccol || "" } : { c2: [], c1: [], cc: [], c2col: "", c1col: "", cccol: "" };
+    if (s.tfs) scanState.tfs = s.tfs.slice();
+    scanState.tfsExtra = s.tfsExtra ? s.tfsExtra.slice() : [];
+    if (s.patterns) scanState.patterns = s.patterns.slice();
+    scanState.mtf = _normMtf(s.mtf ? JSON.parse(JSON.stringify(s.mtf)) : newMtf());
+    Object.keys(techState).forEach(k => { if (k === "techOpen") return; if (t[k] !== undefined) techState[k] = t[k]; });
+  }
+
+  // ---- preset × favorites ALERTS (client-side; reuses the real filter, no server duplication) ----
+  function evalPreset(preset) {
+    if (!preset || !preset.cfg) return [];
+    // SHALLOW snapshot keeps the ORIGINAL array references (applyScanConfig/resetScan only ever REASSIGN
+    // state arrays, never mutate them in place) — so restoring them below hands back the exact same arrays
+    // the filter UI (multi-combos like tBbPos) are wired to. A deep copy here would orphan those refs.
+    const snapS = Object.assign({}, scanState), snapT = Object.assign({}, techState);
+    let syms = [];
+    try { applyScanConfig(preset.cfg); syms = filterRows(scanSource()).map(t => t.sym); } catch (e) { syms = []; }
+    Object.keys(snapS).forEach(k => { scanState[k] = snapS[k]; });
+    Object.keys(snapT).forEach(k => { techState[k] = snapT[k]; });
+    return syms;
+  }
+  function requestNotifyPerm() { try { if (window.Notification && Notification.permission === "default") Notification.requestPermission(); } catch (e) {} }
+  function snToast(msg) {
+    const t = document.createElement("div"); t.className = "sn-toast"; t.innerHTML = "🔔 " + msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.classList.add("show"), 10);
+    setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 300); }, 4500);
+  }
+  // ── market open/close chime + banner (16:30 open / 23:00 close, Israel time) ──
+  let _audioCtx = null;
+  function _primeAudio() {                   // called on first user gesture so the bell can play later
+    try { _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)(); if (_audioCtx.state === "suspended") _audioCtx.resume(); } catch (e) {}
+  }
+  function _bellSound(kind) {                 // soft synthesized bell melody (not loud/startling)
+    try {
+      _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (_audioCtx.state === "suspended") _audioCtx.resume();
+      const ctx = _audioCtx, now = ctx.currentTime;
+      // open = ASCENDING opening bell · close = DESCENDING closing bell (clearly distinct)
+      const notes = kind === "open" ? [523.25, 659.25, 783.99, 1046.5]
+                                    : [1046.5, 783.99, 659.25, 523.25];
+      const step = 0.34;
+      const ring = (f, t0, peak, dur) => {     // fundamental + soft octave = bell-like timbre
+        [[1, peak], [2, peak * 0.32]].forEach(([h, pk]) => {
+          const o = ctx.createOscillator(), g = ctx.createGain();
+          o.type = "sine"; o.frequency.value = f * h;
+          g.gain.setValueAtTime(0.0001, t0);
+          g.gain.exponentialRampToValueAtTime(pk, t0 + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0005, t0 + dur);
+          o.connect(g); g.connect(ctx.destination);
+          o.start(t0); o.stop(t0 + dur + 0.1);
+        });
+      };
+      notes.forEach((f, i) => ring(f, now + i * step, 0.16, 1.4));
+      // final sustained chime rounds it off (a bit longer, ~3.3s total)
+      ring(kind === "open" ? 1046.5 : 523.25, now + notes.length * step, 0.15, 2.0);
+    } catch (e) {}
+  }
+  function _marketBellBanner(kind) {
+    const open = kind === "open";
+    const el = document.createElement("div");
+    el.className = "mkt-bell " + (open ? "open" : "close");
+    el.innerHTML = '<span class="mb-ico">🔔</span><div class="mb-txt"><b>' +
+      (open ? "המסחר נפתח! 🟢" : "המסחר נסגר 🔴") + "</b><span>" +
+      (open ? "וול סטריט פתוחה — בהצלחה!" : "נתראה מחר · אפטר-מרקט פעיל") + "</span></div>";
+    document.body.appendChild(el);
+    requestAnimationFrame(() => el.classList.add("show"));
+    const kill = () => { el.classList.remove("show"); setTimeout(() => el.remove(), 400); };
+    el.onclick = kill; setTimeout(kill, 9000);
+  }
+  function _ilParts() {                       // {dow, date} in Israel time, viewer-TZ independent
+    try {
+      const p = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Jerusalem", weekday: "short", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+      const g = t => (p.find(x => x.type === t) || {}).value;
+      return { dow: g("weekday"), date: g("year") + "-" + g("month") + "-" + g("day") };
+    } catch (e) { const d = new Date(); return { dow: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()], date: d.toISOString().slice(0, 10) }; }
+  }
+  function _marketBell(kind, dateStr) {        // fire once per day per event (localStorage-deduped)
+    const key = "sn_bell_" + dateStr + "_" + kind;
+    try { if (localStorage.getItem(key)) return; localStorage.setItem(key, "1"); } catch (e) {}
+    _bellSound(kind); _marketBellBanner(kind);
+  }
+  function _marketBellTick() {
+    const ip = _ilParts();
+    if (["Sat", "Sun"].indexOf(ip.dow) >= 0) return;         // US market weekdays only
+    const mins = _ilMinutes();
+    // 15-minute catch window (deduped once/day) so a backgrounded/throttled tab or a slightly
+    // late page-open still rings — instead of a strict 3-minute window that's easy to miss.
+    if (mins >= 16 * 60 + 30 && mins < 16 * 60 + 45) _marketBell("open", ip.date);
+    else if (mins >= 23 * 60 && mins < 23 * 60 + 15) _marketBell("close", ip.date);
+  }
+  function fireNotification(e) {
+    const body = e.sym + ' נכנסה לסריקה "' + e.preset + '"';
+    try {
+      if (window.Notification && Notification.permission === "granted") {
+        // prefer the service worker (shows on the phone even when the app is backgrounded)
+        if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+          navigator.serviceWorker.ready.then(reg => reg.showNotification("🔔 התראת StratNinja",
+            { body: body, icon: "ninja-icon.png", badge: "ninja-icon.png", tag: e.pid + e.sym, dir: "rtl", data: { url: "/" } })).catch(() => {});
+        } else {
+          const n = new Notification("🔔 התראת StratNinja", { body: body, icon: "ninja-icon.png", tag: e.pid + e.sym });
+          n.onclick = () => { try { window.focus(); } catch (x) {} openAlertsFeed("feed"); n.close(); };
+        }
+      }
+    } catch (x) {}
+  }
+  // prominent on-screen alert — can't be missed
+  function showAlertBanner(fresh) {
+    // never STACK banners one-on-top-of-another: replace any banner already on screen (unless pinned)
+    document.querySelectorAll(".alert-pop:not(.pinned)").forEach(el => el.remove());
+    const box = document.createElement("div");
+    let compact = false; try { compact = localStorage.getItem("sn_alert_compact") === "1"; } catch (e) {}   // remembered per-device
+    box.className = "alert-pop" + (compact ? " compact" : "");
+    let secs = Math.min(90, Math.max(20, (fresh.length || 1) * 3));   // more alerts → more time to read (20–90s)
+    // group-by-category state: default ON when the flood is big (>20, per Adi), else flat; a manual toggle wins + is remembered.
+    let grouped; try { const g = localStorage.getItem("sn_alert_group"); grouped = (g == null) ? (fresh.length > 20) : (g === "1"); } catch (e) { grouped = fresh.length > 20; }
+    if (grouped) box.classList.add("grouped");   // wide multi-column layout when grouped
+    // one alert row — now carries the PRICE AT THE MOMENT OF THE ALERT (e.px, stored when it fired) + chart link
+    const _apRow = e => {
+      const px = (e.px != null && !isNaN(+e.px)) ? ' <span class="ap-px">@' + (+e.px).toFixed(2) + "</span>" : "";
+      // the TICKER itself is now the chart link (dropped the trailing "📈 גרף" to save horizontal space)
+      return '<div class="ap-row"><a class="ap-sym" href="https://www.tradingview.com/chart/?symbol=' + escAttr(e.sym) + '" target="_blank" rel="noopener" title="פתח גרף ב-TradingView">' + escAttr(e.sym) + "</a><span class=\"ap-verb\">נכנסה לסריקה </span><b title=\"" + escAttr(e.preset) + "\">" + escAttr(e.preset) + "</b>" + px + "</div>";
+    };
+    // flat list, OR grouped as side-by-side CATEGORY COLUMNS (RTL → first category rightmost; wraps down at max width)
+    const _apBodyHtml = (list, grp) => {
+      if (!grp) return list.map(_apRow).join("");
+      const groups = {}; list.forEach(e => { const c = (e && e.cat) ? e.cat : ""; (groups[c] = groups[c] || []).push(e); });
+      return '<div class="ap-cols">' + Object.keys(groups).sort((a, b) => _catOrder(a) - _catOrder(b)).map(c =>
+        '<div class="ap-catcol"><div class="ap-cathead">' + _catLabel(c) + ' <span class="ap-catn">(' + groups[c].length + ")</span></div>" +
+        groups[c].map(_apRow).join("") + "</div>").join("") + "</div>";
+    };
+    box.innerHTML = '<div class="ap-head"><span>🔔 התראה חדשה! <span class="ap-count">(' + fresh.length + ')</span></span>' +
+      '<span class="ap-ctrls">' +
+        '<span class="ap-timer" title="הרשימה תיעלם בעוד (שניות)">' + secs + '</span>' +
+        '<button class="ap-copy" aria-label="העתק טיקרים" title="העתק את כל הטיקרים ללוח">📋</button>' +
+        '<button class="ap-grp' + (grouped ? " on" : "") + '" aria-label="קבץ לפי קטגוריה" title="קבץ לפי קטגוריה">📂</button>' +
+        '<button class="ap-cmp' + (compact ? " on" : "") + '" aria-label="תצוגה קומפקטית" title="תצוגה קומפקטית">▤</button>' +
+        '<button class="ap-pin" aria-label="נעל" title="נעל — שהרשימה לא תיעלם">📌</button>' +
+        '<button class="ap-x" aria-label="סגור">✕</button>' +
+      "</span></div>" +
+      (fresh.length > 20 ? '<div class="ap-topins"><span class="ap-foot-ico">💡</span><span>' + escHtml(_alertInsight(fresh)) + "</span></div>" : "") +
+      '<div class="ap-body">' + _apBodyHtml(fresh, grouped) + "</div>";
+    document.body.appendChild(box);
+    requestAnimationFrame(() => box.classList.add("show"));
+    let pinned = false, timer = null;
+    const timerEl = box.querySelector(".ap-timer"), pinBtn = box.querySelector(".ap-pin");
+    const close = () => { if (timer) clearInterval(timer); box.classList.remove("show"); setTimeout(() => box.remove(), 300); };
+    timer = setInterval(() => {
+      if (pinned) return;
+      secs--;
+      if (timerEl) timerEl.textContent = secs;
+      if (secs <= 0) close();
+    }, 1000);
+    if (pinBtn) pinBtn.onclick = () => {
+      pinned = !pinned;
+      pinBtn.classList.toggle("pinned", pinned);
+      box.classList.toggle("pinned", pinned);
+      if (timerEl) timerEl.textContent = pinned ? "נעוץ" : secs;
+      pinBtn.title = pinned ? "נעוץ — לא ייעלם עד סגירה ידנית. לחץ לחידוש הטיימר" : "נעל — שהרשימה לא תיעלם";
+    };
+    const cmpBtn = box.querySelector(".ap-cmp");
+    if (cmpBtn) cmpBtn.onclick = () => {
+      compact = !compact;
+      box.classList.toggle("compact", compact);
+      cmpBtn.classList.toggle("on", compact);
+      try { localStorage.setItem("sn_alert_compact", compact ? "1" : "0"); } catch (e) {}
+    };
+    const grpBtn = box.querySelector(".ap-grp");
+    if (grpBtn) grpBtn.onclick = () => {
+      grouped = !grouped;
+      grpBtn.classList.toggle("on", grouped);
+      box.classList.toggle("grouped", grouped);   // widen ↔ narrow with the layout
+      try { localStorage.setItem("sn_alert_group", grouped ? "1" : "0"); } catch (e) {}
+      const bodyEl = box.querySelector(".ap-body"); if (bodyEl) bodyEl.innerHTML = _apBodyHtml(fresh, grouped);
+    };
+    // quick-copy ALL tickers in the popup to the clipboard (unique, display order) — Adi wants to
+    // grab the batch fast and paste into a watchlist / scanner.
+    const _apSyms = () => { const seen = {}, out = []; fresh.forEach(e => { const s = ((e && e.sym) || "").trim(); if (s && !seen[s]) { seen[s] = 1; out.push(s); } }); return out; };
+    const copyBtn = box.querySelector(".ap-copy");
+    if (copyBtn) copyBtn.onclick = () => {
+      const syms = _apSyms();
+      if (!syms.length) return;
+      copyToClipboard(syms.join(", "), () => {
+        copyBtn.textContent = "✓"; copyBtn.classList.add("ok");
+        if (typeof snToast === "function") snToast("📋 הועתקו " + syms.length + " טיקרים ללוח");
+        setTimeout(() => { copyBtn.textContent = "📋"; copyBtn.classList.remove("ok"); }, 1400);
+      });
+    };
+    const x = box.querySelector(".ap-x"); if (x) x.onclick = close;
+  }
+  // alert-style preference: "both" (default) | "visual" (silent) | "sound"
+  function _alertStyle() { try { return localStorage.getItem("sn_alert_style") || "both"; } catch (e) { return "both"; } }
+  function _setAlertStyle(v) { try { localStorage.setItem("sn_alert_style", v); } catch (e) {} }
+  // bright rising 3-note chime for a stock alert (distinct from the market open/close bell)
+  function _alertChime() {
+    try {
+      _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (_audioCtx.state === "suspended") _audioCtx.resume();
+      const ctx = _audioCtx, now = ctx.currentTime;
+      [880, 1108.73, 1318.51].forEach((f, i) => {           // A5 · C#6 · E6
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = "triangle"; o.frequency.value = f;
+        const t0 = now + i * 0.13;
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.exponentialRampToValueAtTime(0.2, t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0006, t0 + 0.5);
+        o.connect(g); g.connect(ctx.destination);
+        o.start(t0); o.stop(t0 + 0.55);
+      });
+    } catch (e) {}
+  }
+  function _fireAlert(fresh) {                               // visual + sound per the user's style
+    const style = _alertStyle();
+    fresh.forEach(fireNotification);                        // system notification (also wakes a backgrounded tab)
+    if (style !== "sound") showAlertBanner(fresh);          // on-screen banner (both / visual)
+    if (style !== "visual") _alertChime();                  // chime (both / sound)
+  }
+  // UNCAPPED per-day dedup of fired alerts. The display feed (Prefs.feedAdd) is capped at 200 rows for
+  // the UI, so it CANNOT be trusted for dedup when a user has hundreds of preset×favorite matches —
+  // beyond 200 it "forgot" and re-fired the same alerts on every refresh, stacking banners one on top
+  // of another. This separate key set (pid|sym|date) is never evicted within the day.
+  let _firedKeys = null, _firedDate = "";
+  function _ensureFired(today) {
+    if (_firedKeys && _firedDate === today) return;
+    _firedDate = today; _firedKeys = new Set();
+    try {
+      const raw = JSON.parse(localStorage.getItem("sn_fired_keys") || "null");
+      if (raw && raw.date === today && Array.isArray(raw.keys)) _firedKeys = new Set(raw.keys);
+    } catch (e) {}
+  }
+  function _saveFired(today) {
+    try { localStorage.setItem("sn_fired_keys", JSON.stringify({ date: today, keys: [..._firedKeys].slice(-5000) })); } catch (e) {}
+  }
+  function checkPresetAlerts() {
+    if (!window.Prefs || !(SCAN && SCAN.rows && SCAN.rows.length)) return;
+    const presets = (Prefs.scanPresets() || []).filter(p => p.alert);
+    const favs = Prefs.favorites();
+    if (!presets.length || !favs.length) return;
+    const today = new Date().toISOString().slice(0, 10), fresh = [];
+    _ensureFired(today);
+    const favSet = new Set(favs);
+    presets.forEach(p => {
+      const matched = evalPreset(p);
+      matched.forEach(sym => {
+        if (!favSet.has(sym)) return;
+        const key = p.id + "|" + sym + "|" + today;
+        if (_firedKeys.has(key)) return;                 // uncapped dedup — never re-fires the same match today
+        _firedKeys.add(key);
+        const row = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+        const px = row ? (row.p != null ? row.p : (row.tech ? row.tech.px : null)) : null;
+        const entry = { pid: p.id, preset: p.name, sym: sym, ts: Date.now(), tm: _mfIlTime(), px: px, cat: _presetCat(p), date: today, read: false };
+        Prefs.feedAdd(entry); fresh.push(entry);
+      });
+    });
+    if (fresh.length) { _saveFired(today); _fireAlert(fresh); updateAlertBell(); }
+  }
+  window._snTestAlert = () => _fireAlert([{ sym: "TSLA", preset: "בדיקה", pid: "x" }]);
+  function updateAlertBell() {
+    const n = window.Prefs ? Prefs.feedUnread() : 0;
+    [document.getElementById("alBadge"), document.getElementById("alBadgeDock")].forEach(b => {   // alBadgeSide retired — count now lives only in the dock bell
+      if (b) { b.textContent = n ? n : ""; b.style.display = n ? "inline-flex" : "none"; }
+    });
+  }
+  // auto-detect an alert's DIRECTION (bull/bear/neutral) from its preset name, so a flood of alerts
+  // can be triaged by side. Reads the 🟢/🔴 + ▲/▼ markers and Strat keywords the presets already carry.
+  let _alFeedDir = "all";   // alerts-center direction filter: all / bull / bear
+  let _alFeedSort = (function () { try { return localStorage.getItem("sn_alfeed_sort") || "cat"; } catch (e) { return "cat"; } })();   // feed ordering: cat (grouped) / time / sym
+  function _alertDir(name) {
+    const l = String(name || "").toLowerCase();
+    if (/🔴|🔻|🔽|▼|⬇|\bred\b|down|shooter|ירידה|שורט|\bbear/.test(l)) return "bear";
+    if (/🟢|🔺|🔼|▲|⬆|\bgreen\b|\bup\b|hammer|עלייה|לונג|\bbull/.test(l)) return "bull";
+    return "neutral";
+  }
+  // ── ALERT CATEGORIES ─────────────────────────────────────────────────────────
+  // A manual per-preset tag (Prefs preset.cat) so a flood of alerts can be grouped by type. Unset → "ללא קטגוריה".
+  const ALERT_CATS = [
+    { k: "reversal", lbl: "🔄 היפוכים" },
+    { k: "ftfc", lbl: "📊 המשכיות / FTFC" },
+    { k: "setup", lbl: "🎯 Setups" },
+    { k: "intraday", lbl: "⚡ אינטרה-דיי" },
+    { k: "earnings", lbl: "📅 דיווחים" },
+    { k: "avoid", lbl: "⛔ להימנע" },
+    { k: "general", lbl: "📁 כללי" },
+  ];
+  const _CAT_LBL = (function () { const m = { "": "📂 ללא קטגוריה" }; ALERT_CATS.forEach(c => m[c.k] = c.lbl); return m; })();
+  const _CAT_ORDER = (function () { const m = {}; ALERT_CATS.forEach((c, i) => m[c.k] = i); m[""] = ALERT_CATS.length; return m; })();  // "ללא קטגוריה" sorts last
+  function _customCats() { try { return (window.Prefs && window.Prefs.alertCats) ? (window.Prefs.alertCats() || []) : []; } catch (e) { return []; } }
+  function _catLabel(k) {   // display-name override (any cat) → built-in label → the key itself (custom); "" → ללא קטגוריה
+    if (!k) return _CAT_LBL[""];
+    try { const ov = (window.Prefs && window.Prefs.catLabels) ? window.Prefs.catLabels()[k] : null; if (ov) return ov; } catch (e) {}
+    return _CAT_LBL[k] || k;
+  }
+  function _catOrder(k) {
+    if (!k) return 99999;                                     // "ללא קטגוריה" always last
+    if (_CAT_ORDER[k] != null) return _CAT_ORDER[k];          // built-ins keep 0..6
+    const ci = _customCats().indexOf(k);                      // custom: after built-ins, in the order they were added
+    return ci >= 0 ? (ALERT_CATS.length + ci) : (ALERT_CATS.length + 9000);
+  }
+  // a preset's category — the manually-chosen `cat`; unset → "" (ללא קטגוריה). Kept manual on purpose
+  // (the 🪄 button below fills it from the name on demand; grouping stays predictable otherwise).
+  function _presetCat(p) { return (p && p.cat) ? p.cat : ""; }
+  // auto-SUGGEST a category from a preset name (only used by the 🪄 "הצע קטגוריות" button, never forced).
+  function _suggestCat(name) {
+    const l = String(name || "").toLowerCase();
+    if (/reversal|היפוך/.test(l)) return "reversal";
+    if (/\b(30m|60m|90m|130m|1h|2h|4h|intraday|intra)\b/.test(l)) return "intraday";
+    if (/ftfc|inforce|in\s?force|המשכיות|continuity/.test(l)) return "ftfc";
+    if (/hammer|shooter|support|setup|פטיש|דחיסה|squeeze|breakout|פריצה|darvas|pmg|kicker/.test(l)) return "setup";
+    if (/דיווח|earnings|רווחים|\breport\b|לדיווח/.test(l)) return "earnings";
+    if (/מה לא לסחור|avoid|להימנע|⛔|נר פנימי/.test(l)) return "avoid";
+    return "";
+  }
+  // one-line DESCRIPTIVE insight for a big alert flood (>20): directional tilt + dominant concentration.
+  // Purely describes the composition of the alerts (like the breadth "Ninja Insight") — not trade advice.
+  function _alertInsight(list) {
+    let bull = 0, bear = 0; const catCnt = {};
+    list.forEach(e => {
+      const d = _alertDir(e.preset);
+      if (d === "bull") bull++; else if (d === "bear") bear++;
+      const c = (e && e.cat) ? e.cat : ""; catCnt[c] = (catCnt[c] || 0) + 1;
+    });
+    const n = list.length, dir = bull + bear;
+    let topCat = "", topN = 0;
+    Object.keys(catCnt).forEach(c => { if (c && catCnt[c] > topN) { topN = catCnt[c]; topCat = c; } });
+    const catTxt = (topCat && topN >= Math.max(3, Math.round(n * 0.25))) ? " הריכוז הגדול ב" + _catLabel(topCat) + "." : "";
+    let lead;
+    if (dir >= 4) {
+      const br = bear / dir;
+      if (br >= 0.65) lead = "הטיה דובית ברורה — " + bear + " מתוך " + dir + " ההתראות הכיווניות בכיוון ירידה.";
+      else if (br <= 0.35) lead = "הטיה שורית ברורה — " + bull + " מתוך " + dir + " ההתראות הכיווניות בכיוון עלייה.";
+      else lead = "תמונה מעורבת — " + bull + " עלייה מול " + bear + " ירידה.";
+    } else lead = n + " התראות פעילות כרגע.";
+    return lead + catTxt;
+  }
+  // ── preset-manager: collapse category sections + move a whole category up/down ──
+  function _pmCollapsed() { try { return new Set(JSON.parse(localStorage.getItem("sn_pm_collapsed") || "[]")); } catch (e) { return new Set(); } }
+  function _pmToggleCollapse(c) { const s = _pmCollapsed(); if (s.has(c)) s.delete(c); else s.add(c); try { localStorage.setItem("sn_pm_collapsed", JSON.stringify(Array.from(s))); } catch (e) {} }
+  function _pmMoveCat(c, dir) {   // dir: -1 up, +1 down — swaps this category's block with the neighbour (and groups it)
+    const ps = window.Prefs.scanPresets() || [];
+    const seq = []; ps.forEach(p => { const k = p.cat || ""; if (seq.indexOf(k) < 0) seq.push(k); });
+    const i = seq.indexOf(c), j = i + dir;
+    if (i < 0 || j < 0 || j >= seq.length) return;
+    const t = seq[i]; seq[i] = seq[j]; seq[j] = t;
+    const byCat = {}; ps.forEach(p => { const k = p.cat || ""; (byCat[k] = byCat[k] || []).push(p.id); });
+    const ids = []; seq.forEach(k => (byCat[k] || []).forEach(id => ids.push(id)));
+    window.Prefs.setScanPresetsOrder(ids);
+  }
+  function _pmMovePreset(id, dir) {   // move a preset up/down WITHIN its own category (grouped rendering)
+    const ps = window.Prefs.scanPresets() || [];
+    const p = ps.find(x => x.id === id); if (!p) return;
+    const cat = p.cat || "";
+    const same = ps.filter(x => (x.cat || "") === cat).map(x => x.id);
+    const si = same.indexOf(id), sj = si + dir;
+    if (sj < 0 || sj >= same.length) return;
+    const ids = ps.map(x => x.id);
+    const i = ids.indexOf(id), j = ids.indexOf(same[sj]);
+    const t = ids[i]; ids[i] = ids[j]; ids[j] = t;
+    window.Prefs.setScanPresetsOrder(ids);
+  }
+  function _pmReorderCatTo(dragCat, tgtCat) {   // DRAG: move the whole dragged category to just before the target category (any distance)
+    const ps = window.Prefs.scanPresets() || [];
+    const seq = []; ps.forEach(p => { const c = p.cat || ""; if (seq.indexOf(c) < 0) seq.push(c); });
+    if (seq.indexOf(dragCat) < 0 || seq.indexOf(tgtCat) < 0 || dragCat === tgtCat) return;
+    seq.splice(seq.indexOf(dragCat), 1);          // pull the dragged category out
+    seq.splice(seq.indexOf(tgtCat), 0, dragCat);  // drop it just before the target
+    const byCat = {}; ps.forEach(p => { const c = p.cat || ""; (byCat[c] = byCat[c] || []).push(p.id); });
+    const ids = []; seq.forEach(c => (byCat[c] || []).forEach(id => ids.push(id)));
+    window.Prefs.setScanPresetsOrder(ids);
+  }
+  function _pmDeleteCat(c) {   // delete a category: its scans move to "ללא קטגוריה" (NOT deleted); a custom cat is also dropped from the list
+    if (!c) return;
+    if (_customCats().indexOf(c) >= 0) window.Prefs.removeAlertCat(c);   // removes from list + detaches its presets
+    else (window.Prefs.scanPresets() || []).forEach(p => { if ((p.cat || "") === c) window.Prefs.setPresetCat(p.id, ""); });
+  }
+  let _hubTab = "feed";   // remembered alerts-hub tab (feed | presets | settings)
+  function openAlertsFeed(tab) {
+    if (!window.Prefs) return;
+    if (tab) _hubTab = tab;
+    Prefs.feedMarkRead(); updateAlertBell();
+    const tabs = [["feed", "🔔 אחרונות"], ["presets", "📋 הסריקות שלי"], ["settings", "⚙️ הגדרות"]];
+    const tabBar = '<div class="hub-tabs">' + tabs.map(t => '<button class="hub-tab' + (_hubTab === t[0] ? " on" : "") + '" data-hubtab="' + t[0] + '">' + t[1] + "</button>").join("") + "</div>";
+    modal("🔔 מרכז ההתראות והסריקות", tabBar + '<div id="hubBody"></div>', "al-modal");
+    document.querySelectorAll("[data-hubtab]").forEach(b => b.onclick = () => {
+      _hubTab = b.dataset.hubtab;
+      document.querySelectorAll(".hub-tab").forEach(x => x.classList.toggle("on", x.dataset.hubtab === _hubTab));
+      _hubRenderBody();
+    });
+    _hubRenderBody();
+  }
+  window._snOpenAlerts = openAlertsFeed;
+  function _hubRenderBody() {
+    const el = document.getElementById("hubBody"); if (!el) return;
+    if (_hubTab === "settings") { el.innerHTML = _hubSettingsHtml(); _hubWireSettings(); }
+    else if (_hubTab === "feed") { el.innerHTML = _hubFeedHtml(); _hubWireFeed(); }
+    else { el.innerHTML = '<div id="pmBody">' + pmBodyHtml() + "</div>"; pmWire(); }   // "presets" — the unified list (with 🔔/📱 toggles)
+  }
+  // ⚙️ settings tab: browser/phone notifications, market bell, alert style, test
+  function _hubSettingsHtml() {
+    const permTxt = (window.Notification && Notification.permission === "granted")
+      ? '<span class="pos">✓ התראות דפדפן פעילות</span>'
+      : '<button class="btn ghost" id="alNotifyPerm" style="font-size:12px">הפעל התראות דפדפן</button>';
+    const pushOn = !!(window.Prefs && Prefs.pushSubs().length);
+    const pushBtn = pushOn ? '<span class="pos" style="font-weight:600">✓ התראות פלאפון פעילות</span>'
+      : '<button class="btn primary" id="alPushSub" style="font-size:12px">📱 הפעל התראות לפלאפון</button>';
+    return '<div class="note" style="margin-bottom:8px">🔔 קבל התראה כשמניה <b>מהמועדפים</b> שלך נכנסת לסריקה שמורה. ' + permTxt + "</div>" +
+      '<div class="note" style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">' + pushBtn +
+        '<span style="font-size:11px;color:var(--muted)">📱 בפלאפון: הוסף קודם למסך הבית (שיתוף → הוסף למסך הבית), ואז תקבל התראות גם כשהאפליקציה סגורה לגמרי.</span></div>' +
+      '<div class="note" style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
+        '<span style="font-size:12px;font-weight:600">🔔 צלצול פתיחה/סגירת מסחר:</span>' +
+        '<button class="btn ghost" id="alBellOpen" style="font-size:12px">בדוק פתיחה 🟢</button>' +
+        '<button class="btn ghost" id="alBellClose" style="font-size:12px">בדוק סגירה 🔴</button>' +
+        '<span style="font-size:11px;color:var(--muted)">מנוגן אוטומטית ב-16:30 ו-23:00 (שעון ישראל)</span></div>' +
+      '<div class="note" style="margin-bottom:2px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">' +
+        '<span style="font-size:12px;font-weight:600">📣 התראת מניה:</span>' +
+        '<button class="btn ghost al-style' + (_alertStyle() === "both" ? " on" : "") + '" data-style="both" style="font-size:12px">🔔👁️ צליל + ויזואלי</button>' +
+        '<button class="btn ghost al-style' + (_alertStyle() === "visual" ? " on" : "") + '" data-style="visual" style="font-size:12px">👁️ ויזואלי (שקט)</button>' +
+        '<button class="btn ghost al-style' + (_alertStyle() === "sound" ? " on" : "") + '" data-style="sound" style="font-size:12px">🔔 צליל בלבד</button>' +
+        '<button class="btn ghost" id="alTestAlert" style="font-size:12px;font-weight:600">🧪 בדוק התראה</button></div>';
+  }
+  function _hubWireSettings() {
+    { const pm = $("#alNotifyPerm"); if (pm) pm.onclick = () => { requestNotifyPerm(); setTimeout(_hubRenderBody, 400); }; }
+    { const ps = $("#alPushSub"); if (ps) ps.onclick = () => subscribeToPush(); }
+    { const bo = $("#alBellOpen"); if (bo) bo.onclick = () => { _primeAudio(); _bellSound("open"); _marketBellBanner("open"); }; }
+    { const bc = $("#alBellClose"); if (bc) bc.onclick = () => { _primeAudio(); _bellSound("close"); _marketBellBanner("close"); }; }
+    document.querySelectorAll(".al-style").forEach(b => b.onclick = () => { _setAlertStyle(b.dataset.style); _primeAudio(); _hubRenderBody(); });
+    { const ta = $("#alTestAlert"); if (ta) ta.onclick = () => { _primeAudio(); _fireAlert([{ sym: "TSLA", preset: "בדיקה", pid: "test" }]); }; }
+  }
+  // 🔔 feed tab: recently-fired alerts + direction chips + clear
+  function _hubFeedHtml() {
+    // mockup "מרכז התראות": direction pills (.fc) + category-grouped premium rows (.alc)
+    const presets = Prefs.scanPresets() || [], feed = Prefs.alertFeed();
+    const feedById = {}; presets.forEach(p => { feedById[p.id] = p; });
+    const _p2 = n => String(n).padStart(2, "0");
+    const DIRICO = { bull: "▲", bear: "▼", neutral: "◆" };
+    // DEDUP: the scanner re-fires the same (stock + preset) every cycle → one row per stock+scan,
+    // keeping the NEWEST (the feed is newest-first) so the list isn't flooded with 02:20/02:21 repeats.
+    const _seenK = Object.create(null);
+    const _feedItems = feed.filter(e => { const k = (e.sym || "") + "|" + e.pid; if (_seenK[k]) return false; _seenK[k] = 1; return true; }).map(e => { const p = feedById[e.pid]; if (!p) return null; /* preset gone → hide stale alert */
+      const dir = _alertDir(p.name);
+      const d = new Date(e.ts), when = d.getDate() + "." + (d.getMonth() + 1) + " " + _p2(d.getHours()) + ":" + _p2(d.getMinutes());
+      const fpx = (e.px != null && !isNaN(+e.px)) ? '<span class="alc-px" title="מחיר המניה ברגע ההתראה">@' + (+e.px).toFixed(2) + "</span>" : "";
+      return { dir: dir, cat: (p.cat || ""), sym: e.sym, ts: e.ts, html:
+        '<div class="alc ' + dir + '">' +
+          '<span class="alc-ico">' + DIRICO[dir] + "</span>" +
+          '<div class="alc-mid"><span class="alc-sym tsym clickable" data-chart="' + escAttr(e.sym) + '" data-tf="D">' + e.sym + "</span>" +
+            '<div class="alc-preset" title="' + escAttr(p.name) + '">' + escHtml(p.name) + "</div></div>" +
+          '<div class="alc-right">' + fpx + '<div class="alc-time">' + when + "</div></div>" +
+        "</div>" };
+    }).filter(Boolean);
+    const _dcnt = { bull: 0, bear: 0, neutral: 0 }; _feedItems.forEach(it => _dcnt[it.dir]++);
+    const _chip = (dir, lbl, cnt, cls) => '<button data-aldir="' + dir + '" class="fc ' + cls + (_alFeedDir === dir ? " on" : "") + '">' + lbl + ' <span class="n">' + cnt + "</span></button>";
+    const dirChips = _feedItems.length ? '<div class="alc-fchips">' + _chip("all", "הכול", _feedItems.length, "") + _chip("bull", "🟢 שוריות", _dcnt.bull, "up") + _chip("bear", "🔴 דוביות", _dcnt.bear, "down") + (_dcnt.neutral ? _chip("neutral", "נייטרלי", _dcnt.neutral, "") : "") + "</div>" : "";
+    const shown = _alFeedDir === "all" ? _feedItems : _feedItems.filter(it => it.dir === _alFeedDir);
+    // a titled block of rows + a "copy all its tickers" button (shared by the grouped + flat views)
+    const _catBlock = (title, items, copyLbl) => {
+      const syms = items.map(it => it.sym).filter(Boolean).join(", ");
+      return '<div class="alc-cat"><h3 class="alc-cathead">' + title + ' <span class="alc-catn">' + items.length + "</span>" +
+        '<button class="alc-copy" data-copy="' + escAttr(syms) + '" title="העתק את כל הטיקרים — נוח להדביק ברשימת מעקב">📋 ' + copyLbl + "</button>" +
+        '<span class="alc-catline"></span></h3>' +
+        '<div class="alc-list">' + items.map(it => it.html).join("") + "</div></div>";
+    };
+    let body;
+    if (!shown.length) {
+      body = '<div class="muted">' + (_feedItems.length
+        ? "אין התראות " + (_alFeedDir === "bull" ? "שוריות 🟢" : _alFeedDir === "bear" ? "דוביות 🔴" : "בכיוון הזה") + " כרגע."
+        : "עוד לא נורו התראות. כשמניה מהמועדפים תיכנס לסריקה מסומנת — היא תופיע כאן.") + "</div>";
+    } else if (_alFeedSort === "cat") {   // 🗂️ grouped by category (default)
+      const groups = {}; shown.forEach(it => { (groups[it.cat] = groups[it.cat] || []).push(it); });
+      body = Object.keys(groups).sort((a, b) => _catOrder(a) - _catOrder(b)).map(c => _catBlock(_catLabel(c), groups[c], "העתק")).join("");
+    } else {   // 🕐 flat by time (newest-first) · 🔤 flat by symbol (A-Z)
+      const flat = shown.slice();
+      if (_alFeedSort === "sym") flat.sort((a, b) => (a.sym || "").localeCompare(b.sym || ""));
+      else flat.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+      body = _catBlock(_alFeedSort === "sym" ? "לפי סימבול · א-ת" : "לפי זמן · מהחדש", flat, "העתק הכל");
+    }
+    const _sortBtn = (k, lbl) => '<button data-alsort="' + k + '" class="alc-sortb' + (_alFeedSort === k ? " on" : "") + '">' + lbl + "</button>";
+    const sortCtl = _feedItems.length ? '<div class="alc-sort"><span class="alc-sort-l">מיון:</span>' + _sortBtn("cat", "🗂️ קטגוריה") + _sortBtn("time", "🕐 זמן") + _sortBtn("sym", "🔤 סימבול") + "</div>" : "";
+    return '<div class="alc-bar">' + dirChips + (feed.length ? ' <button class="btn ghost" id="alClear" style="font-size:12px;font-weight:600">🗑 נקה</button>' : "") + "</div>" +
+      (sortCtl ? '<div class="alc-bar alc-bar2">' + sortCtl + "</div>" : "") +
+      '<div class="al-flist alc-scroll">' + body + "</div>";
+  }
+  function _hubWireFeed() {
+    document.querySelectorAll("[data-aldir]").forEach(b => b.onclick = () => { _alFeedDir = b.dataset.aldir; _hubRenderBody(); });
+    document.querySelectorAll("[data-alsort]").forEach(b => b.onclick = () => { _alFeedSort = b.dataset.alsort; try { localStorage.setItem("sn_alfeed_sort", _alFeedSort); } catch (e) {} _hubRenderBody(); });
+    { const cl = $("#alClear"); if (cl) cl.onclick = () => { Prefs.feedClear(); _hubRenderBody(); }; }
+    // 📋 copy a whole category's tickers to the clipboard (quick-scan: paste into a watchlist / TradingView)
+    document.querySelectorAll(".al-modal [data-copy]").forEach(b => b.onclick = async (ev) => {
+      ev.stopPropagation();
+      const txt = b.getAttribute("data-copy") || "";
+      let ok = false;
+      try { await navigator.clipboard.writeText(txt); ok = true; }
+      catch (e) { try { const ta = document.createElement("textarea"); ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select(); ok = document.execCommand("copy"); ta.remove(); } catch (e2) {} }
+      const n = txt ? txt.split(",").length : 0;
+      if (ok) { snToast("📋 הועתקו " + n + " טיקרים"); const o = b.textContent; b.textContent = "✓ הועתק"; b.classList.add("done"); setTimeout(() => { b.textContent = o; b.classList.remove("done"); }, 1500); }
+      else snToast("ההעתקה נכשלה");
+    });
+    wireCharts(document.getElementById("pgModal") || document);
+  }
+  window._snCheckAlerts = checkPresetAlerts;
+  // ---- community requests form (saved to Supabase; the server relays new ones to a private
+  //      Discord channel — the webhook stays server-side, never in this client code) ----
+  function openRequestForm() {
+    const body =
+      '<div class="note" style="margin-bottom:12px">💬 יש לך רעיון, בקשה לפיצ׳ר או משהו שתרצה לראות באתר? ספר לנו — זה מגיע ישירות לצוות StratNinja. קוראים הכל 🙏</div>' +
+      '<div class="fgrp"><label>השם שלך <span class="muted">(רשות)</span></label><input id="reqName" type="text" maxlength="60" placeholder="איך קוראים לך?"></div>' +
+      '<div class="fgrp"><label>ליצירת קשר <span class="muted">(רשות)</span></label><input id="reqContact" type="text" maxlength="80" placeholder="דיסקורד / אימייל / טלגרם"></div>' +
+      '<div class="fgrp"><label>הבקשה שלך</label><textarea id="reqMsg" rows="5" maxlength="1000" placeholder="מה תרצה שנוסיף או נשפר?" style="width:100%;box-sizing:border-box;resize:vertical;padding:9px 11px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font-family:inherit;font-size:14px"></textarea></div>' +
+      '<input id="reqHp" type="text" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px;opacity:0">' +
+      '<button class="btn primary" id="reqSend" style="margin-top:4px">📤 שלח בקשה</button>' +
+      '<div id="reqStatus" class="note" style="margin-top:10px;display:none"></div>';
+    modal("💬 בקשות מהקהל", body);
+    const btn = document.getElementById("reqSend");
+    btn.onclick = async () => {
+      if ((document.getElementById("reqHp").value || "").trim()) { closeModal(); return; }   // honeypot → bot, silently drop
+      const msg = (document.getElementById("reqMsg").value || "").trim();
+      if (msg.length < 3) { snToast("כתוב בבקשה את הבקשה ✍️"); return; }
+      try { const last = +localStorage.getItem("sn_req_last") || 0; if (Date.now() - last < 120000) { snToast("שלחת בקשה זה עתה — נסה שוב בעוד רגע 🙏"); return; } } catch (e) {}
+      const cfg = window.SN_CONFIG || {};
+      if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) { snToast("שירות הבקשות לא זמין כרגע"); return; }
+      const name = (document.getElementById("reqName").value || "").trim().slice(0, 60);
+      const contact = (document.getElementById("reqContact").value || "").trim().slice(0, 80);
+      btn.disabled = true; btn.textContent = "שולח…";
+      const st = document.getElementById("reqStatus");
+      try {
+        const res = await fetch(cfg.SUPABASE_URL + "/rest/v1/community_requests", {
+          method: "POST",
+          headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
+          body: JSON.stringify({ name: name || null, contact: contact || null, message: msg }),
+        });
+        if (res.ok) {
+          try { localStorage.setItem("sn_req_last", String(Date.now())); } catch (e) {}
+          st.style.display = "block"; st.style.color = "var(--green)"; st.innerHTML = "✅ נשלח! תודה רבה — נעבור על זה. 🙏";
+          document.getElementById("reqMsg").value = ""; btn.style.display = "none";
+        } else { throw new Error("http " + res.status); }
+      } catch (e) {
+        st.style.display = "block"; st.style.color = "var(--red)"; st.innerHTML = "❌ שליחה נכשלה — נסה שוב מאוחר יותר.";
+        btn.disabled = false; btn.textContent = "📤 שלח בקשה";
+      }
+    };
+  }
+  window._snOpenRequest = openRequestForm;
+
+  // ========== COMMUNITY TICKERS (viewer-suggested scanner stocks) ==========
+  const SN_ADMIN_EMAIL = "koriatmanagement@gmail.com";
+  function _snIsAdmin() {
+    try { return ((window.SNAuth && SNAuth.user() || {}).email || "").toLowerCase() === SN_ADMIN_EMAIL; }
+    catch (e) { return false; }
+  }
+  // viewer-facing: suggest a ticker for the scanner (requires Google login — browsing stays free)
+  function openSuggestTicker() {
+    const cloud = !!(window.SNAuth && SNAuth.isCloud && SNAuth.isCloud());
+    const loggedIn = !!(window.SNAuth && SNAuth.user && SNAuth.user());
+    if (cloud && !loggedIn) {
+      modal("⭐ הצע מניה לסורק",
+        '<div class="note" style="margin-bottom:14px">⭐ כדי להציע מניה לסורק צריך <b>להתחבר עם Google</b> — כך נדע מי הציע ונוכל לעדכן אותך.<br>הגלישה באתר חופשית לגמרי; רק הצעת מניה דורשת התחברות. 🙏</div>' +
+        '<button class="btn primary" id="sugLogin" style="width:100%;box-sizing:border-box">🔓 התחבר עם Google</button>');
+      const lb = document.getElementById("sugLogin");
+      if (lb) lb.onclick = () => { try { SNAuth.signInWithGoogle(); } catch (e) {} };
+      return;
+    }
+    const body =
+      '<div class="note" style="margin-bottom:12px">⭐ יש מניה אמריקאית שתרצה שתופיע בסורק? הצע אותה!<br>השרת בודק אוטומטית שהיא אמיתית ונזילה, ואז היא עוברת אישור קצר — ואז נכנסת ל<b>רשימת הקהילה</b> בסורק. 🙏</div>' +
+      '<div class="fgrp"><label>סימבול המניה</label><input id="sugTk" type="text" maxlength="8" placeholder="AAPL" autocomplete="off" style="text-transform:uppercase;letter-spacing:1px;font-weight:700"></div>' +
+      '<input id="sugHp" type="text" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px;opacity:0">' +
+      '<button class="btn primary" id="sugSend" style="margin-top:4px">📤 הצע מניה</button>' +
+      '<div id="sugStatus" class="note" style="margin-top:10px;display:none"></div>';
+    modal("⭐ הצע מניה לסורק", body);
+    const inp = document.getElementById("sugTk"); if (inp) inp.focus();
+    const btn = document.getElementById("sugSend");
+    btn.onclick = async () => {
+      if ((document.getElementById("sugHp").value || "").trim()) { closeModal(); return; }
+      const tk = (document.getElementById("sugTk").value || "").trim().toUpperCase();
+      const st = document.getElementById("sugStatus");
+      const show = (color, html) => { st.style.display = "block"; st.style.color = color; st.innerHTML = html; };
+      if (!/^[A-Z][A-Z.\-]{0,7}$/.test(tk)) { show("var(--red)", "❌ הזן סימבול תקין (אותיות לועזיות, למשל AAPL)"); return; }
+      try { const last = +localStorage.getItem("sn_sug_last") || 0; if (Date.now() - last < 60000) { show("var(--red)", "הצעת מניה זה עתה — נסה שוב בעוד רגע 🙏"); return; } } catch (e) {}
+      const cfg = window.SN_CONFIG || {};
+      if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) { show("var(--red)", "השירות לא זמין כרגע"); return; }
+      const email = ((window.SNAuth && SNAuth.user() || {}).email) || null;
+      btn.disabled = true; btn.textContent = "שולח…";
+      try {
+        const res = await fetch(cfg.SUPABASE_URL + "/rest/v1/community_tickers", {
+          method: "POST",
+          headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
+          body: JSON.stringify({ ticker: tk, requested_by: email }),
+        });
+        if (res.ok) {
+          try { localStorage.setItem("sn_sug_last", String(Date.now())); } catch (e) {}
+          show("var(--green)", "✅ <b>$" + tk + "</b> נשלחה! נבדוק אותה ונוסיף לרשימת הקהילה אם היא מתאימה. תודה 🙏");
+          document.getElementById("sugTk").value = ""; btn.style.display = "none";
+        } else if (res.status === 409) {
+          show("var(--muted)", "ℹ️ <b>$" + tk + "</b> כבר הוצעה — היא בתהליך.");
+          btn.disabled = false; btn.textContent = "📤 הצע מניה";
+        } else { throw new Error("http " + res.status); }
+      } catch (e) {
+        show("var(--red)", "❌ שליחה נכשלה — נסה שוב מאוחר יותר.");
+        btn.disabled = false; btn.textContent = "📤 הצע מניה";
+      }
+    };
+  }
+  window._snSuggestTicker = openSuggestTicker;
+
+  // admin-only: red count badge on "מניות קהילה · ניהול" = how many are waiting for YOUR approval
+  async function updateCommAdminBadge() {
+    const el = document.getElementById("commAdminBadge");
+    if (!el || !_snIsAdmin()) return;
+    try {
+      const client = window.SNAuth && SNAuth.getClient && SNAuth.getClient();
+      if (!client) return;
+      const { data, error } = await client.from("community_tickers").select("id").eq("status", "pending").eq("validated", true);
+      if (error) return;
+      const n = (data || []).length;
+      el.textContent = n ? String(n) : "";
+      el.style.display = n ? "" : "none";
+    } catch (e) {}
+  }
+  // admin-only: approve / reject / remove suggested tickers
+  async function openCommunityAdmin() {
+    if (!_snIsAdmin()) { snToast("גישה למנהל בלבד"); return; }
+    const client = window.SNAuth && SNAuth.getClient && SNAuth.getClient();
+    if (!client) { snToast("התחבר עם Google כדי לנהל"); return; }
+    modal("⭐ מניות קהילה · ניהול", '<div id="caBody" class="note">טוען…</div>');
+    renderCommunityAdmin(client);
+  }
+  let _caReveal = false;   // community admin: emails MASKED by default (privacy when shown on a livestream)
+  function _maskEmail(e) { if (!e) return "אנונימי"; const at = e.indexOf("@"); if (at < 1) return "•••"; return e[0] + "•••@•••"; }
+  async function renderCommunityAdmin(client) {
+    const box = document.getElementById("caBody");
+    if (!box) return;
+    let rows = [];
+    try {
+      const { data, error } = await client.from("community_tickers").select("*").order("created_at", { ascending: false });
+      if (error) throw error;
+      rows = data || [];
+    } catch (e) { box.innerHTML = '<span style="color:var(--red)">שגיאה בטעינה: ' + (e.message || e) + "</span>"; return; }
+    const awaiting = rows.filter(r => r.status === "pending" && r.validated);
+    const checking = rows.filter(r => r.status === "pending" && !r.validated);
+    const approved = rows.filter(r => r.status === "approved");
+    const rejected = rows.filter(r => r.status === "rejected");
+    const chip = (r, acts) => '<div class="ca-row"><span class="ca-tk">$' + (r.ticker || "").toUpperCase() + "</span>" +
+      '<span class="ca-sec muted">' + (r.sector || "—") + "</span>" +
+      '<span class="ca-by muted" title="' + (_caReveal ? escAttr(r.requested_by || "אנונימי") : "מוסתר — 👁️ להצגה") + '">👤 ' + escHtml(_caReveal ? (r.requested_by || "אנונימי") : _maskEmail(r.requested_by)) + "</span>" +
+      (r.reason ? '<span class="ca-reason muted" title="' + escAttr(r.reason) + '">· ' + escHtml(r.reason).slice(0, 40) + "</span>" : "") +
+      '<span class="ca-acts">' + acts.map(a => '<button class="btn ghost ca-btn" data-ca="' + a.act + '" data-id="' + r.id + '">' + a.lbl + "</button>").join("") + "</span></div>";
+    let html = "";
+    html += '<div class="ca-privacy"><button class="btn ghost" id="caReveal">' + (_caReveal ? "🙈 הסתר מיילים" : "👁️ הצג מיילים") + '</button><span class="muted" style="font-size:12px">' + (_caReveal ? "המיילים גלויים כרגע" : "המיילים מוסתרים — בטוח להצגה בלייב") + '</span><button class="btn ghost" id="caAnalytics" style="font-size:13px;margin-inline-start:auto">📈 מטריצת שימוש</button></div>';
+    html += '<div class="ca-sec-h">🟢 ממתין לאישור שלך (' + awaiting.length + ")</div>";
+    html += awaiting.length ? awaiting.map(r => chip(r, [{ act: "approve", lbl: "✅ אשר" }, { act: "reject", lbl: "❌ דחה" }])).join("") : '<div class="muted" style="padding:4px 0">אין ממתינות ✨</div>';
+    if (checking.length) { html += '<div class="ca-sec-h">⏳ בבדיקת השרת (' + checking.length + ")</div>"; html += checking.map(r => chip(r, [{ act: "del", lbl: "🗑️" }])).join(""); }
+    html += '<details class="ca-collapse"' + (approved.length && approved.length <= 10 ? " open" : "") + '><summary class="ca-sec-h">⭐ מאושרות · בסורק (' + approved.length + ")</summary>" +
+      (approved.length ? '<div class="ca-collapse-body">' + approved.map(r => chip(r, [{ act: "del", lbl: "🗑️ הסר" }])).join("") + "</div>" : '<div class="muted" style="padding:4px 0">עדיין אין</div>') + "</details>";
+    if (rejected.length) { html += '<details class="ca-collapse"><summary class="ca-sec-h">❌ נדחו (' + rejected.length + ")</summary><div class=\"ca-collapse-body\">" + rejected.map(r => chip(r, [{ act: "approve", lbl: "↩️ שחזר" }, { act: "del", lbl: "🗑️" }])).join("") + "</div></details>"; }
+    box.innerHTML = html;
+    { const rv = box.querySelector("#caReveal"); if (rv) rv.onclick = () => { _caReveal = !_caReveal; renderCommunityAdmin(client); }; }
+    { const an = box.querySelector("#caAnalytics"); if (an) an.onclick = () => { closeModal(); setPage("analytics"); }; }
+    box.querySelectorAll("[data-ca]").forEach(b => b.onclick = async () => {
+      const id = b.dataset.id, act = b.dataset.ca;
+      b.disabled = true; b.textContent = "…";
+      try {
+        if (act === "del") await client.from("community_tickers").delete().eq("id", id);
+        else if (act === "approve") await client.from("community_tickers").update({ status: "approved", validated: true, reason: null }).eq("id", id);
+        else if (act === "reject") await client.from("community_tickers").update({ status: "rejected", reason: "נדחה ידנית" }).eq("id", id);
+        renderCommunityAdmin(client); updateCommAdminBadge();
+      } catch (e) { snToast("שגיאה: " + (e.message || e)); b.disabled = false; renderCommunityAdmin(client); }
+    });
+  }
+  window._snCommunityAdmin = openCommunityAdmin;
+
+  // ===== COMMUNITY TICKERS as a full PAGE (mockup): submit card + approved grid + admin queue (🔒) =====
+  var _COMM_AVCOL = ["#34e0d0", "#2fcf8e", "#f0883e", "#4f8cff", "#ff6a81", "#f4b64e", "#8878ff"];
+  function _commAvatar(email) {
+    var ch = (email && email[0]) ? email[0].toUpperCase() : "⭐";
+    var col = _COMM_AVCOL[(email || "x").charCodeAt(0) % _COMM_AVCOL.length];
+    var ink = (col === "#34e0d0" || col === "#2fcf8e" || col === "#f4b64e") ? "#04150e" : "#fff";
+    return '<span class="cc-av" style="background:' + col + ";color:" + ink + '">' + escHtml(ch) + "</span>";
+  }
+  function _commCard(r) {
+    var tk = (r.ticker || "").toUpperCase();
+    var etf = r.sector ? (typeof etfFor === "function" ? (etfFor(r.sector) || r.sector) : r.sector) : "";
+    return '<div class="comm-cc"><div class="cc-top"><span class="cc-sym tsym clickable" data-chart="' + escAttr(tk) + '" data-tf="D">' + escHtml(tk) + "</span>" +
+      (etf ? '<span class="cc-etf">' + escHtml(etf) + "</span>" : "") +
+      '<span class="cc-st">✓ אושר</span></div>' +
+      '<div class="cc-by">' + _commAvatar(r.requested_by) + "הוצע ע״י חבר הקהילה</div></div>";
+  }
+  async function _commLoadApproved() {
+    var box = document.getElementById("commApproved"); if (!box) return;
+    var cfg = window.SN_CONFIG || {};
+    if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) { box.innerHTML = '<div class="muted" style="padding:12px">השירות אינו זמין כרגע.</div>'; return; }
+    try {
+      var r = await fetch(cfg.SUPABASE_URL + "/rest/v1/community_tickers?status=eq.approved&select=ticker,sector,requested_by,created_at&order=created_at.desc&limit=24",
+        { headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY } });
+      var rows = r.ok ? await r.json() : [];
+      var _cnt = document.getElementById("commApprovedCnt"); if (_cnt) _cnt.textContent = rows.length ? "(" + rows.length + ")" : "";
+      box.innerHTML = rows.length ? rows.map(_commCard).join("") : '<div class="muted" style="padding:12px;grid-column:1/-1">עוד לא נוספו מניות קהילה — היה הראשון להציע! ⭐</div>';
+      wireCharts(box);
+    } catch (e) { box.innerHTML = '<div class="muted" style="padding:12px">שגיאה בטעינה.</div>'; }
+  }
+  function _commPendRow(r) {
+    var tk = (r.ticker || "").toUpperCase();
+    var valid = r.validated ? '<span class="pr-ok">✓ עברה ולידציה</span>' : "⏳ בבדיקת השרת";
+    var acts = '<button class="cq-ok" data-cq="approve" data-id="' + r.id + '">אשר</button><button class="cq-no" data-cq="reject" data-id="' + r.id + '">דחה</button>';
+    return '<div class="comm-pr"><span class="pr-sym">$' + escHtml(tk) + "</span>" +
+      '<div class="pr-mid"><div class="pr-re">' + escHtml(r.reason || "—") + "</div>" +
+        '<div class="pr-meta">' + (r.sector ? escHtml(r.sector) + " · " : "") + valid + "</div></div>" +
+      '<div class="pr-act">' + acts + "</div></div>";
+  }
+  async function _commLoadQueue() {
+    var box = document.getElementById("commAdminQueue"); if (!box) return;
+    var client = window.SNAuth && SNAuth.getClient && SNAuth.getClient();
+    if (!client) { box.innerHTML = '<div class="muted" style="padding:6px">התחבר עם Google כדי לנהל.</div>'; return; }
+    try {
+      var res = await client.from("community_tickers").select("*").eq("status", "pending").order("created_at", { ascending: false });
+      var rows = res.data || [];
+      var cnt = document.getElementById("commQCnt"); if (cnt) cnt.textContent = rows.length || "";
+      box.innerHTML = rows.length ? rows.map(_commPendRow).join("") : '<div class="muted" style="padding:6px">אין הצעות ממתינות ✨</div>';
+      box.querySelectorAll("[data-cq]").forEach(function (b) {
+        b.onclick = async function () {
+          var id = b.dataset.id, act = b.dataset.cq; b.disabled = true; b.textContent = "…";
+          try {
+            if (act === "approve") await client.from("community_tickers").update({ status: "approved", validated: true, reason: null }).eq("id", id);
+            else await client.from("community_tickers").update({ status: "rejected", reason: "נדחה ידנית" }).eq("id", id);
+            _commLoadQueue(); _commLoadApproved(); if (window.updateCommAdminBadge) updateCommAdminBadge();
+          } catch (e) { b.disabled = false; b.textContent = act === "approve" ? "אשר" : "דחה"; snToast("שגיאה: " + (e.message || e)); }
+        };
+      });
+    } catch (e) { box.innerHTML = '<div class="muted" style="padding:6px">שגיאה בטעינה.</div>'; }
+  }
+  async function _commSubmit() {
+    var loggedIn = !!(window.SNAuth && SNAuth.user && SNAuth.user());
+    var cloud = !!(window.SNAuth && SNAuth.isCloud && SNAuth.isCloud());
+    var st = document.getElementById("commSubStatus");
+    var show = function (color, html) { if (st) { st.style.display = "block"; st.style.color = color; st.innerHTML = html; } };
+    if (cloud && !loggedIn) { show("var(--muted)", '🔓 כדי להציע מניה צריך <b>להתחבר עם Google</b> — <a id="commLogin" style="color:var(--accent);cursor:pointer">התחבר</a>'); var lb = document.getElementById("commLogin"); if (lb) lb.onclick = function () { try { SNAuth.signInWithGoogle(); } catch (e) {} }; return; }
+    var tk = (document.getElementById("commTk").value || "").trim().toUpperCase();
+    var reason = (document.getElementById("commReason").value || "").trim().slice(0, 120);
+    if (!/^[A-Z][A-Z.\-]{0,7}$/.test(tk)) { show("var(--red)", "❌ הזן סימבול תקין (אותיות לועזיות, למשל AAPL)"); return; }
+    try { var last = +localStorage.getItem("sn_sug_last") || 0; if (Date.now() - last < 60000) { show("var(--red)", "הצעת מניה זה עתה — נסה שוב בעוד רגע 🙏"); return; } } catch (e) {}
+    var cfg = window.SN_CONFIG || {};
+    if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) { show("var(--red)", "השירות אינו זמין כרגע"); return; }
+    var email = ((window.SNAuth && SNAuth.user() || {}).email) || null;
+    var btn = document.getElementById("commSend"); if (btn) { btn.disabled = true; btn.textContent = "שולח…"; }
+    try {
+      var res = await fetch(cfg.SUPABASE_URL + "/rest/v1/community_tickers", {
+        method: "POST",
+        headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY, "Content-Type": "application/json", Prefer: "return=minimal" },
+        body: JSON.stringify({ ticker: tk, requested_by: email, reason: reason || null }),
+      });
+      if (res.ok) {
+        try { localStorage.setItem("sn_sug_last", String(Date.now())); } catch (e) {}
+        show("var(--green)", "✅ <b>$" + escHtml(tk) + "</b> נשלחה! נבדוק אותה ונוסיף לרשימת הקהילה אם היא מתאימה. תודה 🙏");
+        document.getElementById("commTk").value = ""; document.getElementById("commReason").value = "";
+        if (btn) { btn.disabled = false; btn.textContent = "שלח הצעה"; }
+      } else if (res.status === 409) { show("var(--muted)", "ℹ️ <b>$" + escHtml(tk) + "</b> כבר הוצעה — היא בתהליך."); if (btn) { btn.disabled = false; btn.textContent = "שלח הצעה"; } }
+      else { throw new Error("http " + res.status); }
+    } catch (e) { show("var(--red)", "❌ שליחה נכשלה — נסה שוב מאוחר יותר."); if (btn) { btn.disabled = false; btn.textContent = "שלח הצעה"; } }
+  }
+  function renderCommunity() {
+    var admin = _snIsAdmin();
+    var submit = '<section class="comm-submit">' +
+      '<div class="cs-h"><span class="cs-ic">➕</span><h2>הצע מניה לסורק</h2></div>' +
+      '<p class="cs-d">יש מניה אמריקאית שחסרה לך בסורק? הצע אותה — השרת בודק אוטומטית (סחירות, שווי) ועדי מאשר.</p>' +
+      '<div class="cs-form"><input id="commTk" class="cs-tk" type="text" maxlength="8" placeholder="טיקר" autocomplete="off" style="text-transform:uppercase">' +
+      '<input id="commReason" class="cs-re" type="text" maxlength="120" placeholder="למה כדאי להוסיף? (לא חובה)" autocomplete="off">' +
+      '<button class="cs-send" id="commSend">שלח הצעה</button></div>' +
+      '<div class="cs-hint">⚠️ חייבת להיות מניה אמריקאית נסחרת · כל הצעה עוברת ולידציה אוטומטית לפני אישור.</div>' +
+      '<div id="commSubStatus" class="note" style="display:none;margin-top:10px"></div></section>';
+    var approved = '<details class="comm-collapse"' + (admin ? "" : " open") + '>' +
+      '<summary class="comm-head"><h2>✓ נוספו לאחרונה</h2><span class="comm-count" id="commApprovedCnt"></span><span class="comm-c">מניות שהקהילה הציעה ואושרו</span><span class="comm-line"></span></summary>' +
+      '<div id="commApproved" class="comm-grid"><div class="muted" style="padding:12px;grid-column:1/-1">טוען…</div></div></details>';
+    var adminQ = admin ? '<section class="comm-admin"><div class="ca2-h"><span class="ca2-ic">✅</span><h2>ממתינות לאישור</h2><span class="ca2-cnt" id="commQCnt"></span><span class="ca2-lock">🔒 גלוי רק לך</span><span class="ca2-line"></span><button class="btn ghost" id="commMatrix" style="font-size:13px;white-space:nowrap">📈 מטריצת שימוש</button></div><div id="commAdminQueue"><div class="muted" style="padding:6px">טוען…</div></div></section>' : "";
+    return '<div class="page-head"><h1>⭐ מניות קהילה</h1><div class="sub">הקהילה מציעה מניות לסורק — אחרי בדיקה ואישור הן נכנסות ליקום הסריקה.</div></div>' +
+      submit + approved + adminQ;
+  }
+  function wireCommunity() {
+    var btn = document.getElementById("commSend"); if (btn) btn.onclick = _commSubmit;
+    var tk = document.getElementById("commTk"); if (tk) tk.onkeydown = function (e) { if (e.key === "Enter") _commSubmit(); };
+    _commLoadApproved();
+    if (_snIsAdmin()) _commLoadQueue();
+    var mx = document.getElementById("commMatrix"); if (mx) mx.onclick = function () { setPage("analytics"); };
+  }
+
+  // ---- Web Push subscription (phone alerts even when the app is closed) ----
+  function urlB64ToUint8(b64) {
+    const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+    const s = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(s), arr = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+    return arr;
+  }
+  // save a sub (and optionally drop an old endpoint) DIRECTLY to the server, so registration never
+  // depends on cloudsync running. No-op for guests (needs a logged-in token).
+  async function _saveSubServer(subJson, removeEp) {
+    try {
+      var c = window.SNAuth && SNAuth.getClient && SNAuth.getClient();
+      if (!c) return false;
+      var r = await c.auth.getSession();
+      var tok = r && r.data && r.data.session && r.data.session.access_token;
+      if (!tok) return false;
+      var resp = await fetch("/api/push-subscribe", {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + tok },
+        body: JSON.stringify({ subscription: subJson || undefined, remove: removeEp || undefined }),
+      });
+      return resp.ok;
+    } catch (e) { return false; }
+  }
+  async function subscribeToPush() {
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !cfg || !cfg.VAPID_PUBLIC) {
+        snToast("הדפדפן הזה לא תומך בהתראות Push"); return;
+      }
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { snToast("צריך לאשר התראות בדפדפן"); return; }
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(cfg.VAPID_PUBLIC) });
+      if (window.Prefs && sub) Prefs.addPushSub(sub.toJSON());
+      if (sub) await _saveSubServer(sub.toJSON());                 // register on the server immediately
+      try { localStorage.setItem("sn_push_renew", String(Date.now())); } catch (e) {}
+      snToast("✓ התראות לפלאפון הופעלו!");
+      if (document.getElementById("pgModal")) openAlertsFeed();
+    } catch (e) { snToast("שגיאה בהפעלת התראות פלאפון"); }
+  }
+  window._snSubPush = subscribeToPush;
+  // AUTO-HEAL the push subscription on app load: FCM rotates tokens, so a months-old sub goes "gone"
+  // (server sends, phone shows nothing). On load — if notifications are already granted and the user is
+  // logged in — make sure a subscription exists and is saved to the cloud, and FORCE a genuinely fresh
+  // token weekly (and on the very first run, since sn_push_renew is unset) so it can never rot silently.
+  async function _autoEnsurePush() {
+    try {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+      if (!(window.Notification && Notification.permission === "granted")) return;   // never prompt automatically
+      if (!(window.SNAuth && window.SNAuth.getClient && window.SNAuth.getClient())) return;   // per-user → logged in only
+      const cfg = window.SN_CONFIG; if (!cfg || !cfg.VAPID_PUBLIC) return;
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      let renew = false;
+      try { renew = (Date.now() - (+(localStorage.getItem("sn_push_renew") || 0))) > 7 * 864e5; } catch (e) {}
+      const hadSub = !!sub;
+      let oldEp = null;
+      if (renew && sub) { oldEp = sub.endpoint; try { if (window.Prefs) Prefs.removePushSub(sub.endpoint); await sub.unsubscribe(); } catch (e) {} sub = null; }
+      if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(cfg.VAPID_PUBLIC) });
+      if (window.Prefs && sub) Prefs.addPushSub(sub.toJSON());
+      if (sub && (!hadSub || renew)) await _saveSubServer(sub.toJSON(), oldEp);   // save to server when newly created / renewed
+      if (renew) { try { localStorage.setItem("sn_push_renew", String(Date.now())); } catch (e) {} }
+    } catch (e) {}
+  }
+  window._snEnsurePush = _autoEnsurePush;
+  // force a FRESH subscription — unsubscribe the current (often dead/zombie) one first, then re-subscribe.
+  // fixes the common "server sends but phone shows nothing" case where getSubscription() keeps returning a stale sub.
+  async function renewPush() {
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!("serviceWorker" in navigator) || !("PushManager" in window) || !cfg || !cfg.VAPID_PUBLIC) { snToast("הדפדפן לא תומך בהתראות Push"); return; }
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") { snToast("צריך לאשר התראות בדפדפן"); return; }
+      const reg = await navigator.serviceWorker.ready;
+      const old = await reg.pushManager.getSubscription();
+      let oldEp = null;
+      if (old) { oldEp = old.endpoint; try { await old.unsubscribe(); } catch (e) {} if (window.Prefs) Prefs.removePushSub(oldEp); }
+      const fresh = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(cfg.VAPID_PUBLIC) });
+      if (window.Prefs && fresh) Prefs.addPushSub(fresh.toJSON());
+      if (fresh) await _saveSubServer(fresh.toJSON(), oldEp);      // save fresh + drop the old (dead) one on the server
+      try { localStorage.setItem("sn_push_renew", String(Date.now())); } catch (e) {}
+      snToast("✓ המנוי חודש! עכשיו אפשר לשלוח בדיקה");
+      if (state.page === "favorites") reRender();
+    } catch (e) { snToast("שגיאה בחידוש המנוי"); }
+  }
+  window._snRenewPush = renewPush;
+
+  // ---- screenshot & share ----
+  const _shNum = v => (v >= 0 ? "+" : "") + (v == null ? 0 : v).toFixed(2) + "%";
+  function _shPick(sym, chg) {
+    return '<div class="sc-pick"><div class="sc-pk-sym big">' + sym +
+      '</div><div class="sc-pk-chg xl ' + ((chg || 0) >= 0 ? "pos" : "neg") + '">' + _shNum(chg) + "</div></div>";
+  }
+  function _shIdx(label, val, cls) { return '<span class="sc-idx' + (cls ? " " + cls : "") + '"><b>' + label + "</b> " + val + "</span>"; }
+  // like _shIdx but with a small source tag (which site panel the card came from)
+  function _shIdxSrc(label, val, cls, src) { return '<span class="sc-idx' + (cls ? " " + cls : "") + '"><b>' + label + "</b> " + val + (src ? '<i class="sc-idx-src">' + src + "</i>" : "") + "</span>"; }
+  // ── market-overview share cards — one per user-chosen section ──
+  const _cmBull = b => b === "2U" || b === "3G" || b === "F2D";
+  const _cmBear = b => b === "2D" || b === "3R" || b === "F2U";
+  function _shareMktCandleMap() {
+    const cols = ["D", "W", "M", "Q", "Y"];
+    const rows = cmapRows();
+    const uniLbl = marketUniverse === "sp500" ? "S&P 500" : "StratNinja";
+    if (!rows.length) return { headline: "🗺️ Candle Map · " + uniLbl, cls: "zero", bodyHtml: '<div class="sc-strip"><span class="sc-idx muted">טוען נתוני סורק…</span></div>' };
+    const counts = {}; CMAP_ROWS.forEach(r => counts[r[0]] = { D: 0, W: 0, M: 0, Q: 0, Y: 0 });
+    rows.forEach(row => cols.forEach(tf => { const b = candleBucket(row[tf]); if (counts[b]) counts[b][tf]++; }));
+    const dom = _cmDomCell(counts, cols);
+    let bestTf = null, bestScore = -Infinity;
+    cols.forEach(tf => { const bull = (counts["2U"][tf] || 0) + (counts["3G"][tf] || 0) + (counts["F2D"][tf] || 0); const bear = (counts["2D"][tf] || 0) + (counts["3R"][tf] || 0) + (counts["F2U"][tf] || 0); if (bull - bear > bestScore) { bestScore = bull - bear; bestTf = tf; } });
+    const lead = (mktU().sectorLeaders || [])[0];
+    const verdict = _shIdx("מבנה דומיננטי", _cmDomLabel(dom), _cmBull(dom.b) ? "pos" : _cmBear(dom.b) ? "neg" : "") +
+      _shIdx("טיימפריים חזק", bestTf ? (TF_HE[bestTf] || bestTf) : "—", "") +
+      (lead ? _shIdx("סקטור מוביל", secHe(lead.name), "pos") : "");
+    const perTf = cols.map(tf => {
+      let bk = null, bn = -1; CMAP_ROWS.forEach(([k]) => { if ((counts[k][tf] || 0) > bn) { bn = counts[k][tf]; bk = k; } });
+      return _shIdx(TF_HE[tf], (bk || "—") + " · " + bn, _cmBull(bk) ? "pos" : _cmBear(bk) ? "neg" : "");
+    }).join("");
+    const facts = candleMapFacts();
+    const fact = facts.length ? facts[0] : "";
+    const bodyHtml =
+      '<div class="sc-sec-lbl">🧭 המצב הכללי</div><div class="sc-strip">' + verdict + "</div>" +
+      '<div class="sc-sec-lbl" style="margin-top:12px">📊 הנר השולט בכל טיימפריים</div><div class="sc-strip">' + perTf + "</div>" +
+      (fact ? '<div class="sc-did"><span class="sc-did-lbl">🧠 הידעת?</span> ' + fact + "</div>" : "");
+    return { headline: "🗺️ Candle Map · " + uniLbl + " · " + rows.length + " מניות", cls: _cmBull(domB) ? "pos" : _cmBear(domB) ? "neg" : "zero", bodyHtml: bodyHtml };
+  }
+  function _shareMktLeaders() {
+    const U = mktU();
+    const secUp = (U.sectorLeaders || []).slice(0, 4), secDn = (U.sectorLaggards || []).slice(0, 4);
+    const stkUp = (U.leaders || []).slice(0, 4), stkDn = (U.laggards || []).slice(0, 4);
+    const secChip = (x, cls) => _shIdx(secHe(x.name), _shNum(x.chg), cls);
+    const stkChip = (x, cls) => _shIdx(x.s, _shNum(x.c), cls);
+    const strip = (arr, fn, cls) => arr.length ? arr.map(x => fn(x, cls)).join("") : '<span class="sc-idx muted">—</span>';
+    const bodyHtml =
+      '<div class="sc-sec-lbl pos">🟢 סקטורים מובילים</div><div class="sc-strip">' + strip(secUp, secChip, "pos") + "</div>" +
+      '<div class="sc-sec-lbl neg" style="margin-top:10px">🔴 סקטורים בפיגור</div><div class="sc-strip">' + strip(secDn, secChip, "neg") + "</div>" +
+      '<div class="sc-sec-lbl pos" style="margin-top:10px">🚀 מניות מובילות</div><div class="sc-strip">' + strip(stkUp, stkChip, "pos") + "</div>" +
+      '<div class="sc-sec-lbl neg" style="margin-top:10px">📉 מניות בפיגור</div><div class="sc-strip">' + strip(stkDn, stkChip, "neg") + "</div>";
+    return { headline: "🏆 מובילים ומפגרים היום", cls: "zero", bodyHtml: bodyHtml };
+  }
+  function _shareMktMovers() {
+    const mins = _ilMinutes();
+    const U = (LIVE && LIVE.universes && LIVE.universes.all) || {};
+    let head, data, upLbl, dnLbl;
+    if (mins >= 16 * 60 + 30 && mins < 23 * 60) { head = "⚡ גאפרים · פתיחת יום"; data = U.gappers || (LIVE && LIVE.gappers) || { up: [], down: [] }; upLbl = "🟢 TOP גאפ אפ"; dnLbl = "🔴 TOP גאפ דאון"; }
+    else if (mins >= 11 * 60 && mins < 16 * 60 + 30) { head = "🌅 Pre-Market · תנועות לפני הפתיחה"; data = U.premovers || (LIVE && LIVE.premovers) || { up: [], down: [] }; upLbl = "🟢 עולות לפני הפתיחה"; dnLbl = "🔴 יורדות לפני הפתיחה"; }
+    else { head = "🌙 After-Market · תנועות אחרי הסגירה"; data = U.aftermovers || (LIVE && LIVE.aftermovers) || { up: [], down: [] }; upLbl = "🟢 עולות אחרי הסגירה"; dnLbl = "🔴 יורדות אחרי הסגירה"; }
+    const chip = (x, cls) => _shIdx(x.s, _shNum(x.gp), cls);
+    const strip = (arr, cls) => arr.length ? arr.slice(0, 5).map(x => chip(x, cls)).join("") : '<span class="sc-idx muted">אין כרגע</span>';
+    const bodyHtml =
+      '<div class="sc-sec-lbl pos">' + upLbl + '</div><div class="sc-strip">' + strip(data.up, "pos") + "</div>" +
+      '<div class="sc-sec-lbl neg" style="margin-top:10px">' + dnLbl + '</div><div class="sc-strip">' + strip(data.down, "neg") + "</div>";
+    return { headline: head, cls: "zero", bodyHtml: bodyHtml };
+  }
+  // page-aware summary content for the share card
+  function shareSummaryFor(page) {
+    const ms = todayMarketState();
+    const src = (typeof scanSource === "function" ? scanSource() : []);
+    if (page === "scanner") {
+      const scSrc = (typeof scanRowsView === "function") ? scanRowsView() : src;   // respect the live/yesterday view
+      let rows = []; try { rows = filterRows(scSrc); } catch (e) { rows = scSrc; }
+      // the 5 at the TOP of the current filtered+sorted list (as the user sees them) — NOT re-ranked by Ninja Score
+      const top = sortRows(rows).slice(0, 5);
+      const SORT_HE = { chg: "שינוי %", price: "מחיר", mc: "שווי שוק", sym: "סימבול", ftfc: "FTFC", sec: "סקטור" };
+      const sLbl = SORT_HE[scanSort.col] || "הסינון";
+      const dLbl = (!scanSort.col || scanSort.col === "sym") ? "" : (scanSort.dir < 0 ? " ▼" : " ▲");
+      return { headline: "🔍 סורק עסקאות · " + rows.length + " תוצאות", cls: "zero", strip: "", picksLabel: "5 העליונות · לפי " + sLbl + dLbl,
+        picks: top.map(t => _shPick(t.sym, t.chg)).join("") };
+    }
+    if (page === "today") {
+      // money-flow card for the SELECTED timeframe: each panel split into a row of risers + a row of fallers
+      const vOf = (s, tf) => _bcellVal(s, tf);
+      const section = (list, tf, src, isSub) => {
+        const sorted = list.filter(s => vOf(s, tf) != null).sort((a, b) => vOf(b, tf) - vOf(a, tf));
+        const ups = sorted.filter(s => vOf(s, tf) > 0).slice(0, 3);
+        const downs = sorted.filter(s => vOf(s, tf) < 0).slice(-3).reverse();   // most-negative first
+        const card = (s, cls) => _shIdxSrc(isSub ? s.name : secHe(s.name), _shNum(vOf(s, tf)), cls, src);
+        const row = (arr, cls, lbl) => '<div class="sc-mv-row"><span class="sc-mv-lbl ' + cls + '">' + lbl + '</span><div class="sc-strip">' +
+          (arr.length ? arr.map(s => card(s, cls)).join("") : '<span class="sc-idx muted">—</span>') + "</div></div>";
+        return row(ups, "pos", "🟢 עולות") + row(downs, "neg", "🔴 יורדות");
+      };
+      const bodyHtml =
+        '<div class="sc-sec-lbl">🗂️ סקטורים · ' + (FLOW_TF_LBL[flowTf] || flowTf) + "</div>" + section(typeof todaySectors === "function" ? todaySectors(src) : [], flowTf, "סקטור", false) +
+        '<div class="sc-sec-lbl" style="margin-top:16px">🏭 תתי-סקטורים · ' + (FLOW_TF_LBL[flowTf] || flowTf) + "</div>" + section(typeof todaySubsectors === "function" ? todaySubsectors(src) : [], flowTf, "תת-סקטור", true);
+      return { headline: ms ? ms.emoji + " " + ms.mode : "🎯 לאן הכסף הולך", cls: ms ? ms.cls : "zero", bodyHtml: bodyHtml };
+    }
+    if (page === "sectors") {
+      // count full-continuity (FTFC) stocks per sector & sub-sector, split by direction (🟢 up / 🔴 down)
+      const secC = {}, indC = {};
+      // use the SAME timeframe set the user is viewing on the sectors page (default M·Q·Y), not Daily-only,
+      // so the shared card matches the screen — and we label which FTFC combo it is.
+      const _secTfs = _secFtfcTfs();
+      src.forEach(t => {
+        const dir = secFtfcDir(t, _secTfs);        // full continuity across the selected timeframe set
+        if (dir !== "up" && dir !== "down") return;
+        const up = dir === "up";
+        if (t.sector) { const o = secC[t.sector] = secC[t.sector] || { g: 0, r: 0 }; o[up ? "g" : "r"]++; }
+        if (t.ind) { const o = indC[t.ind] = indC[t.ind] || { g: 0, r: 0 }; o[up ? "g" : "r"]++; }
+      });
+      const top2 = (obj, key, heFn) => Object.keys(obj).filter(k => obj[k][key] > 0).sort((a, b) => obj[b][key] - obj[a][key]).slice(0, 2).map(k => ({ name: heFn ? heFn(k) : k, n: obj[k][key] }));
+      const line = (arr, cls) => arr.length ? arr.map(x => _shIdx(x.name, "FTFC " + x.n, cls)).join("") : '<span class="sc-idx muted">—</span>';
+      const bodyHtml =
+        '<div class="sc-sec-lbl pos">🟢 הכי הרבה FTFC ירוק (המשכיות עולה)</div><div class="sc-strip">' +
+          line(top2(secC, "g", secHe), "pos") + line(top2(indC, "g"), "pos") + "</div>" +
+        '<div class="sc-sec-lbl neg" style="margin-top:12px">🔴 הכי הרבה FTFC אדום (המשכיות יורדת)</div><div class="sc-strip">' +
+          line(top2(secC, "r", secHe), "neg") + line(top2(indC, "r"), "neg") + "</div>";
+      return { headline: "🗂️ המשכיות זמנית · FTFC " + _secFtfcLbl(), cls: "zero", bodyHtml: bodyHtml };
+    }
+    if (page === "sp500") {
+      const b = mktU().breadth || {}; const pct = b.total ? Math.round(b.above / b.total * 100) : 0;
+      // the top-rising stock inside today's leading sector
+      let leadStrip = "";
+      const leadSec = (LIVE && LIVE.sectorLeaders || [])[0];
+      if (leadSec) {
+        const secObj = (LIVE && LIVE.sectors || []).find(s => s.name === leadSec.name);
+        const topSt = secObj && secObj.stocks && secObj.stocks.length ? secObj.stocks.slice().sort((a, b) => (b.c || 0) - (a.c || 0))[0] : null;
+        if (topSt) leadStrip = _shIdx("🚀 " + topSt.s + " · " + secHe(leadSec.name), _shNum(topSt.c), "pos");
+      }
+      return { headline: "🗺️ רוחב שוק S&P 500 · " + pct + "% ירוקים", cls: pct >= 55 ? "pos" : pct <= 45 ? "neg" : "zero",
+        strip: _shIdx("מעל פתיחה", b.above || 0, "pos") + _shIdx("מתחת", b.below || 0, "neg") + leadStrip, picksLabel: "", picks: "" };
+    }
+    if (page === "gappers") {
+      const g = (LIVE && LIVE.gappers) || { up: [], down: [] };
+      const strip = (g.up || []).slice(0, 4).map(x => _shIdx(x.s, _shNum(x.gp), "pos")).join("") + (g.down || []).slice(0, 4).map(x => _shIdx(x.s, _shNum(x.gp), "neg")).join("");
+      return { headline: "⚡ גאפרים היום", cls: "zero", strip: strip || '<span class="sc-idx">אין גאפרים כרגע</span>', picksLabel: "", picks: "" };
+    }
+    if (page === "favorites") {
+      const favs = window.Prefs ? Prefs.favorites() : [];
+      const rows = src.filter(t => favs.indexOf(t.sym) >= 0);
+      const chgOf = s => { const r = rows.find(t => t.sym === s); return r ? (r.chg || 0) : 0; };
+      // (1) favorites with an active alert marking (matched a saved scan / fired today) — up to 6
+      const pmatch = favAlertMatches();
+      const alertSyms = Object.keys(pmatch).sort((a, b) => chgOf(b) - chgOf(a)).slice(0, 6);
+      const alertStrip = alertSyms.length
+        ? alertSyms.map(s => _shIdx("🔔 " + s, _shNum(chgOf(s)), chgOf(s) >= 0 ? "pos" : "neg")).join("")
+        : '<span class="sc-idx muted">אין התראות פעילות</span>';
+      // (2) the 3 favorites that rose the most today
+      const gainers = rows.filter(t => (t.chg || 0) > 0).sort((a, b) => b.chg - a.chg).slice(0, 3);
+      const gainStrip = gainers.length ? gainers.map(t => _shIdx("🚀 " + t.sym, _shNum(t.chg), "pos")).join("") : '<span class="sc-idx muted">—</span>';
+      const bodyHtml =
+        '<div class="sc-sec-lbl">🔔 מניות עם התראה</div><div class="sc-strip">' + alertStrip + "</div>" +
+        '<div class="sc-sec-lbl pos" style="margin-top:12px">🚀 העולים היום</div><div class="sc-strip">' + gainStrip + "</div>";
+      return { headline: "⭐ המועדפים שלי · " + favs.length, cls: "zero", bodyHtml: bodyHtml };
+    }
+    if (page === "journal") {
+      const j = (window.Journal && window.Journal.summary) ? window.Journal.summary() : null;
+      if (!j || !j.count) return { headline: "📅 יומן מסחר", cls: "zero", strip: '<span class="sc-idx">אין עדיין עסקאות סגורות ביומן</span>', picksLabel: "", picks: "" };
+      const pf = j.profitFactor === Infinity ? "∞" : (j.profitFactor || 0).toFixed(2);
+      const netTxt = (j.net >= 0 ? "+$" : "-$") + Math.abs(Math.round(j.net)).toLocaleString("en-US");
+      const unTxt = j.unrealized != null ? ((j.unrealized >= 0 ? "+$" : "-$") + Math.abs(Math.round(j.unrealized)).toLocaleString("en-US")) : null;
+      const strip = _shIdx("רווח/הפסד נטו", netTxt, j.net >= 0 ? "pos" : "neg") +
+        _shIdx("Win Rate", j.winRate + "%", j.winRate >= 50 ? "pos" : "neg") +
+        _shIdx("Profit Factor", pf, (j.profitFactor || 0) >= 1 ? "pos" : "neg") +
+        _shIdx("עסקאות", j.count, "") + (j.open ? _shIdx("פתוחות", j.open, "") : "") +
+        (unTxt != null ? _shIdx("Unrealized", unTxt, j.unrealized >= 0 ? "pos" : "neg") : "");
+      return { headline: "📅 יומן מסחר · הביצועים שלי", cls: j.net >= 0 ? "pos" : "neg", strip: strip, picksLabel: "", picks: "" };
+    }
+    // default = market page — the user picks which section to share (state / candle-map / leaders / movers)
+    if (_mktShareSection === "candlemap") return _shareMktCandleMap();
+    if (_mktShareSection === "leaders") return _shareMktLeaders();
+    if (_mktShareSection === "movers") return _shareMktMovers();
+    // "state": market mode + index strip + the strongest FULL-TIMEFRAME-CONTINUITY plays
+    // (top-2 FTFC green + top-2 FTFC red).
+    const idx = ms ? ms.idx.map(i => _shIdx(i.sym, _shNum(i.chg))).join("") + (ms.vix ? _shIdx("VIX", ms.vix.level.toFixed(1)) : "") : "";
+    const ftfcUp = src.filter(t => t.ftfc && (t.D || {}).c === "up").sort((a, b) => (b.chg || 0) - (a.chg || 0)).slice(0, 2);
+    const ftfcDn = src.filter(t => t.ftfc && (t.D || {}).c === "down").sort((a, b) => (a.chg || 0) - (b.chg || 0)).slice(0, 2);
+    const picks = ftfcUp.concat(ftfcDn).map(t => _shPick(t.sym, t.chg)).join("");
+    return { headline: ms ? ms.emoji + " " + ms.mode : "📡 סקירת שוק", cls: ms ? ms.cls : "zero", strip: idx,
+      picksLabel: "FTFC · 2🟢 המשכיות עולה / 2🔴 יורדת", picks: picks };
+  }
+  // html2canvas ignores object-fit:cover and stretches a non-square photo → distorted.
+  // Pre-crop hero.jpg to a centered SQUARE via a canvas so the captured photo is never warped.
+  let _heroSquare = null;
+  function _prepHeroSquare(cb) {
+    if (_heroSquare) { cb(_heroSquare); return; }
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const S = 240, c = document.createElement("canvas"); c.width = S; c.height = S;
+        const ctx = c.getContext("2d");
+        // Frame the FACE: copy a SQUARE source region (→ square dest, so never warped) tightly around
+        // Adi's head+shoulders. In the 1280×720 hero he sits on the left, face ~27% x / ~24% y.
+        const W = img.width, Hh = img.height;
+        let side = Math.round(0.315 * W);                 // ~403px on 1280 → head + shoulders
+        if (side > Hh) side = Hh;                          // never exceed the photo height
+        let x0 = Math.round(0.095 * W);                    // left column where he stands
+        let y0 = Math.round(0.02 * Hh);                    // start just above the top of his head
+        x0 = Math.max(0, Math.min(x0, W - side));
+        y0 = Math.max(0, Math.min(y0, Hh - side));
+        ctx.drawImage(img, x0, y0, side, side, 0, 0, S, S);
+        _heroSquare = c.toDataURL("image/png");
+      } catch (e) { _heroSquare = null; }
+      cb(_heroSquare);
+    };
+    img.onerror = () => cb(null);
+    img.src = "hero.jpg";
+  }
+  // ===== Redesigned money-flow share card (v2 design system, 1080×1080) =====
+  function _mfRangeLbl(tf) { return FLOW_TF_SHORT[tf] || "1D"; }
+  function _mfIlTime() { try { return new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Jerusalem", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date()); } catch (e) { return ""; } }
+  function buildMoneyFlowCardEl() {
+    const src = (typeof scanSource === "function") ? scanSource() : [];
+    const ms = todayMarketState();
+    const tf = flowTf;
+    const vOf = s => _bcellVal(s, tf);
+    const _named = s => s && s.name && s.name !== "אחר" && s.name !== "—" && s.name !== "";
+    const secs = (typeof todaySectors === "function" ? todaySectors(src) : []).filter(s => vOf(s) != null && _named(s));
+    const subs = (typeof todaySubsectors === "function" ? todaySubsectors(src) : []).filter(s => vOf(s) != null && _named(s));
+    const sS = secs.slice().sort((a, b) => vOf(b) - vOf(a)), subS = subs.slice().sort((a, b) => vOf(b) - vOf(a));
+    const secUp = sS.filter(s => vOf(s) > 0).slice(0, 3), secDn = sS.filter(s => vOf(s) < 0).slice(-3).reverse();
+    const subUp = subS.filter(s => vOf(s) > 0).slice(0, 3), subDn = subS.filter(s => vOf(s) < 0).slice(-3).reverse();
+    // ONE global scale across all four cards, so 6.2% is always longer than 4.8% even as data changes
+    let gmax = 0.01; [secUp, secDn, subUp, subDn].forEach(a => a.forEach(s => { gmax = Math.max(gmax, Math.abs(vOf(s) || 0)); }));
+    const w = v => Math.max(6, Math.round(Math.abs(v || 0) / gmax * 100));
+    // clean LTR percentage: typographic minus, no stray spaces (isolated so RTL can't reorder it)
+    const pct = v => (v < 0 ? "−" : "+") + Math.abs(Number(v) || 0).toFixed(2) + "%";
+    const _mfClean = s => String(s || "").replace(/ - /g, "־");   // "אנרגיה - נפט וגז" → "אנרגיה־נפט וגז"
+    const rows = (arr, cls, isSub) => arr.length ? arr.map((s, i) => {
+      const v = vOf(s), nm = isSub ? _mfClean(s.name) : secHe(s.name);
+      const etf = (!isSub && etfFor(s.name)) ? '<span class="mf-etf">' + escHtml(etfFor(s.name)) + "</span>" : "";
+      return '<div class="mf-rk ' + cls + '"><span class="mf-rank">' + (i + 1) + '</span><span class="mf-name">' + escHtml(nm) + "</span>" + etf +
+        '<span class="mf-bar"><span style="width:' + w(v) + '%"></span></span><span class="mf-pct">' + pct(v) + "</span></div>";
+    }).join("") : '<div class="mf-rk"><span class="mf-name" style="color:#9AA7BD">' + (cls === "neg" ? "אין יציאת כסף משמעותית" : "אין כניסת כסף משמעותית") + "</span></div>";
+    // symmetric top/bottom padding so a card with fewer rows keeps its rows vertically centered
+    // (deterministic — html2canvas doesn't reliably honor flex centering)
+    const maxSecN = Math.max(secUp.length || 1, secDn.length || 1), maxSubN = Math.max(subUp.length || 1, subDn.length || 1);
+    const colRows = (arr, cls, isSub, maxN) => { const pad = Math.max(0, maxN - (arr.length || 1)) * 24;
+      return '<div class="mf-rows" style="padding-top:' + pad + 'px;padding-bottom:' + pad + 'px">' + rows(arr, cls, isSub) + "</div>"; };
+    const upName = secUp[0] ? secHe(secUp[0].name) : (subUp[0] ? subUp[0].name : "—");
+    const dnName = secDn[0] ? secHe(secDn[0].name) : (subDn[0] ? subDn[0].name : "—");
+    const rtag = ms ? ('<span class="mf-tag ' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>") : "";
+    // insight mirrors the data exactly, in flowing Hebrew:
+    // "יציאת כסף מ-[weak sector] ומ-[weak sub-sector], לצד כניסה ל-[lead sector], תומכת בתרחיש Risk-On."
+    const outSub = subDn[0] ? _mfClean(subDn[0].name) : "";
+    const verb = ms && ms.cls === "neg" ? "תומכת בתרחיש Risk-Off" : ms && ms.cls === "zero" ? "על רקע שוק מעורב" : "תומכת בתרחיש Risk-On";
+    let insTxt = "יציאת כסף מ<b>" + escHtml(dnName) + "</b>";
+    if (outSub && outSub !== dnName) insTxt += " ומ<b>" + escHtml(outSub) + "</b>";
+    insTxt += ", לצד כניסה ל<b>" + escHtml(upName) + "</b>, " + verb + ".";
+    const photo = _heroSquare ? '<img class="mf-photo" src="' + _heroSquare + '">'
+      : '<img class="mf-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div");
+    el.className = "mf-card";
+    el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";   // off-screen (no flash); safe now that every card uses a unique class prefix (no collision with the landing .hero)   // on-screen behind the page — html2canvas mis-composites the landing hero when the target sits at left:-9999px
+    el.innerHTML =
+      '<div class="mf-hd">' + photo + '<div class="mf-brand"><div class="mf-t">StratNinja <span>Scanner</span></div>' +
+        '<div class="mf-s">The Strat · סריקת שוק בזמן אמת</div></div>' +
+        (upd ? '<div class="mf-upd"><span class="mf-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="mf-ct">' +
+        '<div class="mf-hero"><div class="mf-tags">' + rtag + '<span class="mf-tag range">טווח נבדק: <b>' + _mfRangeLbl(tf) + "</b></span></div>" +
+          '<h1 class="mf-h1"><span class="mf-l1">הכסף נכנס ל<span class="up">' + escHtml(upName) + '</span></span><span class="mf-l2">ויוצא מ<span class="dn">' + escHtml(dnName) + "</span></span></h1></div>" +
+        '<div class="mf-cols">' +
+          '<div class="mf-col pos"><div class="mf-ch"><span class="mf-ic"></span> כניסת כסף · סקטורים</div>' + colRows(secUp, "pos", false, maxSecN) + "</div>" +
+          '<div class="mf-col neg"><div class="mf-ch"><span class="mf-ic"></span> יציאת כסף · סקטורים</div>' + colRows(secDn, "neg", false, maxSecN) + "</div></div>" +
+        '<div class="mf-cols">' +
+          '<div class="mf-col pos"><div class="mf-ch"><span class="mf-ic"></span> כניסת כסף · תתי-סקטורים</div>' + colRows(subUp, "pos", true, maxSubN) + "</div>" +
+          '<div class="mf-col neg"><div class="mf-ch"><span class="mf-ic"></span> יציאת כסף · תתי-סקטורים</div>' + colRows(subDn, "neg", true, maxSubN) + "</div></div>" +
+        '<div class="mf-insight"><span class="mf-bulb">i</span><div><span class="mf-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+      "</div>" +
+      '<div class="mf-ft"><span><b>stratninja.win</b> · נתוני שוק מעודכנים</span>' +
+        '<span>Adi Koriat · @KoriatTrade · <span class="mf-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== S&P 500 breadth-map share card =====
+  function _spSqColor(c) { c = c || 0; if (Math.abs(c) < 0.1) return "#182236"; if (c >= 3) return "rgba(50,214,154,1)"; if (c > 0) return "rgba(50,214,154,.5)"; if (c <= -3) return "rgba(255,100,116,1)"; return "rgba(255,100,116,.5)"; }
+  // square color by ABOVE-OPEN (green) / below (red); intensity by the size of the day's move.
+  function _spSqColorAO(ao, c) { const m = Math.abs(c || 0); return ao ? (m >= 3 ? "rgba(50,214,154,1)" : "rgba(50,214,154,.55)") : (m >= 3 ? "rgba(255,100,116,1)" : "rgba(255,100,116,.55)"); }
+  function buildSpMapCardEl() {
+    // Build from the SAME source as the live S&P 500 page — LIVE.sectors[].stocks[].ao (above today's
+    // open) — so the breadth number matches the live page EXACTLY. Falls back to SCAN rows (live price
+    // vs the daily open) only if the live snapshot isn't loaded.
+    let rows = [];
+    if (LIVE && LIVE.sectors && LIVE.sectors.length) {
+      LIVE.sectors.forEach(sec => (sec.stocks || []).forEach(st => rows.push({ s: st.s, c: st.c || 0, sec: sec.name, ao: !!st.ao, mc: st.mc || 0 })));
+    } else {
+      rows = ((SCAN && SCAN.rows) || []).filter(r => r.sp && r.c != null)
+        .map(r => ({ s: r.s, c: r.c || 0, sec: r.sec, ao: !!(r.D && r.D.o && r.p && r.p >= r.D.o), mc: r.mc || 0 }));
+    }
+    const total = rows.length || 1;
+    let up = 0, down = 0; rows.forEach(r => { if (r.ao) up++; else down++; });
+    const flat = 0;
+    const pct = Math.round(up / total * 100), barG = pct, barR = Math.round(down / total * 100);
+    const bySec = {}; rows.forEach(r => { const s = r.sec || "אחר"; (bySec[s] = bySec[s] || []).push(r); });
+    const secStat = Object.keys(bySec).filter(s => s !== "אחר" && bySec[s].length >= 4)
+      .map(s => { const arr = bySec[s]; const g = arr.filter(r => r.ao).length; return { sec: s, n: arr.length, pct: Math.round(g / arr.length * 100) }; });
+    let lead = rows[0] || null; rows.forEach(r => { if (lead && r.c > lead.c) lead = r; });
+    const leadSec = lead ? lead.sec : null;
+    const strong = secStat.slice().sort((a, b) => b.pct - a.pct)[0];
+    const weak = secStat.slice().sort((a, b) => a.pct - b.pct)[0];
+    const bySize = secStat.slice().sort((a, b) => b.n - a.n);
+    const topSet = {}; bySize.slice(0, 5).forEach(x => topSet[x.sec] = 1);
+    const blk = so => {
+      const arr = bySec[so.sec].slice().sort((a, b) => (Number(b.ao) - Number(a.ao)) || (b.c - a.c));
+      const cols = Math.max(4, Math.round(Math.sqrt(arr.length)));
+      const sq = arr.map(r => '<span class="spm-sq' + (so.sec === leadSec && lead && r.s === lead.s ? " spm-lead" : "") + '" style="background:' + _spSqColorAO(r.ao, r.c) + '"></span>').join("");
+      return '<div class="spm-blk"><div class="spm-blbl"><span>' + escHtml(secHe(so.sec)) + '</span><span class="spm-sep">·</span><span class="spm-p">' + so.pct + '%</span></div>' +
+        '<div class="spm-grid" style="grid-template-columns:repeat(' + cols + ',1fr)">' + sq + "</div></div>";
+    };
+    const rowTop = '<div class="spm-maprow">' + bySize.filter(x => topSet[x.sec]).map(blk).join("") + "</div>";
+    const rowBot = '<div class="spm-maprow">' + bySize.filter(x => !topSet[x.sec]).map(blk).join("") + "</div>";
+    const photo = _heroSquare ? '<img class="spm-photo" src="' + _heroSquare + '">' : '<img class="spm-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime(), strongHe = strong ? secHe(strong.sec) : "—", weakHe = weak ? secHe(weak.sec) : "—";
+    const el = document.createElement("div"); el.className = "spm-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="spm-hd">' + photo + '<div><div class="spm-t">StratNinja <span>Scanner</span></div><div class="spm-s">The Strat · רוחב שוק S&P 500</div></div>' +
+        (upd ? '<div class="spm-upd"><span class="spm-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="spm-ct">' +
+        '<div class="spm-hero"><div><div class="spm-l1">רוחב השוק ' + (pct >= 55 ? "תומך בראלי" : pct <= 45 ? "חלש" : "מעורב") + "</div>" +
+          '<div class="spm-l2"><b>' + pct + '%</b> ממניות ה-S&P 500 מעל מחיר הפתיחה — בהובלת ה' + escHtml(strongHe) + "</div></div>" +
+          '<div class="spm-big"><div class="spm-pct">' + pct + '%</div><div class="spm-cap">מעל מחיר הפתיחה</div></div></div>' +
+        '<div class="spm-breadth"><div class="spm-bar"><span class="spm-g" style="width:' + barG + '%"></span><span class="spm-r" style="width:' + barR + '%"></span></div>' +
+          '<div class="spm-blabels"><span class="spm-up">▲ <span class="spm-num">' + up + '</span> מעל פתיחה</span><span class="spm-sepd">·</span><span class="spm-dn"><span class="spm-num">' + down + '</span> מתחת ▼</span></div></div>' +
+        '<div><div class="spm-maplbl"><span class="spm-mapt">🗺️ ' + total + ' מניות · מקובצות לפי סקטור</span>' +
+          '<span class="spm-leg"><span><i style="background:rgba(50,214,154,1)"></i> מעל הפתיחה</span><span><i style="background:rgba(255,100,116,1)"></i> מתחת לפתיחה</span><span class="muted" style="opacity:.7">· עוצמת הצבע = גודל התנועה</span></span></div>' +
+          '<div class="spm-map">' + rowTop + rowBot + "</div></div>" +
+        '<div class="spm-sum">' +
+          '<div class="spm-scard spm-g"><span class="spm-slead">הסקטור החזק:</span> ' + escHtml(strongHe) + " · <b>" + (strong ? strong.pct : 0) + '% מעל פתיחה</b></div>' +
+          '<div class="spm-scard spm-r"><span class="spm-slead">הסקטור החלש:</span> ' + escHtml(weakHe) + " · <b>" + (weak ? weak.pct : 0) + '% מעל פתיחה</b></div>' +
+          '<div class="spm-scard spm-b"><span class="spm-slead">המניה המובילה:</span> ' + escHtml(lead ? lead.s : "—") + " · <b>" + (lead ? (lead.c >= 0 ? "+" : "") + Number(lead.c).toFixed(2) + "%" : "—") + "</b></div></div>" +
+        '<div class="spm-insight"><span class="spm-mi">i</span><div><span class="spm-lbl">Ninja Insight:</span> רוחב השוק ' + (pct >= 55 ? "חיובי" : pct <= 45 ? "שלילי" : "מעורב") + ', ההובלה מרוכזת ב<b>' + escHtml(strongHe) + "</b> בעוד ה<b>" + escHtml(weakHe) + "</b> מפגרת.</div></div>" +
+      "</div>" +
+      '<div class="spm-ft"><span><b>stratninja.win</b> · נתוני שוק מעודכנים</span><span>Adi Koriat · @KoriatTrade · <span class="spm-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el); return el;
+  }
+  // ===== 🔥 HEAT MAP share card — overlays the LIVE treemap + 3 stat boxes onto HeatMap_Template.png =====
+  function buildHeatmapShareCardEl() {
+    // strong / weak sectors (by ETF daily move) + the standout sub-sector (biggest absolute move)
+    const secs = (LIVE && LIVE.sectors) ? LIVE.sectors.filter(s => s.name !== "מדדים" && s.name !== "אחר" && etfFor(s.name) && s.chg != null) : [];
+    const subs = (LIVE && LIVE.subsectors) ? LIVE.subsectors.filter(s => s.chg != null) : [];
+    let strong = null, weak = null; secs.forEach(s => { if (!strong || s.chg > strong.chg) strong = s; if (!weak || s.chg < weak.chg) weak = s; });
+    let standout = null; subs.forEach(s => { if (!standout || Math.abs(s.chg) > Math.abs(standout.chg)) standout = s; });
+    const b = (LIVE && LIVE.breadth) || null;
+    const pct = (b && b.total) ? Math.round(b.above / b.total * 100) : null;
+    const strongHe = strong ? secHe(strong.name) : "—", weakHe = weak ? secHe(weak.name) : "—";
+    const subNm = standout ? String(standout.ind || standout.name || "").replace(/\s*·\s*[A-Za-z0-9].*$/, "").replace(/\s+[A-Z]{2,6}\d?$/, "").trim() : "—";
+    const _sgn = c => c == null ? "" : (c >= 0 ? "+" : "") + Number(c).toFixed(2) + "%";
+    const _now = new Date();
+    const dateStr = _now.toLocaleDateString("he-IL") + " · " + _now.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+    const insight = (pct != null)
+      ? ("רוחב " + pct + "% מעל הפתיחה · בהובלת " + strongHe + (weak ? " · " + weakHe + " מאחור" : ""))
+      : (strong ? ("בהובלת " + strongHe + (weak ? " · " + weakHe + " מאחור" : "")) : "תמונת מצב סקטוריאלית");
+    // SHARE map = only the SIGNIFICANT movers (≥2% up / down) → clean + meaningful (Adi). In "מיצוע" mode keep
+    // the true full-sector average (no move filter). Rendered in the EPIC/neon look. Restore state after.
+    const _saveSec = spHeatSector, _sA = spHeatAtr, _sU = spHeatUp, _sD = spHeatDown;
+    spHeatSector = null; spHeatAtr = 0; _hmShareClean = true; _hmShareGrid = true;
+    if (spHeatAvg) { spHeatUp = ""; spHeatDown = ""; }
+    else if (spHeatUp === "" && spHeatDown === "") { spHeatUp = "3"; spHeatDown = "3"; }   // default: ≥3% movers (cleaner)
+    const upThr = spHeatUp, dnThr = spHeatDown;   // thresholds actually used (for the legend note)
+    const mapHtml = spHeatmap();
+    spHeatSector = _saveSec; spHeatAtr = _sA; spHeatUp = _sU; spHeatDown = _sD; _hmShareClean = false; _hmShareGrid = false;
+    const noteText = spHeatAvg
+      ? "הצבע = תנועת תעודת-הסל של כל סקטור"
+      : ("מוצגות רק מניות שזזו" + (upThr ? " · 🟢 עלו " + upThr + "%+" : "") + (dnThr ? " · 🔴 ירדו " + dnThr + "%+" : ""));
+    const box = (lbl, nm, chg) => { const chCls = chg == null ? "" : (chg >= 0 ? " hmsh-pos" : " hmsh-neg"); return '<div class="hmsh-box"><div class="hmsh-bx-cap"><span class="hmsh-bx-lbl">' + lbl + '</span> ' + escHtml(nm) + '</div><div class="hmsh-bx-ch' + chCls + '">' + _sgn(chg) + "</div></div>"; };
+    const el = document.createElement("div"); el.className = "hmsh-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="hmsh-top"><div class="hmsh-toprow"><span class="hmsh-badge">S&P 500 · ' + dateStr + '</span><span class="hmsh-insight">' + escHtml(insight) + "</span></div>" +
+        '<div class="hmsh-note">' + noteText + "</div></div>" +
+      '<div class="hmsh-map hm-neon">' + mapHtml + "</div>" +
+      '<div class="hmsh-boxes">' +
+        box("תת-סקטור בולט", subNm, standout ? standout.chg : null) +
+        box("הסקטור החלש", weakHe, weak ? weak.chg : null) +
+        box("הסקטור החזק", strongHe, strong ? strong.chg : null) +
+      "</div>";
+    // html2canvas doesn't resolve var() reliably → bake the neon look (depth gradient + glow on movers) inline
+    el.querySelectorAll(".hm-tile").forEach(t => {
+      const st = t.getAttribute("style") || "";
+      const bg = /--bg:\s*([^;]+)/.exec(st), gi = /--gi:\s*([^;]+)/.exec(st), gc = /--gc:\s*([^;]+)/.exec(st);
+      if (bg) t.style.background = "linear-gradient(170deg, rgba(255,255,255,.13), rgba(0,0,0,.24)), " + bg[1].trim();
+      if (t.classList.contains("hm-glow") && gi && gc) t.style.boxShadow = "0 0 " + (3 + parseFloat(gi[1]) * 11).toFixed(1) + "px " + gc[1].trim();
+    });
+    document.body.appendChild(el); return el;
+  }
+  // ===== Sectors overview share card (leaders / weakest / breadth) =====
+  function buildSectorsCardEl() {
+    const src = (typeof scanSource === "function") ? scanSource() : [];
+    const ms = todayMarketState();
+    // this card is shared from the המשכיות-זמנית page → rank by FTFC net continuity (up-aligned − down-aligned)/
+    // total, over the SELECTED timeframe set (D·W·M / M·Q·Y / NINJA REALM), not by a 1D price move.
+    const TFS = _secFtfcTfs();
+    const rangeLbl = _secFtfcLbl();
+    const _bySec = {};
+    src.forEach(t => { const s = t.sector; if (!s || s === "אחר" || s === "מדדים") return; const o = _bySec[s] = (_bySec[s] || { g: 0, r: 0, n: 0 }); o.n++; const d = secFtfcDir(t, TFS); if (d === "up") o.g++; else if (d === "down") o.r++; });
+    let secs = Object.keys(_bySec).filter(s => _bySec[s].n >= 3).map(s => { const o = _bySec[s]; return { name: s, v: Math.round((o.g - o.r) / o.n * 100) }; });
+    secs.sort((a, b) => b.v - a.v);
+    const total = secs.length || 1;
+    const green = secs.filter(s => s.v > 0.05).length, red = secs.filter(s => s.v < -0.05).length, neutral = total - green - red;
+    const leaders = secs.slice(0, 5);
+    const weakest = secs.slice(-5).slice().reverse();   // 5 weakest, weakest first — colored by their own sign
+    let gmax = 0.01; leaders.concat(weakest).forEach(s => { gmax = Math.max(gmax, Math.abs(s.v)); });
+    const w = v => Math.max(6, Math.round(Math.abs(v) / gmax * 100));
+    const pct = v => (v < 0 ? "−" : "+") + Math.abs(v).toFixed(2) + "%";
+    const rc = v => v > 0.05 ? "sec2-up" : v < -0.05 ? "sec2-down" : "sec2-flat";
+    const rows = arr => arr.map((s, i) => { const etf = etfFor(s.name);
+      return '<div class="sec2-rk ' + rc(s.v) + '"><span class="sec2-rank">' + (i + 1) + '</span><span class="sec2-name">' + escHtml(secHe(s.name)) + "</span>" +
+        (etf ? '<span class="sec2-etf">' + escHtml(etf) + "</span>" : "") + '<span class="sec2-bar"><span style="width:' + w(s.v) + '%"></span></span><span class="sec2-pct">' + pct(s.v) + "</span></div>"; }).join("");
+    const seg = (n, cls) => { let o = ""; for (let i = 0; i < n; i++) o += '<span class="' + cls + '"></span>'; return o; };
+    const segbar = seg(green, "sec2-sg") + seg(neutral, "sec2-sn") + seg(red, "sec2-sr");
+    const t1 = leaders[0] ? secHe(leaders[0].name) : "—", t2 = leaders[1] ? secHe(leaders[1].name) : "", wk = weakest[0] ? secHe(weakest[0].name) : "";
+    const subT = green > red ? "המשכיות סקטוריאלית חיובית" : red > green ? "המשכיות סקטוריאלית שלילית" : "המשכיות סקטוריאלית מעורבת";
+    const sentiment = green > red ? "Risk-On מתון" : red > green ? "Risk-Off" : "סנטימנט מעורב";
+    const insTxt = "הובלת <b>" + escHtml(t1) + (t2 ? "</b> ו<b>" + escHtml(t2) : "") + "</b> מצביעה על " + sentiment + (wk ? ", לצד חולשה ב<b>" + escHtml(wk) + "</b>" : "") + ".";
+    const rtag = ms ? '<span class="sec2-tag sec2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    const photo = _heroSquare ? '<img class="sec2-photo" src="' + _heroSquare + '">' : '<img class="sec2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "sec2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="sec2-hd">' + photo + '<div><div class="sec2-bt">StratNinja <span>Scanner</span></div><div class="sec2-bs">The Strat · סקירת סקטורים</div></div>' +
+        (upd ? '<div class="sec2-upd"><span class="sec2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="sec2-ct">' +
+        '<div class="sec2-topwrap">' +
+          '<div class="sec2-hero"><div class="sec2-htext"><div class="sec2-tags">' + rtag + '<span class="sec2-tag sec2-range">FTFC · <b>' + rangeLbl + "</b></span></div>" +
+            '<h1>השוק בהובלת ה<b>' + escHtml(t1) + "</b></h1><div class=\"sec2-sub\">" + subT + "</div></div>" +
+            '<div class="sec2-big"><div class="sec2-kpi">' + green + "/" + total + '</div><div class="sec2-cap">סקטורים חיוביים</div></div></div>' +
+          '<div class="sec2-cols">' +
+            '<div class="sec2-col sec2-pos"><div class="sec2-ch"><span class="sec2-ic"></span> 5 הסקטורים המובילים</div>' + rows(leaders) + "</div>" +
+            '<div class="sec2-col sec2-neg"><div class="sec2-ch"><span class="sec2-ic"></span> 5 הסקטורים החלשים ביותר</div>' + rows(weakest) + "</div></div>" +
+        "</div>" +
+        '<div class="sec2-br"><div class="sec2-brlbl"><span class="sec2-ttl">מצב ' + total + ' הסקטורים</span>' +
+          '<span class="sec2-sep">·</span><span class="sec2-c sec2-g"><i></i>' + green + ' חיוביים</span><span class="sec2-sep">·</span><span class="sec2-c sec2-nn"><i></i>' + neutral + ' ניטרלי</span><span class="sec2-sep">·</span><span class="sec2-c sec2-rr"><i></i>' + red + ' שליליים</span></div>' +
+          '<div class="sec2-segbar">' + segbar + "</div></div>" +
+        '<div class="sec2-bottom"><div class="sec2-insight"><span class="sec2-mi">i</span><div><span class="sec2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="sec2-cta">למפת הסקטורים →</div></div>' +
+      "</div>" +
+      '<div class="sec2-ft"><span><b>stratninja.win</b> · נתוני שוק מעודכנים</span><span>Adi Koriat · @KoriatTrade · <span class="sec2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== 🖼️ FTFC "המשכיות זמנית" share card — overlays live data on Ftfc_Template.png (Adi's AI design) =====
+  let _ftfcShareInsight = "";   // the FTFC card's Ninja-Insight text, remembered for the share caption
+  // Sectors (11 GICS) + sub-sectors (18 SPDR) split into FTFC-GREEN / FTFC-RED columns by NET continuity
+  // over the selected TF set; the big number = the asset's daily % move, bar ∝ |daily %|.
+  function buildFtfcCardEl() {
+    const TFS = _secFtfcTfs();
+    const rangeLbl = _secFtfcLbl();                       // e.g. "M·Q·Y"
+    const rows = (SCAN && SCAN.rows) ? SCAN.rows : [];
+    const _avgChg = mem => { let cs = 0, cn = 0; (mem || []).forEach(m => { const c = (m.c != null ? m.c : (m.tech && m.tech.chg != null ? m.tech.chg : null)); if (c != null) { cs += c; cn++; } }); return cn ? cs / cn : null; };
+    const _dir = m => secFtfcDir(m, TFS);
+    // --- sectors: 11 real GICS (those with a SPDR sector ETF) ---
+    const bySec = {};
+    rows.forEach(r => { const s = r.sector || r.sec; if (!s || s === "מדדים" || s === "אחר") return; (bySec[s] = bySec[s] || []).push(r); });
+    const secChgLive = {}; if (LIVE && LIVE.sectors) LIVE.sectors.forEach(s => secChgLive[s.name] = s.chg);
+    let secArr = Object.keys(bySec).filter(n => etfFor(n) && bySec[n].length >= 3).map(name => {
+      const mem = bySec[name], tot = mem.length;
+      const fg = mem.filter(m => _dir(m) === "up").length, fr = mem.filter(m => _dir(m) === "down").length;
+      return { he: secHe(name), etf: etfFor(name), fg, fr, tot, net: tot ? (fg - fr) / tot : 0, chg: (secChgLive[name] != null ? secChgLive[name] : _avgChg(mem)) };
+    });
+    // --- sub-sectors: 18 SPDR industries ---
+    const byInd = {}; rows.forEach(r => { const k = (r.ind || "").trim(); if (k) (byInd[k] = byInd[k] || []).push(r); });
+    const subChgLive = {}; if (LIVE && LIVE.subsectors) LIVE.subsectors.forEach(s => subChgLive[s.ind] = s.chg);
+    const _subOf = name => { const mem = byInd[name] || [], tot = mem.length; const fg = mem.filter(m => _dir(m) === "up").length, fr = mem.filter(m => _dir(m) === "down").length; return { tot, fg, fr }; };
+    let subArr;
+    if (LIVE && LIVE.subsectors && LIVE.subsectors.length) {
+      subArr = LIVE.subsectors.map(ss => { const o = _subOf(ss.ind); return { he: ss.ind, etf: ss.etf, fg: o.fg, fr: o.fr, tot: o.tot, net: o.tot ? (o.fg - o.fr) / o.tot : 0, chg: (subChgLive[ss.ind] != null ? subChgLive[ss.ind] : _avgChg(byInd[ss.ind])) }; });
+    } else {
+      subArr = Object.keys(byInd).filter(k => byInd[k].length >= 4 && k !== "מדדים" && k !== "אחר").map(name => { const o = _subOf(name); return { he: name, etf: (typeof subEtfFor === "function" ? subEtfFor(name) : ""), fg: o.fg, fr: o.fr, tot: o.tot, net: o.tot ? (o.fg - o.fr) / o.tot : 0, chg: (subChgLive[name] != null ? subChgLive[name] : _avgChg(byInd[name])) }; });
+    }
+    // top-3 strongest continuity (green) / weakest (red), by NET continuity, tie-break by daily move
+    const pick = arr => { const s = arr.slice().sort((a, b) => (b.net - a.net) || ((b.chg || 0) - (a.chg || 0))); return { green: s.slice(0, 3), red: s.slice(-3).reverse() }; };
+    const secP = pick(secArr), subP = pick(subArr);
+    // the number = % of the sector's OWN stocks that are in FTFC continuity (green = up, red = down) — not the
+    // ETF's daily move. Sort each column by that proportion, strongest first.
+    const _propG = o => (o.tot ? o.fg / o.tot : 0), _propR = o => (o.tot ? o.fr / o.tot : 0);
+    secP.green.sort((a, b) => _propG(b) - _propG(a)); subP.green.sort((a, b) => _propG(b) - _propG(a));
+    secP.red.sort((a, b) => _propR(b) - _propR(a)); subP.red.sort((a, b) => _propR(b) - _propR(a));
+    // bar scale — normalize by the largest |daily %| among the 12 shown rows
+    const shown = secP.green.concat(secP.red, subP.green, subP.red);
+    let cmax = 0.01; shown.forEach(o => { if (o.chg != null) cmax = Math.max(cmax, Math.abs(o.chg)); });
+    const barW = c => c == null ? 8 : Math.max(8, Math.round(Math.abs(c) / cmax * 100));
+    const pctTxt = c => c == null ? "—" : (c >= 0 ? "+" : "−") + Math.abs(c).toFixed(2) + "%";
+    const _cardNm = n => String(n || "").replace(/\s*·\s*[A-Za-z0-9].*$/, "").trim();   // Hebrew only (one line)
+    // template row, FIXED grid: [name · right] [% · fixed] [ETF box · left].
+    // the % = share of the sector's OWN stocks in FTFC continuity (green col = up, red col = down), coloured by column.
+    const rowHtml = (o, side) => {
+      const prop = o.tot ? Math.round((side === "green" ? o.fg : o.fr) / o.tot * 100) : 0;
+      const pcls = side === "green" ? "pos" : "neg";
+      return '<div class="ftc-row ftc-' + side + '">' +
+        '<span class="ftc-name">' + escHtml(_cardNm(o.he) || "—") + "</span>" +
+        '<span class="ftc-pct ' + pcls + '">' + prop + "%</span>" +
+        '<span class="ftc-etf">' + escHtml(o.etf || "—") + "</span></div>"; };
+    const colHtml = (arr, side) => { let h = arr.map(o => rowHtml(o, side)).join(""); for (let i = arr.length; i < 3; i++) h += '<div class="ftc-row ftc-' + side + ' ftc-empty"></div>'; return h; };
+    // Hebrew list join ("a, b ו-c")
+    const joinHe = a => { const x = (a || []).filter(Boolean); if (!x.length) return ""; if (x.length === 1) return x[0]; return x.slice(0, -1).join(", ") + " ו" + x[x.length - 1]; };
+    // top boxes
+    const netAll = secArr.length ? secArr.reduce((a, o) => a + o.net, 0) / secArr.length : 0;
+    const tone = netAll > 0.15 ? "חיובי" : netAll > 0.03 ? "חיובי מתון" : netAll < -0.15 ? "שלילי" : netAll < -0.03 ? "שלילי מתון" : "מעורב ומאוזן";
+    const toneCls = netAll > 0.03 ? "pos" : netAll < -0.03 ? "neg" : "zero";
+    // new template bakes the three top labels (מצב שוק · כיוון מוביל · פוקוס יומי) → emit VALUES only
+    const leadSec = secP.green.length ? _cardNm(secP.green[0].he) : "—";   // strongest-continuity sector
+    const leadSub = subP.green.length ? _cardNm(subP.green[0].he) : "—";   // strongest-continuity sub-sector
+    const keyInsight = secP.green.length ? "כוח יחסי ב" + joinHe(secP.green.slice(0, 2).map(o => _cardNm(o.he))) : "המשכיות מעורבת בסקטורים";
+    // Ninja Insight: keep it to ~2 short lines — top-2 green sectors vs top-2 red sub-sectors
+    const gSecNames = secP.green.slice(0, 2).map(o => _cardNm(o.he)), rSubNames = subP.red.slice(0, 2).map(o => _cardNm(o.he));
+    const insight = (gSecNames.length ? "עוצמה ב" + joinHe(gSecNames) : "המשכיות חיובית מוגבלת")
+      + (rSubNames.length ? " · חולשה ב" + joinHe(rSubNames) : "") + ".";
+    _ftfcShareInsight = insight;   // remember it so the share caption copies it too (Adi)
+    const now = new Date(), _p2 = x => String(x).padStart(2, "0");
+    const dateStr = _p2(now.getHours()) + ":" + _p2(now.getMinutes()) + " | " + now.getDate() + " " + ["ינו'", "פבר'", "מרץ", "אפר'", "מאי", "יוני", "יולי", "אוג'", "ספט'", "אוק'", "נוב'", "דצמ'"][now.getMonth()] + " " + now.getFullYear();
+    const el = document.createElement("div");
+    el.className = "ftfc-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="ftc-date">🕐 ' + dateStr + "</div>" +
+      '<div class="ftc-tf">המשכיות <b>' + escHtml(rangeLbl) + "</b></div>" +
+      // three top boxes — labels baked in template (RTL right→left: מצב שוק · כיוון מוביל · פוקוס יומי)
+      '<div class="ftc-box ftc-key"><span class="ftc-bval ' + toneCls + '">' + tone + "</span></div>" +             /* מצב שוק (rightmost) = overall tone */
+      '<div class="ftc-box ftc-range"><span class="ftc-bval pos">' + escHtml(leadSec) + "</span></div>" +          /* כיוון מוביל (center) = leading sector */
+      '<div class="ftc-box ftc-tone"><span class="ftc-bval pos">' + escHtml(leadSub) + "</span></div>" +           /* פוקוס יומי (leftmost) = leading sub-sector */
+      // sectors: red (left) + green (right)
+      '<div class="ftc-col ftc-sec-red">' + colHtml(secP.red, "red") + "</div>" +
+      '<div class="ftc-col ftc-sec-green">' + colHtml(secP.green, "green") + "</div>" +
+      // sub-sectors: red (left) + green (right)
+      '<div class="ftc-col ftc-sub-red">' + colHtml(subP.red, "red") + "</div>" +
+      '<div class="ftc-col ftc-sub-green">' + colHtml(subP.green, "green") + "</div>" +
+      // ninja insight
+      '<div class="ftc-insight">' + escHtml(insight) + "</div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== 🖼️ FTFC bull/bear share card — "איפה להיות / לא להיות כרגע" (on FTFC_GREEN/RED.png) =====
+  const _FTFC_SEC_EMOJI = { "Technology": "💻", "Financials": "🏦", "Health Care": "🩺", "Energy": "🛢️", "Consumer Disc.": "🛒", "Communication": "📡", "Industrials": "⚙️", "Consumer Staples": "🛍️", "Materials": "⛏️", "Real Estate": "🏠", "Utilities": "⚡", "Crypto": "🪙" };
+  function buildFtfcSideCardEl(side) {
+    const up = side !== "bear";                       // "bull" (default) or "bear"
+    const TFS = ["W", "M", "Q", "Y"], dir = up ? "up" : "down";
+    const rows = (SCAN && SCAN.rows) ? SCAN.rows : [];
+    const bySec = {};
+    rows.forEach(r => { const s = r.sec; if (!s || s === "מדדים" || s === "אחר") return; (bySec[s] = bySec[s] || []).push(r); });
+    const secs = Object.keys(bySec).filter(n => etfFor(n) && bySec[n].length >= 3).map(name => {
+      const mem = bySec[name], tot = mem.length;
+      const fg = mem.filter(m => secFtfcDir(m, TFS) === "up").length, fr = mem.filter(m => secFtfcDir(m, TFS) === "down").length;
+      const aligned = up ? fg : fr;
+      return { name, he: secHe(name), etf: etfFor(name), mem, fg, fr, tot, aligned, prop: tot ? aligned / tot : 0 };
+    });
+    const supporting = secs.filter(s => up ? s.fg > s.fr : s.fr > s.fg).length;
+    // per-TF: # sectors where the majority of the sector's stocks close in the card's direction on that TF
+    const tfCount = {}; TFS.forEach(tf => tfCount[tf] = secs.filter(s => s.mem.filter(m => ((m[tf] || {}).c) === dir).length > s.mem.length / 2).length);
+    const strongest = TFS.slice().sort((a, b) => tfCount[b] - tfCount[a])[0];
+    const leaders = secs.slice().sort((a, b) => (b.aligned - a.aligned) || (b.prop - a.prop)).slice(0, 4);
+    const _score = p => Math.max(1, Math.min(10, Math.round(p * 10)));   // alignment score 1–10 (clearer than "חזק/בינוני")
+    // Ninja Insight — interpret the data (breadth of support + where it concentrates), don't just repeat it.
+    const totSec = secs.length || 11, broad = supporting >= totSec * 0.6;
+    const insight = up
+      ? (broad ? "היישור השורי רחב — רוב הסקטורים תומכים, עם ריכוז חזק בטווח ה-" + strongest + "."
+               : "היישור חיובי, אך התמיכה הסקטוריאלית עדיין מצומצמת יחסית — בעיקר בטווח ה-" + strongest + ".")
+      : (broad ? "החולשה רחבה לרוחב הסקטורים, עם ריכוז גבוה במיוחד בטווח ה-" + strongest + "."
+               : "החולשה ממוקדת ומתרכזת בעיקר בטווח ה-" + strongest + ", ולא רחבה בכל השוק.");
+    const maxN = secs.length || 11;
+    const el = document.createElement("div");
+    el.className = "ftf-card ftf-" + (up ? "bull" : "bear");
+    el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    // --- dominant-direction block ---
+    let h = '<div class="ftf-dir">' + (up ? "שורי" : "דובי") + "</div>" +
+      '<div class="ftf-strong">' + strongest + "</div>" +
+      '<div class="ftf-support">' + supporting + "</div>";
+    // --- direction per timeframe (W M Q Y) — uniform with the baked arrows ---
+    const tfType = up ? "2U" : "2D";
+    ["W", "M", "Q", "Y"].forEach((tf, i) => { h += '<div class="ftf-tf ftf-tf' + i + '">' + tfType + "</div>"; });
+    // --- "where is the most FTFC" (Y Q M W) — count + bar fill ---
+    ["Y", "Q", "M", "W"].forEach((tf, i) => {
+      const n = tfCount[tf] || 0, w = Math.round(n / maxN * 100);
+      h += '<div class="ftf-most ftf-most' + i + '"><span class="ftf-most-bar"><span style="width:' + w + '%"></span></span><span class="ftf-most-n">' + n + "</span></div>";
+    });
+    // --- leading sectors (4) ---
+    leaders.forEach((s, i) => {
+      h += '<div class="ftf-sec ftf-sec' + i + '">' +
+        '<span class="ftf-sec-etf">' + escHtml(s.etf || "") + "</span>" +
+        '<span class="ftf-sec-name">' + escHtml(s.he) + "</span>" +
+        '<span class="ftf-sec-str">' + _score(s.prop) + "/10</span></div>";
+    });
+    h += '<div class="ftf-insight">' + escHtml(insight) + "</div>";
+    el.innerHTML = h;
+    document.body.appendChild(el);
+    return el;
+  }
+  function openFtfcShareChooser() {
+    const body = '<div class="ftf-chooser">' +
+      '<button class="ftf-ch-btn ftf-ch-full" data-ftfside="full">📊 <b>סקירת FTFC מלאה</b><span>סקטורים ותתי-סקטורים · ירוק/אדום</span></button>' +
+      '<button class="ftf-ch-btn ftf-ch-bull" data-ftfside="bull">🐂 <b>שורי</b><span>איפה להיות כרגע</span></button>' +
+      '<button class="ftf-ch-btn ftf-ch-bear" data-ftfside="bear">🐻 <b>דובי</b><span>איפה לא להיות כרגע</span></button></div>';
+    modal("📇 כרטיס FTFC — בחר תצוגה", body);
+    document.querySelectorAll("[data-ftfside]").forEach(b => b.onclick = () => { const s = b.dataset.ftfside; closeModal();
+      _captureRedesignCard(s === "full" ? buildFtfcCardEl : () => buildFtfcSideCardEl(s)); });
+  }
+  // ===== Market-overview super-card (state + breadth + indices + FTFC + movers) =====
+  function buildMarketOverviewCardEl() {
+    const src = (typeof scanSource === "function") ? scanSource() : [];
+    const ms = todayMarketState();
+    const U = mktU();
+    const b = U.breadth || (ms && ms.br) || {};
+    const total = b.total || ((b.above || 0) + (b.below || 0)) || 1;
+    const up = b.above || 0, down = b.below || 0, flat = Math.max(0, total - up - down);
+    const pct = Math.round(up / total * 100), barG = Math.round(up / total * 100), barR = Math.round(down / total * 100);
+    const idxArr = (LIVE && LIVE.indices) ? LIVE.indices : [];
+    const byS = {}; idxArr.forEach(r => byS[r.sym] = r);
+    const vix = (LIVE && LIVE.vix && LIVE.vix.level != null) ? LIVE.vix.level : (byS.VIX ? byS.VIX.price : null);
+    const idxTiles = ["DIA", "IWM", "QQQ", "SPY"].map(s => { const r = byS[s], c = r ? r.chg : null;   // reversed: with .mkt2-idx direction:ltr, SPY lands on the right
+      const cls = c == null ? "mkt2-z" : c > 0.05 ? "mkt2-pos" : c < -0.05 ? "mkt2-neg" : "mkt2-z";
+      return '<div class="mkt2-idxt"><div class="mkt2-sym">' + s + '</div><div class="mkt2-px">' + (r && r.price != null ? Number(r.price).toFixed(2) : "—") +
+        '</div><div class="mkt2-ich ' + cls + '">' + (c == null ? "—" : (c >= 0 ? "+" : "") + c.toFixed(2) + "%") + "</div></div>"; }).join("");
+    const vixLbl = vix != null ? (vix < 18 ? "תנודתיות נמוכה" : vix > 28 ? "תנודתיות גבוהה" : "תנודתיות בינונית") : "תנודתיות";
+    const vixTile = '<div class="mkt2-idxt"><div class="mkt2-sym">VIX</div><div class="mkt2-px">' + (vix != null ? Number(vix).toFixed(2) : "—") + '</div><div class="mkt2-ich mkt2-z">' + vixLbl + "</div></div>";
+    const ftfcN = src.filter(t => t.ftfc).length;
+    const cmR = (typeof cmapRows === "function") ? cmapRows() : src.filter(r => r.sp);
+    const cols = ["D", "W", "M", "Q", "Y"], BK = ["3G", "F2D", "2U", "1", "2D", "F2U", "3R"], counts = {};
+    BK.forEach(k => counts[k] = { D: 0, W: 0, M: 0, Q: 0, Y: 0 });
+    cmR.forEach(row => cols.forEach(tf => { const bk = candleBucket(row[tf]); if (counts[bk]) counts[bk][tf]++; }));
+    let domB = null, domN = -1; BK.forEach(k => { const n = counts[k].D || 0; if (n > domN) { domN = n; domB = k; } });
+    const domLbl = { "2U": "2U המשך עולה", "2D": "2D המשך יורד", "1": "Inside דשדוש", "3G": "3 ירוק התרחבות", "3R": "3 אדום התרחבות", "F2D": "היפוך 2D", "F2U": "היפוך 2U" }[domB] || domB || "—";
+    let tfUp = 0; cols.forEach(tf => { const bull = (counts["2U"][tf] || 0) + (counts["3G"][tf] || 0) + (counts["F2D"][tf] || 0); const bear = (counts["2D"][tf] || 0) + (counts["3R"][tf] || 0) + (counts["F2U"][tf] || 0); if (bull > bear) tfUp++; });
+    const lead = (U.leaders || []).slice().sort((a, b) => (b.c || 0) - (a.c || 0)).slice(0, 2);   // highest gain first
+    const lag = (U.laggards || []).slice().sort((a, b) => (a.c || 0) - (b.c || 0)).slice(0, 2);    // sharpest drop first
+    const chip = x => '<span class="mkt2-chip"><span class="mkt2-s">' + escHtml(x.s) + '</span> <span class="mkt2-p">' + ((x.c >= 0 ? "+" : "") + Number(x.c).toFixed(2) + "%") + "</span></span>";
+    const secs = (typeof todaySectors === "function" ? todaySectors(src) : []).filter(s => s && s.name && s.name !== "אחר" && s.chg != null).sort((a, b) => b.chg - a.chg);
+    const topSec = secs[0] ? secHe(secs[0].name) : "—";
+    const l1 = pct >= 55 ? "רוחב השוק תומך בעליות" : pct <= 45 ? "רוחב השוק חלש" : "רוחב שוק מעורב";
+    const rtag = ms ? '<span class="mkt2-tag mkt2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    const subT = (ms && ms.cls === "pos") ? "סנטימנט חיובי ויציב" : (ms && ms.cls === "neg") ? "סנטימנט שלילי, זהירות" : "סנטימנט מעורב";
+    const riskTxt = (ms && ms.cls === "pos") ? "Risk-On" : (ms && ms.cls === "neg") ? "Risk-Off" : "מצב מעורב";
+    const vixCalm = vix != null && vix < 18;
+    const insTxt = "רוחב שוק " + (pct >= 55 ? "חיובי" : pct <= 45 ? "שלילי" : "מעורב") + (vixCalm ? " ו־<b>VIX רגוע</b>" : "") + " תומכים ב-" + riskTxt + ", ההובלה מרוכזת ב<b>" + escHtml(topSec) + "</b>.";
+    const photo = _heroSquare ? '<img class="mkt2-photo" src="' + _heroSquare + '">' : '<img class="mkt2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "mkt2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="mkt2-hd">' + photo + '<div><div class="mkt2-bt">StratNinja <span>Scanner</span></div><div class="mkt2-bs">The Strat · סקירת שוק</div></div>' +
+        (upd ? '<div class="mkt2-upd"><span class="mkt2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="mkt2-ct">' +
+        '<div class="mkt2-hero"><div class="mkt2-htext"><div class="mkt2-tags">' + rtag + '<span class="mkt2-tag mkt2-range">S&P 500</span></div>' +
+          '<h1><span class="mkt2-l1">' + l1 + '</span><span class="mkt2-l2">בהובלת ה<b>' + escHtml(topSec) + "</b></span></h1><div class=\"mkt2-sub\">" + subT + "</div></div>" +
+          '<div class="mkt2-big"><div class="mkt2-kpi">' + up + '<span>/' + total + '</span></div><div class="mkt2-cap">מניות מעל הפתיחה</div></div></div>' +
+        '<div class="mkt2-idx">' + vixTile + idxTiles + "</div>" +
+        '<div class="mkt2-breadth"><div class="mkt2-bar"><span class="mkt2-g" style="width:' + barG + '%"></span><span class="mkt2-r" style="width:' + barR + '%"></span></div>' +
+          '<div class="mkt2-blabels"><span class="mkt2-up">▲ <span class="mkt2-num">' + up + '</span> עולות</span><span class="mkt2-sepd">·</span><span class="mkt2-dn"><span class="mkt2-num">' + down + '</span> יורדות ▼</span><span class="mkt2-sepd">·</span><span class="mkt2-flat"><span class="mkt2-num">' + flat + '</span> ללא שינוי</span></div></div>' +
+        '<div class="mkt2-cols">' +
+          '<div class="mkt2-col"><div class="mkt2-ch"><span class="mkt2-ic"></span> חוזקה פנימית</div>' +
+            '<div class="mkt2-row"><span class="mkt2-rk2">FTFC מלא</span><span class="mkt2-sep">·</span><span class="mkt2-rv"><span class="mkt2-num">' + ftfcN + '</span> מניות</span></div>' +
+            '<div class="mkt2-row"><span class="mkt2-rk2">מבנה דומיננטי</span><span class="mkt2-sep">·</span><span class="mkt2-rv">' + domLbl + '</span></div>' +
+            '<div class="mkt2-row"><span class="mkt2-rk2">טווחי זמן עולים</span><span class="mkt2-sep">·</span><span class="mkt2-rv"><span class="mkt2-num">' + tfUp + '/5</span></span></div></div>' +
+          '<div class="mkt2-col"><div class="mkt2-ch"><span class="mkt2-ic"></span> מוקדי השוק</div>' +
+            '<div class="mkt2-mv mkt2-up"><span class="mkt2-lbl">🟢 מובילות</span><span class="mkt2-list">' + (lead.length ? lead.slice().reverse().map(chip).join("") : '<span class="mkt2-chip">—</span>') + "</span></div>" +
+            '<div class="mkt2-mv mkt2-dn"><span class="mkt2-lbl">🔴 מפגרות</span><span class="mkt2-list">' + (lag.length ? lag.slice().reverse().map(chip).join("") : '<span class="mkt2-chip">—</span>') + "</span></div></div></div>" +
+        '<div class="mkt2-bottom"><div class="mkt2-insight"><span class="mkt2-mi">i</span><div><span class="mkt2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="mkt2-cta">לסקירת השוק המלאה →</div></div>' +
+      "</div>" +
+      '<div class="mkt2-ft"><span><b>stratninja.win</b> · נתוני שוק מעודכנים</span><span>Adi Koriat · @KoriatTrade · <span class="mkt2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== 🖼️ Market Overview MEGA card — overlays live data onto Market_Template.png (Adi's AI design) =====
+  function _mkSpark(ohlc, cls) {
+    const cl = (ohlc || []).map(b => Array.isArray(b) ? b[3] : (b && (b.c != null ? b.c : b.close))).filter(v => v != null);
+    if (cl.length < 2) return "";
+    const w = 100, h = 26, mn = Math.min.apply(null, cl), mx = Math.max.apply(null, cl), rng = (mx - mn) || 1;
+    const pts = cl.map((v, i) => (i / (cl.length - 1) * w).toFixed(1) + "," + (h - (v - mn) / rng * h).toFixed(1)).join(" ");
+    const stroke = cls === "pos" ? "#3fe0a0" : cls === "neg" ? "#ff6b7a" : "#7f9ccb";
+    return '<svg class="mkt-spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none"><polyline points="' + pts + '" fill="none" stroke="' + stroke + '" stroke-width="1.7" stroke-linejoin="round"/></svg>';
+  }
+  function buildMarketCardEl() {
+    const src = (typeof scanSource === "function") ? scanSource() : [];
+    const U = mktU(), ms = todayMarketState();
+    const b = U.breadth || (ms && ms.br) || {};
+    const total = b.total || ((b.above || 0) + (b.below || 0)) || 1;
+    const up = b.above || 0, down = b.below || 0;
+    const pct = Math.round(up / total * 100), dnPct = Math.round(down / total * 100);
+    const byS = {}; ((LIVE && LIVE.indices) || []).forEach(r => byS[r.sym] = r);
+    const vixLvl = (LIVE && LIVE.vix && LIVE.vix.level != null) ? LIVE.vix.level : (byS.VIX ? byS.VIX.price : null);
+    const vixChg = (LIVE && LIVE.vix && LIVE.vix.chg != null) ? LIVE.vix.chg : (byS.VIX ? byS.VIX.chg : null);
+    const _cls = c => c == null ? "z" : c > 0.05 ? "pos" : c < -0.05 ? "neg" : "z";
+    const _arrow = c => c == null ? "" : c > 0.05 ? " ▲" : c < -0.05 ? " ▼" : "";
+    const _pctS = c => c == null ? "—" : (c >= 0 ? "+" : "") + Number(c).toFixed(2) + "%";
+    // 5 index cards (LTR): SPY QQQ IWM DIA VIX
+    const IDX = [["SPY", "S&P 500"], ["QQQ", "NASDAQ 100"], ["IWM", "RUSSELL 2000"], ["DIA", "DOW JONES"], ["VIX", "תנודתיות"]];
+    const idxLefts = [3.5, 23.6, 42.3, 60.9, 80.7];   // % — SPY, QQQ, IWM, DIA, VIX (left edge of each card slot)
+    const idxCards = IDX.map((it, i) => {
+      const sym = it[0], vix = sym === "VIX";   // the SYM label + icon are baked into the template; we overlay only price/chg/spark
+      const r = byS[sym];
+      const price = vix ? vixLvl : (r ? r.price : null);
+      const chg = vix ? vixChg : (r ? r.chg : null);
+      const cls = _cls(chg);
+      const spk = vix ? "" : _mkSpark(r && r.ohlc, cls);
+      return '<div class="mkt-idx" style="left:' + idxLefts[i] + '%">' +
+        '<div class="mkt-idx-row"><span class="mkt-idx-px">' + (price != null ? Number(price).toFixed(2) : "—") + '</span>' +
+        '<span class="mkt-idx-chg ' + cls + '">' + _pctS(chg) + _arrow(chg) + '</span></div>' +
+        '<div class="mkt-idx-spk">' + spk + '</div></div>';
+    }).join("");
+    // leaders / laggards — stocks are {s, c}; sectors are {name, chg} → main-sector ETF via etfFor(name)
+    const leadS = (U.leaders || []).slice(0, 5);
+    const lagS = (U.laggards || []).slice(0, 5);
+    const secUp = (U.sectorLeaders || []).slice(0, 5);
+    const secDn = (U.sectorLaggards || []).slice(0, 5);
+    // % in the WIDE bar (right), ticker in the small box (left) — direction:rtl puts the first child on the right
+    const _lrow = (tk, v) => '<div class="mkt-lrow"><span class="mkt-lp ' + _cls(v) + '">' + _pctS(v) + '</span><span class="mkt-lt">' + escHtml(tk) + '</span></div>';
+    const stockRow = x => _lrow(x.s, x.c);
+    const secRow = x => _lrow(etfFor(x.name) || secHe(x.name) || x.name, x.chg);
+    const listHtml = (rows, fn) => (rows.length ? rows.map(fn).join("") : '<div class="mkt-lrow"><span class="mkt-lt muted">—</span></div>');
+    // market state + insight
+    const riskTxt = (ms && ms.cls === "pos") ? "שוק חיובי · Risk-On" : (ms && ms.cls === "neg") ? "שוק שלילי · Risk-Off" : "שוק מעורב";
+    const stateExpl = (ms && ms.why) ? ms.why : (pct >= 55 ? "רוב המניות מעל הפתיחה" : pct <= 45 ? "רוב המניות מתחת לפתיחה" : "השוק חצוי");
+    const secs = (typeof todaySectors === "function" ? todaySectors(src) : []).filter(s => s && s.name && s.name !== "אחר" && s.chg != null).sort((a, c) => c.chg - a.chg);
+    const topSec = secs[0] ? (secs[0].etf || subEtfFor(secs[0].name) || secHe(secs[0].name)) : "—";
+    const vixCalm = vixLvl != null && vixLvl < 18;
+    const insTxt = "רוחב השוק " + (pct >= 55 ? "חיובי" : pct <= 45 ? "שלילי" : "מעורב") + (vixCalm ? ", <b>VIX רגוע</b>" : "") + " עם נטייה ל-" + ((ms && ms.cls === "neg") ? "Risk-Off" : (ms && ms.cls === "pos") ? "Risk-On" : "מעורב") + ".<br>כסף נכנס ל-" + escHtml(topSec) + ".";
+
+    const el = document.createElement("div");
+    el.className = "market-card";   // background = Market_Template.png; we overlay only the data
+    el.innerHTML =
+      // breadth (compact: number + bar + label, inside the small left box)
+      '<div class="mkt-brd-num">' + up + '<span>/' + total + '</span></div>' +
+      '<div class="mkt-brd-bar"><span class="g" style="width:' + pct + '%"></span><span class="r" style="width:' + dnPct + '%"></span></div>' +
+      '<div class="mkt-brd-pct"><b class="pos">▲ ' + up + '</b> · <b class="neg">▼ ' + down + '</b> · ' + pct + '% מעל הפתיחה</div>' +
+      // market state
+      '<div class="mkt-state ' + (ms ? ms.cls : "z") + '"><span class="mkt-state-pill">' + (ms ? ms.emoji + " " : "") + riskTxt + '</span><span class="mkt-state-expl">' + escHtml(stateExpl) + '</span></div>' +
+      // index cards
+      idxCards +
+      // leaders (green box): stocks (right col) + sectors (left col)
+      '<div class="mkt-list mkt-lead-stocks">' + listHtml(leadS, stockRow) + '</div>' +
+      '<div class="mkt-list mkt-lead-secs">' + listHtml(secUp, secRow) + '</div>' +
+      // laggards (red box): stocks + sectors
+      '<div class="mkt-list mkt-lag-stocks">' + listHtml(lagS, stockRow) + '</div>' +
+      '<div class="mkt-list mkt-lag-secs">' + listHtml(secDn, secRow) + '</div>' +
+      // CTA in the empty center of the top frame
+      '<div class="mkt-cta">רוב הסוחרים לא נכשלים כי הם לא יודעים מספיק<br>אלא כי הם סוחרים <b>לבד</b><br>בלי שיטה ובלי מישהו שיכווין אותם<br>בקהילת <b>סטראט נינג׳ה</b> יש לך את <b>שלושתם</b>.</div>' +
+      // insight
+      '<div class="mkt-insight">' + insTxt + '</div>' +
+      // timestamp at the top (date + capture time) + footer strip at the bottom
+      '<div class="mkt-date">🕐 ' + new Date().toLocaleDateString("he-IL") + ' · ' + new Date().toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" }) + '</div>' +
+      '<div class="mkt-foot-right">ניתוח שוק מעודכן | <b>stratninja.win</b></div>' +
+      '<div class="mkt-foot-left">Adi Koriat | @KoriatTrade</div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== Favorites share card (personal watchlist snapshot) =====
+  function buildFavoritesCardEl() {
+    const favs = (window.Prefs ? window.Prefs.favorites() : []) || [];
+    const rows = favs.map(sym => {
+      const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+      if (r) return { s: sym, c: (r.c != null ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : 0)), ftfc: !!r.ftfc, D: r.D };
+      const t = (typeof TICKERS !== "undefined") ? TICKERS.find(x => x.sym === sym) : null;
+      return { s: sym, c: (t && t.chg != null ? t.chg : 0), ftfc: false, D: t ? t.D : null };
+    });
+    const total = rows.length;
+    const denom = total || 1;
+    const up = rows.filter(t => (t.c || 0) > 0.05).length;
+    const down = rows.filter(t => (t.c || 0) < -0.05).length;
+    const flat = Math.max(0, total - up - down);
+    const ratio = up / denom;
+    // leaders / laggards — non-overlapping split, up to 5 each
+    const sorted = rows.slice().sort((a, b) => (b.c || 0) - (a.c || 0));
+    const n = sorted.length, kL = Math.min(5, Math.ceil(n / 2)), kG = Math.min(5, n - kL);
+    const leaders = sorted.slice(0, kL);
+    const laggards = sorted.slice(n - kG).reverse();   // most negative first
+    // opportunity metrics
+    const ftfcN = rows.filter(t => t.ftfc).length;
+    let alertsN = 0; try { alertsN = Object.keys(favAlertMatches()).length; } catch (e) {}
+    const BK = ["3G", "F2D", "2U", "1", "2D", "F2U", "3R"], dc = {}; BK.forEach(k => dc[k] = 0);
+    rows.forEach(t => { const bk = (typeof candleBucket === "function") ? candleBucket(t.D) : null; if (dc[bk] != null) dc[bk]++; });
+    let domB = null, domN = -1; BK.forEach(k => { if (dc[k] > domN) { domN = dc[k]; domB = k; } });
+    const domShort = domN > 0 ? (domB || "—") : "—";
+    const DIR = { "2U": 1, "2D": 1, "F2U": 1, "F2D": 1, "3G": 1, "3R": 1 };
+    const readyN = rows.filter(t => t.ftfc && DIR[(typeof candleBucket === "function") ? candleBucket(t.D) : ""]).length;
+    // headline / state
+    let l1, subState, kpiCls, brCls, brLbl;
+    if (total === 0) { l1 = "עדיין אין מועדפים"; subState = "סמן ★ על מניות כדי לעקוב"; kpiCls = "fav2-z"; brCls = "fav2-z"; brLbl = "ריק"; }
+    else if (ratio >= 0.6) { l1 = "המועדפים מראים <b>חוזק</b>"; subState = "רוחב פנימי חיובי"; kpiCls = "fav2-pos"; brCls = ""; brLbl = "נוטה לחיוב"; }
+    else if (ratio <= 0.4) { l1 = "המועדפים <b>תחת לחץ</b>"; subState = "רוחב פנימי שלילי"; kpiCls = "fav2-neg"; brCls = "fav2-neg"; brLbl = "נוטה לשלילה"; }
+    else { l1 = "המועדפים במצב <b>מעורב</b>"; subState = "אין הובלה ברורה"; kpiCls = "fav2-z"; brCls = "fav2-z"; brLbl = "מעורב"; }
+    const sub = total === 0 ? subState : (up + " מתוך " + total + " מועדפים בירוק · " + subState);
+    const ms = todayMarketState();
+    const rtag = ms ? '<span class="fav2-tag fav2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    // rows
+    const pcCls = c => c > 0.05 ? "fav2-p-pos" : c < -0.05 ? "fav2-p-neg" : "fav2-p-flat";
+    const pctS = c => (c < 0 ? "−" : "+") + Math.abs(c).toFixed(2) + "%";
+    const tagFor = t => ({ "2U": "2U המשך", "2D": "2D המשך", "F2U": "היפוך", "F2D": "היפוך", "3G": "התרחבות", "3R": "התרחבות" }[(typeof candleBucket === "function") ? candleBucket(t.D) : ""] || "");
+    const rrow = (t, i) => {
+      const tag = i < 3 ? tagFor(t) : "";   // low-dosage setup tags: only the top 3 rows
+      return '<div class="fav2-rrow"><span class="fav2-rk">' + (i + 1) + '</span><span class="fav2-tk">' + escHtml(t.s) + "</span>" +
+        (tag ? '<span class="fav2-stag">' + tag + "</span>" : "") +
+        '<span class="fav2-spacer"></span><span class="fav2-pc ' + pcCls(t.c || 0) + '">' + pctS(t.c || 0) + "</span></div>";
+    };
+    const panelRows = arr => arr.length ? arr.map(rrow).join("") : '<div class="fav2-rrow"><span class="fav2-tk" style="color:var(--mftxt2);font-family:Heebo">אין נתונים</span></div>';
+    // insight
+    const t2 = leaders.slice(0, 2).map(t => t.s);
+    let insTxt;
+    if (total === 0) insTxt = "רשימת המועדפים ריקה — סמן ★ על מניות בסורק כדי לבנות מעקב אישי.";
+    else if (ratio >= 0.6) insTxt = "רוחב פנימי חיובי במועדפים" + (t2.length ? ", בהובלת <b>" + escHtml(t2[0]) + "</b>" + (t2[1] ? " ו<b>" + escHtml(t2[1]) + "</b>" : "") : "") + ".";
+    else if (ratio <= 0.4) insTxt = "רשימת המועדפים חלשה היום, עם לחץ רוחבי וחוסר הובלה ברור.";
+    else insTxt = "המועדפים מעורבים — יש כיסי חוזק נקודתיים, אך התמונה עדיין לא אחידה.";
+    // breadth bar widths
+    const bg = Math.round(up / denom * 100), bn = Math.round(flat / denom * 100), br = Math.max(0, 100 - bg - bn);
+    const photo = _heroSquare ? '<img class="fav2-photo" src="' + _heroSquare + '">' : '<img class="fav2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "fav2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="fav2-hd">' + photo + '<div><div class="fav2-bt">StratNinja <span>Scanner</span></div><div class="fav2-bs">The Strat · המועדפים שלי</div></div>' +
+        (upd ? '<div class="fav2-upd"><span class="fav2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="fav2-ct">' +
+        '<div class="fav2-hero"><div class="fav2-htext"><div class="fav2-tags">' + rtag + '<span class="fav2-tag fav2-range">טווח יומי · 1D</span></div>' +
+          '<h1 class="' + kpiCls + '">' + l1 + '</h1><div class="fav2-sub">' + sub + "</div></div>" +
+          '<div class="fav2-big"><div class="fav2-kpi ' + kpiCls + '">' + up + '<span>/' + total + '</span></div><div class="fav2-cap">מעל מחיר הפתיחה</div></div></div>' +
+        '<div class="fav2-cols">' +
+          '<div class="fav2-col fav2-up"><div class="fav2-ch"><span class="fav2-cdot"></span> המובילים ברשימה</div>' + panelRows(leaders) + "</div>" +
+          '<div class="fav2-col fav2-dn"><div class="fav2-ch"><span class="fav2-cdot"></span> החלשים ברשימה</div>' + panelRows(laggards) + "</div></div>" +
+        '<div class="fav2-breadth"><div class="fav2-btop ' + brCls + '">מצב המועדפים · <b>' + brLbl + "</b></div>" +
+          '<div class="fav2-bar"><span class="fav2-g" style="width:' + bg + '%"></span><span class="fav2-n" style="width:' + bn + '%"></span><span class="fav2-r" style="width:' + br + '%"></span></div>' +
+          '<div class="fav2-blabels"><span class="fav2-lup">▲ <span class="fav2-num">' + up + '</span> חיוביים</span><span class="fav2-sepd">·</span><span class="fav2-lflat"><span class="fav2-num">' + flat + '</span> ניטרליים</span><span class="fav2-sepd">·</span><span class="fav2-ldn"><span class="fav2-num">' + down + '</span> שליליים ▼</span></div></div>' +
+        '<div class="fav2-opp"><div class="fav2-oph"><span class="fav2-oic"></span> הזדמנויות במועדפים</div>' +
+          '<div class="fav2-otiles">' +
+            '<div class="fav2-ot"><div class="fav2-ov">' + ftfcN + '</div><div class="fav2-ok">FTFC מלא</div></div>' +
+            '<div class="fav2-ot"><div class="fav2-ov">' + alertsN + '</div><div class="fav2-ok">התראות פעילות</div></div>' +
+            '<div class="fav2-ot"><div class="fav2-ov">' + domShort + '</div><div class="fav2-ok">מבנה דומיננטי</div></div>' +
+            '<div class="fav2-ot fav2-ready"><span class="fav2-rdy">מוכן</span><div class="fav2-ov">' + readyN + "/" + total + '</div><div class="fav2-ok">סטאפים מוכנים</div></div>' +
+          "</div></div>" +
+        '<div class="fav2-bottom"><div class="fav2-insight"><span class="fav2-mi">i</span><div><span class="fav2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="fav2-cta">למפת המועדפים המלאה →</div></div>' +
+      "</div>" +
+      '<div class="fav2-ft"><span><b>stratninja.win</b> · נתוני מועדפים אישיים</span><span>Adi Koriat · @KoriatTrade · <span class="fav2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== Journal share card (latest-day performance + real behavior traits, $ P&L — no R) =====
+  function _journalClosedTrades() {
+    // respect the account the trader selected in the journal (only falls back to the all-accounts
+    // computation if the journal module isn't exposing its account-filtered trades at all)
+    if (window.Journal && typeof window.Journal.closedTrades === "function") return window.Journal.closedTrades();
+    if (!window.Store || !window.Engine) return [];
+    const S = window.Store, E = window.Engine;
+    const buckets = (S.accounts ? S.accounts() : []).slice();
+    const hasBlank = (S.getFills() || []).some(f => !(f.account || "").trim()) || (S.getManual() || []).some(m => !(m.account || "").trim());
+    if (hasBlank && buckets.indexOf("") < 0) buckets.push("");
+    if (!buckets.length) buckets.push("");
+    let all = [];
+    buckets.forEach(a => {
+      const cf = (S.getFills() || []).filter(f => (f.account || "").trim() === a);
+      const r = E.computeTrades(cf);
+      const man = (S.getManual() || []).filter(m => (m.account || "").trim() === a).map(E.manualToTrade).filter(t => !t.open);
+      all = all.concat(r.trades, man);
+    });
+    return all;
+  }
+  // journal-share scope: period + open-positions + $/% display + custom date range
+  let _jShareScope = { range: "day", open: false, pct: false, from: "", to: "" };
+  let _journalShareCap = null;   // headline summary of the last-built journal card, for the share caption
+  function _dateMinusDays(ymd, days) {   // "YYYY-MM-DD" minus N days → "YYYY-MM-DD"
+    const p = String(ymd || "").split("-"); if (p.length !== 3) return ymd;
+    const d = new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); d.setUTCDate(d.getUTCDate() - days);
+    return d.toISOString().slice(0, 10);
+  }
+  // pre-share picker: let the trader choose a day / period + whether to include open trades
+  function openJournalSharePicker() {
+    const R = _jShareScope.range;
+    const rbtn = (k, lbl) => '<button class="btn ghost' + (k === R ? " primary" : "") + '" data-jsprange="' + k + '" style="font-size:13px;font-weight:600">' + lbl + "</button>";
+    // sensible bounds/defaults for the custom date pickers = the journal's actual date span
+    const _all = _journalClosedTrades(); let _lo = null, _hi = null;
+    _all.forEach(t => { if (t.exitDate) { if (!_lo || t.exitDate < _lo) _lo = t.exitDate; if (!_hi || t.exitDate > _hi) _hi = t.exitDate; } });
+    const dFrom = _jShareScope.from || (_hi ? _dateMinusDays(_hi, 6) : ""), dTo = _jShareScope.to || _hi || "";
+    const dateInp = (id, v) => '<input type="date" id="' + id + '" value="' + v + '"' + (_lo ? ' min="' + _lo + '"' : "") + (_hi ? ' max="' + _hi + '"' : "") + ' style="font-size:13px;padding:5px 8px;border-radius:7px">';
+    const body = '<div style="padding:2px">' +
+      '<div class="muted" style="font-size:13px;margin-bottom:9px">📅 בחר טווח לכרטיס:</div>' +
+      '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:8px">' + rbtn("day", "היום האחרון") + rbtn("7d", "7 ימים") + rbtn("30d", "30 ימים") + rbtn("all", "כל התקופה") + rbtn("custom", "📆 תאריכים מותאמים") + "</div>" +
+      '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:8px">' + rbtn("mtd", "MTD · מתחילת החודש") + rbtn("qtd", "QTD · מתחילת הרבעון") + rbtn("ytd", "YTD · מתחילת השנה") + "</div>" +
+      '<div style="display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px">' + rbtn("open", "🔓 פוזיציות פתוחות בלבד") + "</div>" +
+      '<div id="jspClosedOpts">' +
+      '<div id="jspCustom" style="display:' + (R === "custom" ? "flex" : "none") + ';gap:8px;align-items:center;margin-bottom:14px;font-size:13px;flex-wrap:wrap"><span class="muted">מ־</span>' + dateInp("jspFrom", dFrom) + '<span class="muted">עד</span>' + dateInp("jspTo", dTo) + "</div>" +
+      '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:11px"><input type="checkbox" id="jspOpen"' + (_jShareScope.open ? " checked" : "") + "> כלול גם עסקאות פתוחות (רווח/הפסד לא ממומש)</label></div>" +
+      '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-bottom:16px"><input type="checkbox" id="jspPct"' + (_jShareScope.pct ? " checked" : "") + "> הצג באחוזים (%) במקום דולר ($)</label>" +
+      '<button class="btn primary" id="jspGo" style="width:100%;font-weight:700">📤 צור כרטיס שיתוף</button></div>';
+    modal("📅 שיתוף יומן מסחר", body, "jshare");
+    document.querySelectorAll("[data-jsprange]").forEach(b => b.onclick = () => {
+      _jShareScope.range = b.dataset.jsprange;
+      document.querySelectorAll("[data-jsprange]").forEach(x => x.classList.toggle("primary", x === b));
+      const c = document.getElementById("jspCustom"); if (c) c.style.display = b.dataset.jsprange === "custom" ? "flex" : "none";
+      const co = document.getElementById("jspClosedOpts"); if (co) co.style.display = b.dataset.jsprange === "open" ? "none" : "block";   // open-only mode hides the closed-trade options
+    });
+    const go = document.getElementById("jspGo");
+    if (go) go.onclick = () => {
+      _jShareScope.open = !!(document.getElementById("jspOpen") || {}).checked;
+      _jShareScope.pct = !!(document.getElementById("jspPct") || {}).checked;
+      if (_jShareScope.range === "custom") {
+        let f = (document.getElementById("jspFrom") || {}).value || "", t = (document.getElementById("jspTo") || {}).value || "";
+        if (f && t && f > t) { const tmp = f; f = t; t = tmp; }   // swap if reversed
+        _jShareScope.from = f; _jShareScope.to = t;
+      }
+      closeModal();
+      _captureRedesignCard(_jShareScope.range === "open" ? buildOpenPositionsCardEl : buildJournalCardEl);
+    };
+  }
+  function buildJournalCardEl() {
+    const E = window.Engine;
+    const all = _journalClosedTrades();
+    let latest = null; all.forEach(t => { if (t.exitDate && (!latest || t.exitDate > latest)) latest = t.exitDate; });
+    const range = (_jShareScope && _jShareScope.range) || "day";
+    const isDay = range === "day";
+    const dstr = d => d ? d.split("-").reverse().join(".") : "—";
+    // pick the trade set + labels for the chosen scope
+    let trades, dayHe, resultCap, stateCap;
+    if (range === "all" || !latest) {
+      trades = all.filter(t => t.exitDate);
+      let first = null; trades.forEach(t => { if (t.exitDate && (!first || t.exitDate < first)) first = t.exitDate; });
+      dayHe = (first && latest && first !== latest) ? dstr(first) + "–" + dstr(latest) : dstr(latest);
+      resultCap = "תוצאה כוללת"; stateCap = "סיכום כולל";
+    } else if (isDay) {
+      trades = all.filter(t => t.exitDate === latest);
+      dayHe = dstr(latest); resultCap = "תוצאה יומית"; stateCap = "מצב היום";
+    } else if (range === "custom") {
+      const from = (_jShareScope && _jShareScope.from) || "", to = (_jShareScope && _jShareScope.to) || latest || "";
+      trades = all.filter(t => t.exitDate && (!from || t.exitDate >= from) && (!to || t.exitDate <= to));
+      dayHe = (from && to) ? (from === to ? dstr(to) : dstr(from) + "–" + dstr(to)) : (to ? dstr(to) : "—");
+      resultCap = "תוצאה בתקופה"; stateCap = "מצב התקופה";
+    } else if (range === "mtd" || range === "qtd" || range === "ytd") {
+      // start of the current month / quarter / year (anchored on the most-recent exit date)
+      let from;
+      if (range === "mtd") from = latest.slice(0, 7) + "-01";
+      else if (range === "qtd") { const qs = Math.floor((+latest.slice(5, 7) - 1) / 3) * 3 + 1; from = latest.slice(0, 4) + "-" + String(qs).padStart(2, "0") + "-01"; }
+      else from = latest.slice(0, 4) + "-01-01";
+      trades = all.filter(t => t.exitDate && t.exitDate >= from && t.exitDate <= latest);
+      dayHe = dstr(from) + "–" + dstr(latest);
+      resultCap = (range === "mtd" ? "מתחילת החודש" : range === "qtd" ? "מתחילת הרבעון" : "מתחילת השנה"); stateCap = "מצב התקופה";
+    } else {
+      const cut = _dateMinusDays(latest, (range === "7d" ? 7 : 30) - 1);
+      trades = all.filter(t => t.exitDate && t.exitDate >= cut);
+      dayHe = dstr(cut) + "–" + dstr(latest); resultCap = "תוצאה בתקופה"; stateCap = "מצב התקופה";
+    }
+    const st = (E && E.stats) ? E.stats(trades) : { count: 0, net: 0, winRate: 0, wins: 0, losses: 0, avgWin: 0, avgLoss: 0, profitFactor: 0, bestTrade: 0, worstTrade: 0 };
+    const n = st.count;
+    const wins = st.wins, losses = st.losses, be = Math.max(0, n - wins - losses);
+    const reflected = trades.filter(t => t.exitReason || t.managedWell);
+    const emoExits = trades.filter(t => t.exitReason === "emotion").length;
+    const tgtExits = trades.filter(t => t.exitReason === "target").length;
+    const managedOk = trades.filter(t => t.managedWell === "yes").length;
+    // $ / % display. In % mode every figure is a per-trade PRICE return; aggregate net = SUM, average = mean —
+    // so the card reads in % (e.g. avg +2.4%) without exposing $ amounts.
+    const usd = v => (v < 0 ? "−$" : "+$") + Math.round(Math.abs(v)).toLocaleString("en-US");
+    const usdBare = v => "$" + Math.round(Math.abs(v)).toLocaleString("en-US");
+    const pctMode = !!(_jShareScope && _jShareScope.pct);
+    // per-trade % = P&L ÷ capital deployed (entryPrice × qty × mult): +$100 on a $1,000 position = +10%.
+    const _cost = t => Math.abs((+t.entryPrice || 0) * (+t.qty || 0) * (+t.mult || 1));
+    const _tp = t => { const c = _cost(t); return c ? (t.pnl || 0) / c * 100 : null; };
+    const tv = t => pctMode ? (_tp(t) || 0) : (t.pnl || 0);   // per-trade display value ($ or %)
+    const _pcts = trades.map(_tp).filter(v => v != null), _mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
+    // TOTAL return = capital-WEIGHTED: Σ P&L ÷ Σ capital deployed (the $200 ÷ $1,100 = +18.2% model).
+    let _sumP = 0, _sumC = 0; trades.forEach(t => { const c = _cost(t); if (c) { _sumP += (t.pnl || 0); _sumC += c; } });
+    // fold OPEN positions' unrealized P&L into the headline when the trader ticked "include open positions"
+    let openUn = 0, openCost = 0, openUnPct = null;
+    if (_jShareScope && _jShareScope.open) {
+      const ol = (window.Journal && window.Journal.openList) ? window.Journal.openList() : [];
+      ol.forEach(p => { if (p.un != null && p.cost) { openUn += p.un; openCost += p.cost; } });
+      openUnPct = openCost ? openUn / openCost * 100 : null;
+    }
+    const inclOpen = openCost > 0;   // only fold in when there are priced open positions
+    const _wRet = (_sumC + (inclOpen ? openCost : 0)) ? (_sumP + (inclOpen ? openUn : 0)) / (_sumC + (inclOpen ? openCost : 0)) * 100 : 0;   // capital-weighted, incl. open
+    const D = pctMode
+      ? { net: _wRet, avgPer: _mean(_pcts), best: _pcts.length ? Math.max.apply(null, _pcts) : 0, worst: _pcts.length ? Math.min.apply(null, _pcts) : 0, avgWin: _mean(_pcts.filter(v => v > 0)), avgLoss: _mean(_pcts.filter(v => v < 0)) }
+      : { net: st.net + (inclOpen ? openUn : 0), avgPer: n ? st.net / n : 0, best: st.bestTrade, worst: st.worstTrade, avgWin: st.avgWin, avgLoss: st.avgLoss };
+    const net = D.net, avgPer = D.avgPer;
+    const fmt = v => pctMode ? ((v >= 0 ? "+" : "−") + Math.abs(+v || 0).toFixed(1) + "%") : usd(v);
+    // stash the headline for the share caption (so the tweet text matches the card)
+    _journalShareCap = n ? { val: fmt(net), he: dayHe, dir: net > 0 ? "pos" : net < 0 ? "neg" : "flat", isDay: isDay } : null;
+    // headline / state — wording adapts to a single day vs a period
+    let l1, kpiCls, brCls, brLbl, dayTag;
+    if (n === 0) { l1 = "אין עדיין עסקאות סגורות"; kpiCls = "jrn2-z"; brCls = "jrn2-z"; brLbl = "אין נתונים"; dayTag = '<span class="jrn2-tag jrn2-z">⚪ יומן ריק</span>'; }
+    else if (net > 0) { l1 = isDay ? (st.winRate >= 60 ? "יום <b>ירוק</b> וחזק" : "יום <b>ירוק</b>") : (st.winRate >= 60 ? "תקופה <b>ירוקה</b> וחזקה" : "תקופה <b>ירוקה</b>"); kpiCls = "jrn2-pos"; brCls = ""; brLbl = isDay ? "יום רווחי" : "תקופה רווחית"; dayTag = '<span class="jrn2-tag jrn2-pos">🟢 ' + (isDay ? "יום ירוק" : "תקופה ירוקה") + "</span>"; }
+    else if (net < 0) { l1 = (isDay ? "יום <b>אדום</b>" : "תקופה <b>אדומה</b>") + " — ללמידה"; kpiCls = "jrn2-neg"; brCls = "jrn2-neg"; brLbl = isDay ? "יום הפסדי" : "תקופה הפסדית"; dayTag = '<span class="jrn2-tag jrn2-neg">🔴 ' + (isDay ? "יום אדום" : "תקופה אדומה") + "</span>"; }
+    else { l1 = isDay ? "יום <b>מאוזן</b>" : "תקופה <b>מאוזנת</b>"; kpiCls = "jrn2-z"; brCls = "jrn2-z"; brLbl = isDay ? "יום מאוזן" : "תקופה מאוזנת"; dayTag = '<span class="jrn2-tag jrn2-z">⚪ ' + (isDay ? "יום מאוזן" : "תקופה מאוזנת") + "</span>"; }
+    // optional open-positions tag (unrealized P&L), when the trader chose to include open trades
+    let openTag = "";
+    if (_jShareScope && _jShareScope.open) {
+      const js = (window.Journal && window.Journal.summary) ? window.Journal.summary() : null;
+      if (js && js.open) {
+        // in % mode show the unrealized as a return %, otherwise in $
+        const unTxt = pctMode ? (openUnPct != null ? " · לא ממומש " + fmt(openUnPct) : "") : (js.unrealized != null ? " · לא ממומש " + usd(js.unrealized) : "");
+        openTag = '<span class="jrn2-tag jrn2-z">🔓 ' + js.open + " פתוחות" + unTxt + "</span>";
+      }
+    }
+    const sub = n === 0 ? "סמן עסקאות ביומן כדי לראות סיכום" : (n + " עסקאות · " + st.winRate + "% הצלחה" + (pctMode ? "" : " · ממוצע " + fmt(avgPer) + " לעסקה"));
+    // trade rows — surface BOTH the biggest winners and the worst losers (ranked by the displayed metric $/%)
+    const _byPnl = (a, b) => tv(b) - tv(a);
+    const _wins = trades.filter(t => tv(t) > 0).sort(_byPnl);
+    const _loss = trades.filter(t => tv(t) < 0).sort((a, b) => tv(a) - tv(b));   // worst first
+    let day5;
+    if (_wins.length && _loss.length) {
+      const nL = Math.min(2, _loss.length), nW = Math.min(5 - nL, _wins.length);
+      day5 = _wins.slice(0, nW).concat(_loss.slice(0, 5 - nW)).slice(0, 5).sort(_byPnl);
+    } else {
+      day5 = trades.slice().sort(_byPnl).slice(0, 5);
+    }
+    const dirTag = t => t.direction === "short" ? '<span class="jrn2-stag jrn2-sh">שורט</span>' : '<span class="jrn2-stag">לונג</span>';
+    const pcCls = v => v > 0 ? "jrn2-p-pos" : v < 0 ? "jrn2-p-neg" : "jrn2-p-flat";
+    const tradeRow = (t, i) => '<div class="jrn2-rrow"><span class="jrn2-rk">' + (i + 1) + '</span><span class="jrn2-tk">' + escHtml(t.symbol || "—") + "</span>" +
+      dirTag(t) + '<span class="jrn2-spacer"></span><span class="jrn2-pc ' + pcCls(tv(t)) + '">' + fmt(tv(t)) + "</span></div>";
+    const tradesHtml = day5.length ? day5.map(tradeRow).join("") : '<div class="jrn2-rrow"><span class="jrn2-tk" style="color:var(--mftxt2)">אין עסקאות</span></div>';
+    // behavior/quality panel (only real data; reflection rows show "לא תועד" when no reflection)
+    const iso = s => '<span style="unicode-bidi:isolate;direction:ltr;display:inline-block">' + s + "</span>";
+    const drow = (ico, icoCls, lbl, val, valCls) => '<div class="jrn2-drow"><span class="jrn2-dico ' + icoCls + '">' + ico + '</span><span class="jrn2-dlbl">' + lbl + '</span><span class="jrn2-spacer"></span><span class="jrn2-dval ' + valCls + '">' + val + "</span></div>";
+    const rowsD = [];
+    rowsD.push(drow("▲", "jrn2-ok", "עסקה מנצחת ממוצעת", wins ? iso(fmt(D.avgWin)) : "—", "numi " + (wins ? "jrn2-ok" : "jrn2-mut")));
+    rowsD.push(drow("▼", "jrn2-bad", "עסקה מפסידה ממוצעת", losses ? iso(fmt(-Math.abs(D.avgLoss))) : "—", "numi " + (losses ? "jrn2-neg" : "jrn2-mut")));
+    rowsD.push(drow("😰", "jrn2-bad", "יציאות רגשיות", reflected.length ? String(emoExits) : "לא תועד", reflected.length ? (emoExits ? "jrn2-neg numi" : "jrn2-ok numi") : "jrn2-na"));
+    rowsD.push(drow("✓", "jrn2-ok", "ניהול טוב", reflected.length ? (managedOk + "/" + reflected.length) : "לא תועד", reflected.length ? "jrn2-ok numi" : "jrn2-na"));
+    rowsD.push(drow("🎯", "jrn2-met", "יציאות ביעד", reflected.length ? String(tgtExits) : "לא תועד", reflected.length ? "jrn2-brand numi" : "jrn2-na"));
+    const behHtml = rowsD.join("");
+    // breadth
+    const denom = n || 1;
+    const bg = Math.round(wins / denom * 100), bn = Math.round(be / denom * 100), brr = Math.max(0, 100 - bg - bn);
+    // tiles
+    const pf = st.profitFactor === Infinity ? "∞" : (losses ? Number(st.profitFactor).toFixed(2) : (wins ? "∞" : "—"));
+    const bestV = n ? fmt(D.best) : "—";
+    // insight
+    let insTxt;
+    if (n === 0) insTxt = "אין עדיין עסקאות סגורות ביומן — ייבא CSV או הוסף עסקה כדי לקבל סיכום.";
+    else if (net > 0) insTxt = "יום ירוק — <b>" + wins + "</b> מתוך <b>" + n + "</b> עסקאות ברווח" + (reflected.length && emoExits === 0 ? ", ללא יציאות רגשיות" : "") + ".";
+    else if (net < 0) insTxt = "יום אדום — הרוב בהפסד; שווה לעבור על העסקאות ולזהות מה חזר על עצמו.";
+    else insTxt = "יום מאוזן — הרווחים וההפסדים כמעט מתקזזים.";
+    // Adi 2026-10-14: temporarily REVERTED to the previous (jrn2) summary card. Flip _USE_TSC_SUMMARY back
+    // to true to restore the baked Tradeshare_Template.png version (the tsc block below is otherwise unchanged).
+    const _USE_TSC_SUMMARY = false;
+    if (_USE_TSC_SUMMARY) { // ===== premium Trade-Share card overlaid on Tradeshare_Template.png (1254² baked frame) — old jrn2 render below is the fallback we reverted to =====
+      const _updT = _mfIlTime();
+      const _sign = v => v > 0 ? "tsc-pos" : v < 0 ? "tsc-neg" : "tsc-z";
+      const subA = n ? (n + " עסקאות · " + st.winRate + "% הצלחה") : "אין עסקאות סגורות בטווח שנבחר";
+      const subB = n ? ("ממוצע " + fmt(avgPer) + " לעסקה") : "";
+      // left panel (מאפייני ביצוע) — 5 values matching the baked labels
+      const charVals = [
+        { v: wins ? iso(fmt(D.avgWin)) : "—", c: wins ? "tsc-pos" : "" },
+        { v: losses ? iso(fmt(-Math.abs(D.avgLoss))) : "—", c: losses ? "tsc-neg" : "" },
+        { v: reflected.length ? String(emoExits) : "—", c: "" },
+        { v: reflected.length ? (managedOk + "/" + reflected.length) : "—", c: reflected.length ? "tsc-pos" : "" },
+        { v: reflected.length ? String(tgtExits) : "—", c: "" }
+      ];
+      const charHtml = charVals.map((x, i) => '<div class="tsc-cv tsc-row' + i + (x.c ? " " + x.c : "") + '">' + x.v + "</div>").join("");
+      // right panel (ביצועי העסקאות) — 5 rows: P&L + ticker + direction (middle intentionally empty per Adi)
+      const tscDir = t => t.direction === "short" ? '<span class="tsc-dir tsc-sh">שורט</span>' : '<span class="tsc-dir tsc-lo">לונג</span>';
+      let tradeHtml = "";
+      for (let i = 0; i < 5; i++) { const t = day5[i]; if (!t) continue;
+        tradeHtml += '<div class="tsc-rp tsc-row' + i + " " + _sign(tv(t)) + '">' + iso(fmt(tv(t))) + "</div>" +
+          '<div class="tsc-rt tsc-row' + i + '">' + escHtml(String(t.symbol || "—").split(" ")[0]) + "</div>" +
+          '<div class="tsc-rd tsc-row' + i + '">' + tscDir(t) + "</div>";
+      }
+      // dynamic distribution bar + 3 count labels (wins / losses / break-even)
+      const distHtml = '<div class="tsc-bar"><span class="tsc-bg" style="width:' + bg + '%"></span><span class="tsc-br" style="width:' + brr + '%"></span><span class="tsc-bn" style="width:' + bn + '%"></span></div>' +
+        '<div class="tsc-dl tsc-dl0"><span class="tsc-dsub">' + wins + ' עסקאות מוצלחות</span><span class="tsc-dpct tsc-pos">' + bg + "%</span></div>" +
+        '<div class="tsc-dl tsc-dl1"><span class="tsc-dsub">' + losses + ' עסקאות מפסידות</span><span class="tsc-dpct tsc-neg">' + brr + "%</span></div>" +
+        '<div class="tsc-dl tsc-dl2"><span class="tsc-dsub">' + be + ' עסקאות ללא שינוי</span><span class="tsc-dpct tsc-z">' + bn + "%</span></div>";
+      // 4 bottom tiles (icons baked): best · profit factor · avg/trade · win rate
+      const tilesHtml =
+        '<div class="tsc-tile tsc-tile0"><span class="tsc-tv tsc-pos">' + bestV + '</span><span class="tsc-tl">העסקה הטובה</span></div>' +
+        '<div class="tsc-tile tsc-tile1"><span class="tsc-tv">' + pf + '</span><span class="tsc-tl">Profit Factor</span></div>' +
+        '<div class="tsc-tile tsc-tile2"><span class="tsc-tv ' + _sign(avgPer) + '">' + (n ? iso(fmt(avgPer)) : "—") + '</span><span class="tsc-tl">ממוצע לעסקה</span></div>' +
+        '<div class="tsc-tile tsc-tile3"><span class="tsc-tv">' + st.winRate + '%</span><span class="tsc-tl">אחוז הצלחה</span></div>';
+      // short single-line Ninja Insight (the long one wrapped badly)
+      const _prefix = isDay ? "יום" : "תקופה";
+      const _tscIns = n === 0 ? "אין עדיין עסקאות סגורות"
+        : net > 0 ? (_prefix + (isDay ? " ירוק" : " ירוקה") + " · " + wins + " מתוך " + n + " ברווח")
+        : net < 0 ? (_prefix + (isDay ? " אדום" : " אדומה") + " · " + losses + " מתוך " + n + " בהפסד")
+        : (_prefix + (isDay ? " מאוזן" : " מאוזנת") + " · רווח והפסד מתקזזים");
+      const el = document.createElement("div"); el.className = "trade-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+      el.innerHTML =
+        (_updT ? '<div class="tsc-upd">עודכן ' + _updT + "</div>" : "") +
+        '<div class="tsc-pertag">תקופה נוכחית</div>' +
+        '<div class="tsc-date">' + dayHe + "</div>" +
+        '<div class="tsc-sub-a">' + subA + "</div>" + (subB ? '<div class="tsc-sub-b">' + subB + "</div>" : "") +
+        '<div class="tsc-hero ' + _sign(net) + '">' + (n ? iso(fmt(net)) : "—") + "</div>" +
+        '<div class="tsc-herolbl">' + (pctMode ? "תשואה כוללת בתקופה" : "רווח/הפסד כולל בתקופה") + "</div>" +
+        charHtml + tradeHtml + distHtml + tilesHtml +
+        '<div class="tsc-cta">הצטרפו אלינו לקהילה עכשיו !</div>' +
+        '<div class="tsc-insight">' + _tscIns + "</div>";
+      document.body.appendChild(el);
+      return el;
+    }
+    const photo = _heroSquare ? '<img class="jrn2-photo" src="' + _heroSquare + '">' : '<img class="jrn2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "jrn2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="jrn2-hd">' + photo + '<div><div class="jrn2-bt">StratNinja <span>Scanner</span></div><div class="jrn2-bs">The Strat · יומן מסחר</div></div>' +
+        (upd ? '<div class="jrn2-upd"><span class="jrn2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="jrn2-ct">' +
+        '<div class="jrn2-hero"><div class="jrn2-htext"><div class="jrn2-tags">' + dayTag + '<span class="jrn2-tag jrn2-range">טווח · ' + dayHe + "</span>" + openTag + "</div>" +
+          '<h1 class="' + kpiCls + '">' + l1 + '</h1><div class="jrn2-sub">' + sub + "</div></div>" +
+          '<div class="jrn2-big"><div class="jrn2-kpi ' + kpiCls + '">' + (n ? fmt(net) : "—") + '</div>' + (n ? '<div class="jrn2-sub2">' + (pctMode ? "לפי סך ההון שהושקע בעסקאות" : "העסקה הטובה <b>" + iso(fmt(D.best)) + "</b> · הגרועה <b>" + iso(fmt(D.worst)) + "</b>") + "</div>" : "") + '<div class="jrn2-cap">' + (pctMode ? "תשואה על ההון" : resultCap) + (inclOpen ? " · כולל פתוחות" : "") + "</div>" +
+          ((n && inclOpen) ? '<div class="jrn2-brk">ממומש <b class="' + (((pctMode ? (_sumC ? _sumP / _sumC * 100 : 0) : st.net) >= 0) ? "jrn2-pos" : "jrn2-neg") + '">' + fmt(pctMode ? (_sumC ? _sumP / _sumC * 100 : 0) : st.net) + '</b> · לא-ממומש <b class="' + (((pctMode ? (openUnPct || 0) : openUn) >= 0) ? "jrn2-pos" : "jrn2-neg") + '">' + fmt(pctMode ? (openUnPct || 0) : openUn) + "</b></div>" : "") +
+          "</div></div>" +
+        '<div class="jrn2-cols">' +
+          '<div class="jrn2-col jrn2-up"><div class="jrn2-ch"><span class="jrn2-cdot"></span> ביצועי העסקאות' + (n > day5.length ? ' <span style="font-weight:400;opacity:.6;font-size:11px">· מובילות ומפסידות מתוך ' + n + "</span>" : "") + "</div>" + tradesHtml + "</div>" +
+          '<div class="jrn2-col"><div class="jrn2-ch"><span class="jrn2-cdot"></span> מאפייני ביצוע</div>' + behHtml + "</div></div>" +
+        '<div class="jrn2-breadth"><div class="jrn2-btop ' + brCls + '">' + stateCap + ' · <b>' + brLbl + "</b></div>" +
+          '<div class="jrn2-bar"><span class="jrn2-g" style="width:' + bg + '%"></span><span class="jrn2-n" style="width:' + bn + '%"></span><span class="jrn2-r" style="width:' + brr + '%"></span></div>' +
+          '<div class="jrn2-blabels"><span class="jrn2-lup">▲ <span class="jrn2-num">' + wins + '</span> רווחיות</span><span class="jrn2-sepd">·</span><span class="jrn2-lflat"><span class="jrn2-num">' + be + '</span> ברייק-איבן</span><span class="jrn2-sepd">·</span><span class="jrn2-ldn"><span class="jrn2-num">' + losses + '</span> הפסדיות ▼</span></div></div>' +
+        '<div class="jrn2-opp"><div class="jrn2-oph"><span class="jrn2-oic"></span> איכות הביצוע</div>' +
+          '<div class="jrn2-otiles">' +
+            '<div class="jrn2-ot"><div class="jrn2-ov">' + st.winRate + '%</div><div class="jrn2-ok2">אחוז הצלחה</div></div>' +
+            '<div class="jrn2-ot"><div class="jrn2-ov">' + (n ? fmt(pctMode ? D.worst : avgPer) : "—") + '</div><div class="jrn2-ok2">' + (pctMode ? "העסקה הגרועה" : "ממוצע לעסקה") + "</div></div>" +
+            '<div class="jrn2-ot"><div class="jrn2-ov">' + pf + '</div><div class="jrn2-ok2">Profit Factor</div></div>' +
+            '<div class="jrn2-ot jrn2-ready"><span class="jrn2-rdy">שיא</span><div class="jrn2-ov">' + bestV + '</div><div class="jrn2-ok2">העסקה הטובה</div></div>' +
+          "</div></div>" +
+        '<div class="jrn2-bottom"><div class="jrn2-insight"><span class="jrn2-mi">i</span><div><span class="jrn2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="jrn2-cta">ליומן המסחר המלא →</div></div>' +
+      "</div>" +
+      '<div class="jrn2-ft"><span><b>stratninja.win</b> · נתוני יומן מסחר</span><span>Adi Koriat · @KoriatTrade · <span class="jrn2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== Open-positions share card (currently-open trades + their unrealized P&L) =====
+  function buildOpenPositionsCardEl() {
+    const list = (window.Journal && window.Journal.openList) ? window.Journal.openList() : [];
+    const pctMode = !!(_jShareScope && _jShareScope.pct);
+    const usd = v => (v < 0 ? "−$" : "+$") + Math.round(Math.abs(v)).toLocaleString("en-US");
+    const pctF = v => (v >= 0 ? "+" : "−") + Math.abs(+v || 0).toFixed(1) + "%";
+    let sumUn = 0, sumCost = 0, wins = 0, losses = 0;
+    list.forEach(p => { if (p.un != null) { sumUn += p.un; sumCost += p.cost; if (p.un > 0) wins++; else if (p.un < 0) losses++; } });
+    const totalPct = sumCost ? sumUn / sumCost * 100 : 0;
+    const n = list.length;
+    const kpiCls = sumUn > 0 ? "jrn2-pos" : sumUn < 0 ? "jrn2-neg" : "jrn2-z";
+    const bigVal = n ? (pctMode ? pctF(totalPct) : usd(sumUn)) : "—";
+    const dirTag = p => p.direction === "short" ? '<span class="jrn2-stag jrn2-sh">שורט</span>' : '<span class="jrn2-stag">לונג</span>';
+    const rowP = (p, i) => {
+      const upct = (p.un != null && p.cost) ? p.un / p.cost * 100 : null;
+      const cls = p.un == null ? "jrn2-p-flat" : p.un > 0 ? "jrn2-p-pos" : p.un < 0 ? "jrn2-p-neg" : "jrn2-p-flat";
+      const val = p.un == null ? "טוען…" : (pctMode ? (upct == null ? "—" : pctF(upct)) : usd(p.un));
+      return '<div class="jrn2-rrow"><span class="jrn2-rk">' + (i + 1) + '</span><span class="jrn2-tk">' + escHtml(String(p.symbol || "—").split(" ")[0]) + (p.isOption ? ' <span style="font-size:10px;opacity:.55">אופ׳</span>' : "") + "</span>" + dirTag(p) + '<span class="jrn2-spacer"></span><span class="jrn2-pc ' + cls + '">' + val + "</span></div>";
+    };
+    const emptyR = '<div class="jrn2-rrow"><span class="jrn2-tk" style="color:var(--mftxt2)">—</span></div>';
+    const winList = list.filter(p => (p.un || 0) > 0).sort((a, b) => (b.un || 0) - (a.un || 0)).slice(0, 6);
+    const lossList = list.filter(p => (p.un || 0) < 0).sort((a, b) => (a.un || 0) - (b.un || 0)).slice(0, 6);
+    const winsHtml = winList.length ? winList.map((p, i) => rowP(p, i)).join("") : emptyR;
+    const lossHtml = lossList.length ? lossList.map((p, i) => rowP(p, i)).join("") : emptyR;
+    const sub = n ? (n + " פוזיציות פתוחות · " + wins + " ברווח · " + losses + " בהפסד") : "אין פוזיציות פתוחות כרגע";
+    const photo = _heroSquare ? '<img class="jrn2-photo" src="' + _heroSquare + '">' : '<img class="jrn2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "jrn2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="jrn2-hd">' + photo + '<div><div class="jrn2-bt">StratNinja <span>Scanner</span></div><div class="jrn2-bs">The Strat · פוזיציות פתוחות</div></div>' +
+        (upd ? '<div class="jrn2-upd"><span class="jrn2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="jrn2-ct">' +
+        '<div class="jrn2-hero"><div class="jrn2-htext"><div class="jrn2-tags"><span class="jrn2-tag jrn2-z">🔓 ' + n + ' פוזיציות פתוחות</span></div>' +
+          '<h1 class="' + kpiCls + '">רווח/הפסד לא ממומש</h1><div class="jrn2-sub">' + sub + "</div></div>" +
+          '<div class="jrn2-big"><div class="jrn2-kpi ' + kpiCls + '">' + bigVal + '</div><div class="jrn2-cap">' + (pctMode ? "תשואה לא ממומשת" : "לא ממומש כולל") + "</div></div></div>" +
+        '<div class="jrn2-cols">' +
+          '<div class="jrn2-col jrn2-up"><div class="jrn2-ch"><span class="jrn2-cdot"></span> 🟢 ברווח</div>' + winsHtml + "</div>" +
+          '<div class="jrn2-col"><div class="jrn2-ch"><span class="jrn2-cdot"></span> 🔴 בהפסד</div>' + lossHtml + "</div></div>" +
+        '<div class="jrn2-bottom"><div class="jrn2-insight"><span class="jrn2-mi">i</span><div><span class="jrn2-lbl">Ninja Insight:</span> ' + (n ? ("סה\"כ חשיפה פתוחה " + usd(sumCost).replace("+$", "$") + " על פני " + n + " פוזיציות · " + (pctMode ? pctF(totalPct) + " לא ממומש" : usd(sumUn) + " לא ממומש") + ".") : "אין פוזיציות פתוחות — כל העסקאות סגורות.") + "</div></div>" +
+          '<div class="jrn2-cta">ליומן המסחר המלא →</div></div>' +
+      "</div>" +
+      '<div class="jrn2-ft"><span><b>stratninja.win</b> · פוזיציות פתוחות ביומן</span><span>Adi Koriat · @KoriatTrade · <span class="jrn2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    _journalShareCap = n ? { val: bigVal, he: "", dir: sumUn > 0 ? "pos" : sumUn < 0 ? "neg" : "flat", isDay: true, open: true } : null;
+    return el;
+  }
+  // ===== Gappers share card (pre-market gap-up / gap-down, ranked by %Gap; RVOL joined from the universe) =====
+  function buildGappersCardEl() {
+    const g = (typeof LIVE !== "undefined" && LIVE && LIVE.gappers) ? LIVE.gappers : { up: [], down: [] };
+    const up = (g.up || []).slice().sort((a, b) => (b.gp || 0) - (a.gp || 0));
+    const down = (g.down || []).slice().sort((a, b) => (a.gp || 0) - (b.gp || 0));
+    const nUp = up.length, nDown = down.length, total = nUp + nDown, denom = total || 1;
+    const ratio = nUp / denom;
+    const all = up.concat(down);
+    const over5 = all.filter(x => Math.abs(x.gp || 0) >= 5).length;
+    const over10 = all.filter(x => Math.abs(x.gp || 0) >= 10).length;
+    const rvolOf = sym => { if (!SCAN || !SCAN.rows) return null; const r = SCAN.rows.find(x => x.s === sym); return (r && r.tech && r.tech.rvol != null) ? r.tech.rvol : null; };
+    const usd = v => (v < 0 ? "−$" : "+$") + Math.abs(v || 0).toFixed(2);
+    const pctS = v => (v < 0 ? "−" : "+") + Math.abs(v || 0).toFixed(1) + "%";
+    const ms = todayMarketState();
+    // headline / state
+    let l1, kpiCls, brCls, brLbl;
+    if (total === 0) { l1 = "אין גאפרים פעילים כרגע"; kpiCls = "gap2-z"; brCls = "gap2-z"; brLbl = "ריק"; }
+    else if (ratio >= 0.6) { l1 = "<b>הגאפים העולים</b> שולטים בפתיחה"; kpiCls = "gap2-pos"; brCls = ""; brLbl = "נוטה לעלייה"; }
+    else if (ratio <= 0.4) { l1 = "<b>הגאפים היורדים</b> לוחצים בפתיחה"; kpiCls = "gap2-neg"; brCls = "gap2-neg"; brLbl = "נוטה לירידה"; }
+    else { l1 = "בוקר <b>מעורב</b> בגאפרים"; kpiCls = "gap2-z"; brCls = "gap2-z"; brLbl = "מעורב"; }
+    const rtag = ms ? '<span class="gap2-tag gap2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    const sub = total === 0 ? "כשהשוק ייפתח בגאפ הרשימה תתמלא אוטומטית" : (nUp + " גאפים עולים מול " + nDown + " יורדים · דירוג לפי %Gap");
+    // rows
+    const rvolBadge = sym => { const rv = rvolOf(sym); return rv != null ? '<span class="gap2-rvol">' + rv.toFixed(1) + "×</span>" : ""; };
+    const row = (x, i) => '<div class="gap2-rrow"><span class="gap2-rk">' + (i + 1) + '</span><span class="gap2-tk">' + escHtml(x.s) + "</span>" +
+      '<span class="gap2-gsub">' + usd(x.gd) + "</span>" + rvolBadge(x.s) +
+      '<span class="gap2-spacer"></span><span class="gap2-pc">' + pctS(x.gp) + "</span></div>";
+    const panelRows = arr => arr.length ? arr.slice(0, 5).map(row).join("") : '<div class="gap2-rrow"><span class="gap2-tk" style="color:var(--mftxt2)">—</span></div>';
+    // tiles
+    const bigUp = up[0], bigDn = down[0];
+    // insight
+    const t2 = up.slice(0, 2).map(x => x.s);
+    let insTxt;
+    if (total === 0) insTxt = "אין כרגע מניות בגאפ מעל 3% — חזור עם פתיחת המסחר והרשימה תתמלא.";
+    else if (ratio >= 0.6) insTxt = "פתיחה עם נטייה ברורה ל<b>גאפים עולים</b>" + (t2.length ? ", בהובלת <b>" + escHtml(t2[0]) + "</b>" + (t2[1] ? " ו<b>" + escHtml(t2[1]) + "</b>" : "") : "") + ".";
+    else if (ratio <= 0.4) insTxt = "ריכוז <b>גאפים יורדים</b> מרמז על פתיחה לחוצה ויותר סלקטיבית" + (bigDn ? ", עם <b>" + escHtml(bigDn.s) + "</b> בראש הירידות" : "") + ".";
+    else insTxt = "בוקר מעורב בגאפרים — אין כיוון ברור בפתיחה.";
+    const bg = Math.round(nUp / denom * 100), br = Math.max(0, 100 - bg);
+    const photo = _heroSquare ? '<img class="gap2-photo" src="' + _heroSquare + '">' : '<img class="gap2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "gap2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="gap2-hd">' + photo + '<div><div class="gap2-bt">StratNinja <span>Scanner</span></div><div class="gap2-bs">The Strat · גאפרים · פרה-מרקט</div></div>' +
+        (upd ? '<div class="gap2-upd"><span class="gap2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="gap2-ct">' +
+        '<div class="gap2-hero"><div class="gap2-htext"><div class="gap2-tags">' + rtag + '<span class="gap2-tag gap2-range">פרה-מרקט · פתיחת יום</span></div>' +
+          '<h1 class="' + kpiCls + '">' + l1 + '</h1><div class="gap2-sub">' + sub + "</div></div>" +
+          '<div class="gap2-big"><div class="gap2-kpi">' + nUp + '<span>/' + total + '</span></div><div class="gap2-cap">גאפים עולים</div></div></div>' +
+        '<div class="gap2-cols">' +
+          '<div class="gap2-col gap2-up"><div class="gap2-ch"><span class="gap2-cdot"></span> המובילים בגאפ-אפ</div>' + panelRows(up) + "</div>" +
+          '<div class="gap2-col gap2-dn"><div class="gap2-ch"><span class="gap2-cdot"></span> המובילים בגאפ-דאון</div>' + panelRows(down) + "</div></div>" +
+        '<div class="gap2-breadth"><div class="gap2-btop ' + brCls + '">מצב הגאפרים · <b>' + brLbl + "</b></div>" +
+          '<div class="gap2-bar"><span class="gap2-g" style="width:' + bg + '%"></span><span class="gap2-r" style="width:' + br + '%"></span></div>' +
+          '<div class="gap2-blabels"><span class="gap2-lup">▲ <span class="gap2-num">' + nUp + '</span> עולים</span><span class="gap2-sepd">·</span><span class="gap2-ldn"><span class="gap2-num">' + nDown + '</span> יורדים ▼</span></div></div>' +
+        '<div class="gap2-opp"><div class="gap2-oph"><span class="gap2-oic"></span> תמונת הגאפרים</div>' +
+          '<div class="gap2-otiles">' +
+            '<div class="gap2-ot"><div class="gap2-ov gap2-pos">' + (bigUp ? pctS(bigUp.gp) : "—") + '</div><div class="gap2-ok2">הגאף הגדול' + (bigUp ? " · " + escHtml(bigUp.s) : "") + '</div></div>' +
+            '<div class="gap2-ot"><div class="gap2-ov gap2-neg">' + (bigDn ? pctS(bigDn.gp) : "—") + '</div><div class="gap2-ok2">הגדול שלילי' + (bigDn ? " · " + escHtml(bigDn.s) : "") + '</div></div>' +
+            '<div class="gap2-ot"><div class="gap2-ov">' + over5 + '</div><div class="gap2-ok2">גאפים מעל 5%</div></div>' +
+            '<div class="gap2-ot gap2-ready"><span class="gap2-rdy">חזק</span><div class="gap2-ov">' + over10 + '</div><div class="gap2-ok2">גאפים ≥10%</div></div>' +
+          "</div></div>" +
+        '<div class="gap2-bottom"><div class="gap2-insight"><span class="gap2-mi">i</span><div><span class="gap2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="gap2-cta">למפת הגאפרים המלאה →</div></div>' +
+      "</div>" +
+      '<div class="gap2-ft"><span><b>stratninja.win</b> · נתוני פרה-מרקט</span><span>Adi Koriat · @KoriatTrade · <span class="gap2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== After / Pre-Market movers share card (reuses the approved gap2- design, movers data) =====
+  function buildMoversCardEl() {
+    const mins = (typeof _ilMinutes === "function") ? _ilMinutes() : 0;
+    const pre = (mins >= 11 * 60 && mins < 16 * 60 + 30);          // pre-market window; else after-market
+    const U = (LIVE && LIVE.universes && LIVE.universes.all) || LIVE || {};   // widest universe (big movers never hidden)
+    const data = (pre ? (U.premovers || (LIVE && LIVE.premovers)) : (U.aftermovers || (LIVE && LIVE.aftermovers))) || { up: [], down: [] };
+    const up = (data.up || []).slice().sort((a, b) => (b.gp || 0) - (a.gp || 0));
+    const down = (data.down || []).slice().sort((a, b) => (a.gp || 0) - (b.gp || 0));
+    const nUp = up.length, nDown = down.length, total = nUp + nDown, denom = total || 1;
+    const ratio = nUp / denom;
+    const all = up.concat(down);
+    const over10 = all.filter(x => Math.abs(x.gp || 0) >= 10).length;
+    const over20 = all.filter(x => Math.abs(x.gp || 0) >= 20).length;
+    const etfOf = sym => { if (!SCAN || !SCAN.rows) return ""; const r = SCAN.rows.find(x => x.s === sym); return r ? etfFor(r.sec) : ""; };
+    const pctS = v => (v < 0 ? "−" : "+") + Math.abs(v || 0).toFixed(1) + "%";
+    const priceS = v => "$" + (+v || 0).toFixed(2);
+    const ms = todayMarketState();
+    const winLbl = pre ? "פרה-מרקט" : "אפטר-מרקט";
+    const rangeLbl = pre ? "פרה-מרקט · לפני הפתיחה" : "אפטר-מרקט · אחרי הסגירה";
+    const upLbl = pre ? "עולות לפני הפתיחה" : "עולות אחרי הסגירה";
+    const dnLbl = pre ? "יורדות לפני הפתיחה" : "יורדות אחרי הסגירה";
+    const whenTxt = pre ? "לפני הפתיחה" : "אחרי הסגירה";
+    let l1, kpiCls, brCls, brLbl;
+    if (total === 0) { l1 = "אין כרגע תנועות משמעותיות"; kpiCls = "gap2-z"; brCls = "gap2-z"; brLbl = "ריק"; }
+    else if (ratio >= 0.6) { l1 = "<b>העולות</b> שולטות " + whenTxt; kpiCls = "gap2-pos"; brCls = ""; brLbl = "נוטה לעלייה"; }
+    else if (ratio <= 0.4) { l1 = "<b>היורדות</b> לוחצות " + whenTxt; kpiCls = "gap2-neg"; brCls = "gap2-neg"; brLbl = "נוטה לירידה"; }
+    else { l1 = "מסחר <b>מעורב</b> " + whenTxt; kpiCls = "gap2-z"; brCls = "gap2-z"; brLbl = "מעורב"; }
+    const rtag = ms ? '<span class="gap2-tag gap2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    const sub = total === 0 ? "כשיתחיל מסחר מחוץ לשעות, הרשימה תתמלא אוטומטית" : (nUp + " עולות מול " + nDown + " יורדות · דירוג לפי % תנועה");
+    const row = (x, i) => '<div class="gap2-rrow"><span class="gap2-rk">' + (i + 1) + '</span><span class="gap2-tk">' + escHtml(x.s) + "</span>" +
+      '<span class="gap2-gsub">' + priceS(x.price) + "</span>" + (etfOf(x.s) ? '<span class="gap2-etf">' + etfOf(x.s) + "</span>" : "") +
+      '<span class="gap2-spacer"></span><span class="gap2-pc">' + pctS(x.gp) + "</span></div>";
+    const panelRows = arr => arr.length ? arr.slice(0, 5).map(row).join("") : '<div class="gap2-rrow"><span class="gap2-tk" style="color:var(--mftxt2)">—</span></div>';
+    const bigUp = up[0], bigDn = down[0];
+    const t2 = up.slice(0, 2).map(x => x.s);
+    let insTxt;
+    if (total === 0) insTxt = "אין כרגע מניות בתנועה משמעותית " + whenTxt + " — חזור מאוחר יותר והרשימה תתמלא.";
+    else if (ratio >= 0.6) insTxt = "התנועה " + whenTxt + " נוטה כלפי מעלה" + (t2.length ? ", בהובלת <b>" + escHtml(t2[0]) + "</b>" + (t2[1] ? " ו<b>" + escHtml(t2[1]) + "</b>" : "") : "") + ".";
+    else if (ratio <= 0.4) insTxt = "ריכוז <b>ירידות</b> " + whenTxt + (bigDn ? ", עם <b>" + escHtml(bigDn.s) + "</b> בראש היורדות" : "") + ".";
+    else insTxt = "מסחר מעורב " + whenTxt + " — אין כיוון ברור.";
+    const bg = Math.round(nUp / denom * 100), br = Math.max(0, 100 - bg);
+    const photo = _heroSquare ? '<img class="gap2-photo" src="' + _heroSquare + '">' : '<img class="gap2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "gap2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="gap2-hd">' + photo + '<div><div class="gap2-bt">StratNinja <span>Scanner</span></div><div class="gap2-bs">The Strat · ' + winLbl + '</div></div>' +
+        (upd ? '<div class="gap2-upd"><span class="gap2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="gap2-ct">' +
+        '<div class="gap2-hero"><div class="gap2-htext"><div class="gap2-tags">' + rtag + '<span class="gap2-tag gap2-range">' + rangeLbl + '</span></div>' +
+          '<h1 class="' + kpiCls + '">' + l1 + '</h1><div class="gap2-sub">' + sub + "</div></div>" +
+          '<div class="gap2-big"><div class="gap2-kpi">' + nUp + '<span>/' + total + '</span></div><div class="gap2-cap">עולות</div></div></div>' +
+        '<div class="gap2-cols">' +
+          '<div class="gap2-col gap2-up"><div class="gap2-ch"><span class="gap2-cdot"></span> ' + upLbl + '</div>' + panelRows(up) + "</div>" +
+          '<div class="gap2-col gap2-dn"><div class="gap2-ch"><span class="gap2-cdot"></span> ' + dnLbl + '</div>' + panelRows(down) + "</div></div>" +
+        '<div class="gap2-breadth"><div class="gap2-btop ' + brCls + '">מצב התנועות · <b>' + brLbl + "</b></div>" +
+          '<div class="gap2-bar"><span class="gap2-g" style="width:' + bg + '%"></span><span class="gap2-r" style="width:' + br + '%"></span></div>' +
+          '<div class="gap2-blabels"><span class="gap2-lup">▲ <span class="gap2-num">' + nUp + '</span> עולות</span><span class="gap2-sepd">·</span><span class="gap2-ldn"><span class="gap2-num">' + nDown + '</span> יורדות ▼</span></div></div>' +
+        '<div class="gap2-opp"><div class="gap2-oph"><span class="gap2-oic"></span> תמונת התנועות</div>' +
+          '<div class="gap2-otiles">' +
+            '<div class="gap2-ot"><div class="gap2-ov gap2-pos">' + (bigUp ? pctS(bigUp.gp) : "—") + '</div><div class="gap2-ok2">התנועה הגדולה' + (bigUp ? " · " + escHtml(bigUp.s) : "") + '</div></div>' +
+            '<div class="gap2-ot"><div class="gap2-ov gap2-neg">' + (bigDn ? pctS(bigDn.gp) : "—") + '</div><div class="gap2-ok2">הגדולה שלילית' + (bigDn ? " · " + escHtml(bigDn.s) : "") + '</div></div>' +
+            '<div class="gap2-ot"><div class="gap2-ov">' + over10 + '</div><div class="gap2-ok2">תנועות ≥10%</div></div>' +
+            '<div class="gap2-ot gap2-ready"><span class="gap2-rdy">חזק</span><div class="gap2-ov">' + over20 + '</div><div class="gap2-ok2">תנועות ≥20%</div></div>' +
+          "</div></div>" +
+        '<div class="gap2-bottom"><div class="gap2-insight"><span class="gap2-mi">i</span><div><span class="gap2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="gap2-cta">לכל התנועות →</div></div>' +
+      "</div>" +
+      '<div class="gap2-ft"><span><b>stratninja.win</b> · נתוני ' + winLbl + '</span><span>Adi Koriat · @KoriatTrade · <span class="gap2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ===== Candle Map share card (higher-TF Strat structure distribution across D/W/M/Q/Y) =====
+  function buildCandleMapCardEl() {
+    const cols = ["D", "W", "M", "Q", "Y"];
+    const rows = (typeof cmapRows === "function") ? cmapRows() : [];
+    const total = rows.length;
+    const counts = {}; CMAP_ROWS.forEach(r => counts[r[0]] = { D: 0, W: 0, M: 0, Q: 0, Y: 0 });
+    rows.forEach(row => cols.forEach(tf => { const b = candleBucket(row[tf]); if (counts[b]) counts[b][tf]++; }));
+    // dominant structure = the single biggest cell (type × timeframe), per Adi
+    const dom = _cmDomCell(counts, cols); const domB = dom.b;
+    // strongest timeframe (max bull-bear) + how many timeframes lean bullish
+    let bestTf = null, bestScore = -Infinity, tfBull = 0;
+    cols.forEach(tf => {
+      const bull = (counts["2U"][tf] || 0) + (counts["3G"][tf] || 0) + (counts["F2D"][tf] || 0);
+      const bear = (counts["2D"][tf] || 0) + (counts["3R"][tf] || 0) + (counts["F2U"][tf] || 0);
+      if (bull - bear > bestScore) { bestScore = bull - bear; bestTf = tf; }
+      if (bull > bear) tfBull++;
+    });
+    const lead = (mktU().sectorLeaders || [])[0];
+    const DLBL = { "2U": "המשך עולה", "2D": "המשך יורד", "1": "דשדוש", "3G": "התרחבות", "3R": "התרחבות", "F2D": "היפוך 2D", "F2U": "היפוך 2U" };
+    const domLbl = DLBL[domB] || domB || "—";
+    const domCls = _cmBull(domB) ? "cm2-pos" : _cmBear(domB) ? "cm2-neg" : "cm2-z";
+    const pct = Math.round(tfBull / 5 * 100);
+    const ms = todayMarketState();
+    const rtag = ms ? '<span class="cm2-tag cm2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    const l1 = total === 0 ? "אין עדיין נתוני מבנה" : "השוק במבנה <b>" + domLbl + "</b>";
+    const sub = total === 0 ? "נתוני הסורק ייטענו בקרוב" : ("המבנה הדומיננטי: " + (domB || "—") + " · " + total + " מניות נסרקו");
+    // per-timeframe dominant structure + count (D..Y → renders RTL with D on the right)
+    const tfTiles = cols.map(tf => {
+      let bk = null, bn = -1; CMAP_ROWS.forEach(([k]) => { if ((counts[k][tf] || 0) > bn) { bn = counts[k][tf]; bk = k; } });
+      const cls = _cmBull(bk) ? "cm2-up" : _cmBear(bk) ? "cm2-dn" : "cm2-nt";
+      return '<div class="cm2-tft ' + cls + '"><div class="cm2-tfn">' + (TF_HE[tf] || tf) + '</div><div class="cm2-tfb">' + (bk || "—") + '</div><div class="cm2-tfc">' + bn + ' מניות</div></div>';
+    }).join("");
+    const secHeLead = lead ? secHe(lead.name) : "—";
+    let insTxt;
+    if (total === 0) insTxt = "נתוני מפת הנרות ייטענו בהרצת הסורק הבאה.";
+    else insTxt = "השוק במבנה <b>" + (domB || "—") + "</b> (" + domLbl + ") עם <b>" + tfBull + "</b> מתוך 5 טווחים חיוביים" + (lead ? ", בהובלת סקטור ה<b>" + escHtml(secHeLead) + "</b>" : "") + ".";
+    const photo = _heroSquare ? '<img class="cm2-photo" src="' + _heroSquare + '">' : '<img class="cm2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "cm2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="cm2-hd">' + photo + '<div><div class="cm2-bt">StratNinja <span>Scanner</span></div><div class="cm2-bs">The Strat · Candle Map</div></div>' +
+        (upd ? '<div class="cm2-upd"><span class="cm2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="cm2-ct">' +
+        '<div class="cm2-hero"><div class="cm2-htext"><div class="cm2-tags">' + rtag + '<span class="cm2-tag cm2-range">Candle Map · S&P 500</span></div>' +
+          '<h1 class="' + domCls + '">' + l1 + '</h1><div class="cm2-sub">' + sub + "</div></div>" +
+          '<div class="cm2-big"><div class="cm2-kpi">' + tfBull + '<span>/5</span></div><div class="cm2-kpct">' + pct + '%</div><div class="cm2-cap">טווחי זמן חיוביים</div></div></div>' +
+        '<div class="cm2-pills">' +
+          '<div class="cm2-pill cm2-pteal"><span class="cm2-pl"><span class="cm2-ico">🕯️</span> מבנה דומיננטי</span><span class="cm2-pv cm2-teal">' + (domB || "—") + ' · ' + (TF_HE[dom.tf] || dom.tf) + ' · ' + dom.n + '</span></div>' +
+          '<div class="cm2-pill cm2-pgold"><span class="cm2-pl"><span class="cm2-ico">⏳</span> טווח הזמן החזק</span><span class="cm2-pv cm2-gold">' + (bestTf ? (TF_HE[bestTf] || bestTf) : "—") + '</span></div>' +
+          '<div class="cm2-pill cm2-pgreen"><span class="cm2-pl"><span class="cm2-ico">🏆</span> סקטור מוביל</span><span class="cm2-pv cm2-pos">' + escHtml(secHeLead) + '</span></div>' +
+        "</div>" +
+        '<div class="cm2-tfsec"><div class="cm2-tflbl"><span class="cm2-ic"></span> המבנה השולט בכל טווח זמן</div><div class="cm2-tfrow">' + tfTiles + "</div></div>" +
+        '<div class="cm2-bottom"><div class="cm2-insight"><span class="cm2-mi">i</span><div><span class="cm2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="cm2-cta">למפת המבנים המלאה →</div></div>' +
+      "</div>" +
+      '<div class="cm2-ft"><span><b>stratninja.win</b> · Candle Map</span><span>Adi Koriat · @KoriatTrade · <span class="cm2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  function buildLeadersCardEl() {
+    const U = mktU();
+    // only real SPDR-sector rows (drop non-ETF buckets like "אחר"/Crypto so the headline + panels stay clean)
+    const _secReal = x => !!etfFor(x.name);
+    const secUp = (U.sectorLeaders || []).filter(_secReal).slice(0, 4), secDn = (U.sectorLaggards || []).filter(_secReal).slice(0, 4);
+    const stkUp = (U.leaders || []).slice(0, 4), stkDn = (U.laggards || []).slice(0, 4);
+    const fmt = v => (v >= 0 ? "+" : "−") + Math.abs(+v || 0).toFixed(1) + "%";
+    // color each row by its OWN return sign (not the panel): + green · − red · ~0 gray
+    const signCls = v => (+v >= 0.05 ? "ld2-p" : +v <= -0.05 ? "ld2-n" : "ld2-z");
+    // per-panel bar width scaled to that panel's strongest mover
+    const barW = (arr, v) => { const mx = Math.max.apply(null, arr.map(a => Math.abs(+a.chg || 0)).concat([0.0001])); return Math.max(20, Math.round(Math.abs(+v || 0) / mx * 100)); };
+    const srow = (arr, x, i) => '<div class="ld2-srow ' + signCls(x.chg) + '"><span class="ld2-rk">' + (i + 1) + '</span><span class="ld2-snm">' + escHtml(secHe(x.name)) + '</span>' +
+      (etfFor(x.name) ? '<span class="ld2-etf">' + etfFor(x.name) + '</span>' : '') +
+      '<span class="ld2-bar"><span style="width:' + barW(arr, x.chg) + '%"></span></span><span class="ld2-pc">' + fmt(x.chg) + '</span></div>';
+    const trow = (x, i) => '<div class="ld2-trow ' + signCls(x.c) + '"><span class="ld2-rk">' + (i + 1) + '</span><span class="ld2-tk">' + escHtml(x.s) + '</span>' +
+      (etfFor(x.sec) ? '<span class="ld2-etf">' + etfFor(x.sec) + '</span>' : '') +
+      '<span class="ld2-spacer"></span><span class="ld2-pc">' + fmt(x.c) + '</span></div>';
+    const emptyS = '<div class="ld2-srow" style="color:var(--mftxt2)">אין נתונים</div>';
+    const emptyT = '<div class="ld2-trow" style="color:var(--mftxt2)">אין נתונים</div>';
+    const secUpH = secUp.length ? secUp.map((x, i) => srow(secUp, x, i)).join("") : emptyS;
+    const secDnH = secDn.length ? secDn.map((x, i) => srow(secDn, x, i)).join("") : emptyS;
+    const stkUpH = stkUp.length ? stkUp.map((x, i) => trow(x, i)).join("") : emptyT;
+    const stkDnH = stkDn.length ? stkDn.map((x, i) => trow(x, i)).join("") : emptyT;
+    // hero headline (color the SUBJECT sector), KPI = gap between the extremes
+    const L0 = secUp[0], D0 = secDn[0];
+    const gap = ((L0 ? +L0.chg : 0) - (D0 ? +D0.chg : 0));
+    const h1 = (L0 && D0)
+      ? '<b class="g">' + escHtml(secHeDef(L0.name)) + '</b> בהובלה — <b class="r">' + escHtml(secHeDef(D0.name)) + '</b> מאחור'
+      : 'מובילים ומפגרים של היום';
+    const hint = (L0 && D0 && etfFor(L0.name) && etfFor(D0.name))
+      ? '<span class="n">' + etfFor(L0.name) + '</span> מול <span class="n">' + etfFor(D0.name) + '</span> · מוביל מול חלש' : 'מוביל מול חלש';
+    const ms = todayMarketState();
+    const rtag = ms ? '<span class="ld2-tag ld2-' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</span>" : "";
+    // dynamic Ninja Insight from top-2 each side (real data only)
+    let insTxt;
+    if (!secUp.length && !secDn.length) insTxt = "נתוני המובילים והמפגרים ייטענו בהרצת הסורק הבאה.";
+    else {
+      // leaders keep the indefinite name (prefixed by ב → "מרוכזת באנרגיה"); laggards use the
+      // definite form (חומרי הגלם / הנדל"ן) so the sentence reads correctly.
+      const leadTxt = secUp.slice(0, 2).map(x => "<b>" + escHtml(secHe(x.name)) + "</b>").join(" ו");
+      const lagTxt = secDn.slice(0, 2).map(x => "<b>" + escHtml(secHeDef(x.name)) + "</b>").join(" ו");
+      insTxt = (leadTxt ? "ההובלה מרוכזת ב" + leadTxt : "") + (leadTxt && lagTxt ? ", בעוד " + lagTxt + " מפגרות." : (lagTxt ? lagTxt + " מפגרות." : "."));
+    }
+    const photo = _heroSquare ? '<img class="ld2-photo" src="' + _heroSquare + '">' : '<img class="ld2-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    const upd = _mfIlTime();
+    const el = document.createElement("div"); el.className = "ld2-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="ld2-hd">' + photo + '<div><div class="ld2-bt">StratNinja <span>Scanner</span></div><div class="ld2-bs">The Strat · מובילים ומפגרים</div></div>' +
+        (upd ? '<div class="ld2-upd"><span class="ld2-dot"></span> עודכן ' + upd + "</div>" : "") + "</div>" +
+      '<div class="ld2-ct">' +
+        '<div class="ld2-hero"><div class="ld2-htext"><div class="ld2-tags">' + rtag + '<span class="ld2-tag ld2-range">טווח נבדק · 1D</span></div>' +
+          '<h1>' + h1 + '</h1><div class="ld2-sub">המובילים והמפגרים של היום לפי ביצוע יחסי</div></div>' +
+          '<div class="ld2-big"><div class="ld2-kpi">' + fmt(gap).replace("+", "") + '</div><div class="ld2-cap">פער בין הקצוות</div><div class="ld2-hint">' + hint + '</div></div></div>' +
+        '<div class="ld2-zone"><div class="ld2-zlbl"><span class="ld2-ic"></span> סקטורים<span class="ld2-zt">· מובילים מול מפגרים</span></div>' +
+          '<div class="ld2-cols">' +
+            '<div class="ld2-col ld2-up"><div class="ld2-ch"><span class="ld2-cd"></span> הסקטורים המובילים</div>' + secUpH + '</div>' +
+            '<div class="ld2-col ld2-dn"><div class="ld2-ch"><span class="ld2-cd"></span> הסקטורים המפגרים</div>' + secDnH + '</div>' +
+          '</div></div>' +
+        '<div class="ld2-zone"><div class="ld2-zlbl"><span class="ld2-ic" style="background:var(--mfpos);box-shadow:0 0 0 4px rgba(50,214,154,.14)"></span> מניות<span class="ld2-zt">· מובילות מול מפגרות</span></div>' +
+          '<div class="ld2-cols">' +
+            '<div class="ld2-col ld2-up"><div class="ld2-ch"><span class="ld2-cd"></span> המניות המובילות</div>' + stkUpH + '</div>' +
+            '<div class="ld2-col ld2-dn"><div class="ld2-ch"><span class="ld2-cd"></span> המניות המפגרות</div>' + stkDnH + '</div>' +
+          '</div></div>' +
+        '<div class="ld2-bottom"><div class="ld2-insight"><span class="ld2-mi">i</span><div><span class="ld2-lbl">Ninja Insight:</span> ' + insTxt + "</div></div>" +
+          '<div class="ld2-cta">למפת המובילים והמפגרים →</div></div>' +
+      "</div>" +
+      '<div class="ld2-ft"><span><b>stratninja.win</b> · מובילים ומפגרים</span><span>Adi Koriat · @KoriatTrade · <span class="ld2-num">' + new Date().toLocaleDateString("he-IL") + "</span></span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  function buildShareCardEl() {
+    const s = shareSummaryFor(state.page);
+    const el = document.createElement("div");
+    el.className = "share-card";
+    el.style.cssText = "position:fixed;left:-9999px;top:0;width:1000px;z-index:-1;";
+    const photo = _heroSquare
+      ? '<img class="sc-photo" src="' + _heroSquare + '">'
+      : '<img class="sc-photo" src="hero.jpg" crossorigin="anonymous" onerror="this.style.display=\'none\'">';
+    el.innerHTML =
+      '<div class="sc-top"><img class="sc-logo" src="ninja-icon.png?v=4" crossorigin="anonymous">' +
+        '<div><div class="sc-title">StratNinja <span>Scanner</span></div><div class="sc-sub">סריקת שוק בזמן אמת · The Strat</div></div>' +
+        photo + "</div>" +
+      '<div class="sc-body">' +
+        '<div class="sc-mode ' + s.cls + '">' + s.headline + "</div>" +
+        (s.bodyHtml ? s.bodyHtml :
+          ((s.strip ? '<div class="sc-strip">' + s.strip + "</div>" : "") +
+           (s.picks ? '<div class="sc-picks-lbl">' + s.picksLabel + '</div><div class="sc-picks">' + s.picks + "</div>" : ""))) +
+      "</div>" +
+      '<div class="sc-foot"><span>Adi Koriat · @KoriatTrade</span><span>stratninja.win · ' + new Date().toLocaleDateString("he-IL") + "</span></div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  // ── 🙏 Ninja trade/position share card (premium 1080×1350) ──
+  function buildNinjaTradeCardEl(t) {
+    const el = document.createElement("div");
+    el.className = "ninja-card";   // background = the ninja-card.png template; we overlay only the data
+    const dir = t.dir === "short" ? "short" : "long", isLong = dir === "long";
+    const roi = t.roi == null ? 0 : t.roi;
+    const roiStr = (roi >= 0 ? "+" : "−") + Math.abs(roi).toFixed(2) + "%";
+    const money2 = v => (v == null ? "—" : Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    el.innerHTML =
+      '<div class="njt njt-sym">' + escHtml(t.sym || "") + (t.atype ? ' <span class="njt-atype">' + escHtml(t.atype) + "</span>" : "") + "</div>" +
+      '<div class="njt njt-side ' + dir + '">' + (isLong ? "▲ Long" : "▼ Short") + "</div>" +
+      (t.dateStr ? '<div class="njt njt-date">' + escHtml(t.dateStr) + "</div>" : "") +   // date sits in the right slot (where qty was)
+      '<div class="njt njt-status ' + (t.live ? "open" : "closed") + '">' + (t.live ? "● פוזיציה פתוחה · Unrealized P&L" : "✓ עסקה סגורה · Realized P&L") + "</div>" +
+      '<div class="njt njt-roi ' + (roi >= 0 ? "pos" : "neg") + '">' + roiStr + "</div>" +
+      '<div class="njt njt-elbl">ENTRY PRICE</div>' +
+      '<div class="njt njt-xlbl">' + (t.live ? "CURRENT PRICE" : "EXIT PRICE") + "</div>" +
+      '<div class="njt njt-entry">' + money2(t.entry) + "</div>" +
+      '<div class="njt njt-exit">' + money2(t.exit) + "</div>";
+    document.body.appendChild(el);
+    return el;
+  }
+  function _ninjaTrades() {
+    const cl = _journalClosedTrades() || [];
+    const norm = cl.filter(t => t.exitPrice != null && t.entryPrice).map(t => {
+      const dir = t.direction === "short" ? "short" : "long";
+      // NET return on capital (P&L after fees ÷ cost) — matches the journal table's % exactly
+      const pv = Math.abs((+t.entryPrice || 0) * (+t.qty || 0) * (+t.mult || 1));
+      const roi = (pv && t.pnl != null) ? (t.pnl / pv * 100)
+        : (dir === "short" ? (t.entryPrice - t.exitPrice) : (t.exitPrice - t.entryPrice)) / t.entryPrice * 100;
+      return { sym: String(t.symbol || "").split(" ")[0], atype: t.assetType === "option" ? "Options" : "Stock", dir,
+        qty: t.qty, entry: t.entryPrice, exit: t.exitPrice, roi: roi, pnl: t.pnl, dateStr: t.exitDate || "", live: false, _ts: t.exitDate || "" };
+    });
+    norm.sort((a, b) => (b._ts < a._ts ? -1 : b._ts > a._ts ? 1 : 0));
+    return norm;
+  }
+  function openNinjaCardPicker() {
+    const list = _ninjaTrades();
+    if (!list.length) { snToast("אין עדיין עסקאות סגורות לשיתוף — הוסף/ייבא עסקאות ביומן"); return; }
+    const rows = list.slice(0, 50).map((t, i) =>
+      '<button class="btn ghost" data-nj="' + i + '" style="text-align:start;padding:11px 13px;display:flex;justify-content:space-between;gap:10px;align-items:center">' +
+        '<span style="font-weight:800">' + t.sym + ' <span style="opacity:.6;font-weight:500;font-size:12px">' + t.dateStr + " · " + (t.dir === "long" ? "לונג" : "שורט") + "</span></span>" +
+        '<span class="' + (t.roi >= 0 ? "pos" : "neg") + '" style="font-weight:800">' + (t.roi >= 0 ? "+" : "−") + Math.abs(t.roi).toFixed(2) + "%</span></button>").join("");
+    modal("💼 בחר עסקה לכרטיס", '<div style="display:flex;flex-direction:column;gap:6px;max-height:62vh;overflow:auto">' + rows + "</div>");
+    document.querySelectorAll("[data-nj]").forEach(b => b.onclick = () => { const t = list[+b.dataset.nj]; closeModal(); _captureRedesignCard(() => buildNinjaTradeCardEl(t)); });
+  }
+  function openJournalShareChooser() {
+    modal("📤 שיתוף מהיומן",
+      '<div style="display:flex;flex-direction:column;gap:10px">' +
+        '<button class="btn primary" id="jshNinja" style="text-align:start;padding:13px">💼 כרטיס עסקה בודדת (נינג\'ה)' +
+          '<div style="font-size:11px;font-weight:400;opacity:.85;margin-top:3px">כרטיס פרימיום לעסקה — טיקר, כיוון, ROI, כניסה/יציאה</div></button>' +
+        '<button class="btn ghost" id="jshSummary" style="text-align:start;padding:13px">📊 כרטיס סיכום תקופה' +
+          '<div style="font-size:11px;font-weight:400;opacity:.7;margin-top:3px">סיכום יום/תקופה עם סטטיסטיקות</div></button>' +
+      "</div>");
+    { const a = document.getElementById("jshNinja"); if (a) a.onclick = () => { closeModal(); openNinjaCardPicker(); }; }
+    { const b = document.getElementById("jshSummary"); if (b) b.onclick = () => { closeModal(); openJournalSharePicker(); }; }
+  }
+  // exposed so the journal (journal.js) can share ONE specific trade/position as a ninja card.
+  // t = { sym, dir:"long"|"short", entry, exit, roi, dateStr, live:bool }
+  window.snShareTradeCard = function (t) {
+    try {
+      if (!t || t.entry == null) { snToast && snToast("אין מספיק נתונים לכרטיס"); return; }
+      _captureRedesignCard(() => buildNinjaTradeCardEl(t));
+    } catch (e) {}
+  };
+  function captureShare() {
+    if (typeof html2canvas !== "function") { snToast("כלי הצילום עדיין נטען — נסה שוב בעוד רגע"); return; }
+    const body = '<div style="display:flex;flex-direction:column;gap:10px">' +
+      '<button class="btn primary" id="capSummary" style="font-size:14px;padding:13px;text-align:start">🖼️ כרטיס סיכום מעוצב<div style="font-size:11px;font-weight:400;opacity:.85;margin-top:3px">תמונה ממותגת עם סיכום מה שאתה רואה בערוץ הנוכחי</div></button>' +
+      '<button class="btn ghost" id="capFull" style="font-size:14px;padding:13px;text-align:start">📸 צילום מסך מלא<div style="font-size:11px;font-weight:400;opacity:.7;margin-top:3px">צילום של כל המסך כמו שהוא כרגע</div></button>' +
+      "</div>";
+    modal("📷 צילום ושיתוף", body);
+    { const a = document.getElementById("capSummary"); if (a) a.onclick = () => { closeModal(); captureSummaryCard(); }; }
+    { const b = document.getElementById("capFull"); if (b) b.onclick = () => { closeModal(); captureFullScreen(); }; }
+  }
+  // Capture resolution: supersample by the screen's pixel density (≥2×, capped 4×) so the exported
+  // PNG is as crisp as the live site — a fixed scale:2 looked soft on Hi-DPI displays.
+  function _shotScale() { return Math.min(4, Math.max(2, Math.round((window.devicePixelRatio || 1) * 2))); }
+  // on the market-overview page, first let the user pick WHICH section to share
+  const _MKT_SHARE_OPTS = [
+    ["state", "📡 מצב השוק", "Risk-On/Off · מדדים · VIX · רוחב שוק"],
+    ["candlemap", "🗺️ Candle Map", "התפלגות הנרות · המבנה הדומיננטי + הידעת?"],
+    ["leaders", "🏆 מובילים ומפגרים", "סקטורים ומניות מובילות / בפיגור"],
+    ["movers", "🌙 After / Pre-Market", "תנועות אחרי הסגירה / לפני הפתיחה"],
+  ];
+  // ---- breadth share card — overlays live data (NO sparklines, cleaner) on Breath_Template.png (1122×1402) ----
+  function buildBreadthCardEl() {
+    if (!BREADTH_DATA) { try { loadBreadth(); } catch (e) {} }
+    const MAS_LR = ["200", "150", "100", "50", "20"];       // left→right, matching the baked template
+    const cardL = [2.5, 21.9, 41.3, 60.7, 80.1];            // 5 MA-card left edges (% of 1122) — calibrate to taste
+    const _fmt = v => v == null ? "—" : String(Math.round(v));   // template bakes the "%" unit in each card
+    const _zc = v => v == null ? "" : _brdZoneCls(v);
+    const maCards = uni => {
+      const r = _brdReadings(uni) || {};
+      return MAS_LR.map((n, i) => { const cur = r[n];
+        return '<div class="b2-ma b2-ma' + i + " " + _zc(cur) + '" style="left:' + cardL[i] + '%"><span class="b2-ma-pct">' + _fmt(cur) + "</span></div>"; }).join("");
+    };
+    const spSt = _brdState(_brdReadings("sp")), ndxSt = _brdState(_brdReadings("ndx"));
+    const sp50 = (_brdReadings("sp") || {})["50"];
+    // 3 top cards: פוקוס יומי = 50D S&P · רוחב שוק = S&P weighted score · מצב שוק = Nasdaq weighted score
+    const topFocus = sp50, topBreadth = spSt ? spSt.score : null, topState = ndxSt ? ndxSt.score : null;
+    let insight;
+    if (spSt && ndxSt) {
+      const weaker = spSt.score <= ndxSt.score ? "S&P 500" : "Nasdaq 100";
+      const lean = (spSt.score + ndxSt.score) / 2;
+      const tone = lean <= 40 ? "עם נטייה לחולשה" : lean >= 60 ? "עם נטייה לחוזק" : "מעורב ומאוזן";
+      insight = "רוחב השוק " + tone + ". מדד " + weaker + " חלש יותר" + (lean <= 40 ? " ומתקרב לרמות מכירת-יתר (אזור קנייה)" : "") + ".";
+    } else insight = "נתוני רוחב השוק נטענים…";
+    const el = document.createElement("div"); el.className = "breadth-card2"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="b2-top b2-focus ' + _zc(topFocus) + '">' + _fmt(topFocus) + "</div>" +
+      '<div class="b2-top b2-breadth ' + _zc(topBreadth) + '">' + _fmt(topBreadth) + "</div>" +
+      '<div class="b2-top b2-state ' + _zc(topState) + '">' + _fmt(topState) + "</div>" +
+      '<div class="b2-sp">' + maCards("sp") + "</div>" +
+      '<div class="b2-ndx">' + maCards("ndx") + "</div>" +
+      '<div class="b2-insight">' + insight + "</div>";
+    document.body.appendChild(el); return el;
+  }
+  function buildBreadthCardElOLD() {
+    if (!BREADTH_DATA) { try { loadBreadth(); } catch (e) {} }
+    const MAS_LR = ["200", "150", "100", "50", "20"];     // left→right, matching the baked template
+    const cardL = [1.5, 21.2, 40.9, 60.6, 80.3];          // card left edges (% of 1254) — 5 cards fit the canvas
+    const BRD_SPARK_N = 63;                               // sparkline window ≈ 1 quarter (was 22 ≈ month)
+    const _spark = (s, cls) => {
+      const v = (s || []).map(x => x && x.v).filter(x => x != null);
+      if (v.length < 2) return "";
+      const w = 100, h = 34;
+      // map value → y so it lines up with the baked zones. Anchors (fraction from TOP of box):
+      // value 25 → 0.68 (green-zone top) · value 50 → 0.47 (dashed midline)  →  y = h*(0.89 − 0.0084*value)
+      const _y = val => Math.max(0, Math.min(h, h * (0.89 - 0.0084 * Math.max(0, Math.min(100, val)))));
+      const pts = v.map((val, i) => (i / (v.length - 1) * w).toFixed(1) + "," + _y(val).toFixed(1)).join(" ");
+      const stroke = cls === "pos" ? "#12e070" : cls === "neg" ? "#ff6b7a" : "#eaf2ff";   // stronger/more vivid green for oversold-improving lines
+      return '<svg viewBox="0 0 100 34" preserveAspectRatio="none" style="width:100%;height:100%;display:block"><polyline points="' + pts + '" fill="none" stroke="' + stroke + '" stroke-width="1.05" stroke-linejoin="round"/></svg>';
+    };
+    const cards = (uni, rowCls) => {
+      const readings = _brdReadings(uni) || {};
+      const data = (BREADTH_DATA && BREADTH_DATA[uni]) || {};
+      return MAS_LR.map((n, i) => {
+        let s = (data[n] || []).slice();
+        if (readings[n] != null && s.length) s[s.length - 1] = { d: s[s.length - 1].d, v: readings[n] };
+        const cur = readings[n] != null ? readings[n] : (s.length ? s[s.length - 1].v : null);
+        const prev = s.length >= 2 ? s[s.length - 2].v : null;
+        const dchg = (cur != null && prev != null) ? (cur - prev) : null;
+        const dcls = dchg == null ? "zero" : dchg > 0.05 ? "pos" : dchg < -0.05 ? "neg" : "zero";
+        const dtxt = dchg == null ? "" : (dchg >= 0 ? "▲ " : "▼ ") + Math.abs(dchg).toFixed(1);
+        const zcls = dchg != null && dchg > 0.1 ? "pos" : "";   // line green when today's breadth improves, else white
+        const sSpark = s.slice(-BRD_SPARK_N);   // last ~month (clearer than the full 180d)
+        return '<div class="brd-card ' + rowCls + ' brd-c' + i + '" style="left:' + cardL[i] + '%">' +
+          '<div class="brd-spk">' + _spark(sSpark, zcls) + "</div>" +
+          '<span class="brd-pct">' + (cur == null ? "—" : cur.toFixed(0) + "%") + "</span>" +
+          (dtxt ? '<span class="brd-chg ' + dcls + '">' + dtxt + "</span>" : "") +
+          "</div>";
+      }).join("");
+    };
+    const _st = uni => _brdState(_brdReadings(uni));
+    // card state pill: market STRENGTH colouring (weak→red▼, neutral→yellow▬, strong→green▲) + arrow
+    const _cardState = uni => {
+      const st = _st(uni); if (!st) return null;
+      const s = st.score;
+      // Oversold = buy zone → GREEN. Overbought also GREEN (per Adi's backtests it does NOT signal a
+      // reversal; only oversold does). Neutral = yellow.
+      if (s <= 40) return { txt: s <= 20 ? "חלש מאוד · Oversold עמוק" : "חלש · מתקרב ל-oversold", cls: "pos", arrow: "▼" };
+      if (s <= 60) return { txt: "ניטרלי · תמיכה יציבה", cls: "zero", arrow: "▬" };
+      return { txt: s >= 80 ? "חזק מאוד · Overbought" : "חזק · מתקרב ל-overbought", cls: "pos", arrow: "▲" };
+    };
+    const _pillHtml = cs => cs ? '<span class="brd-state-pill"><span class="brd-state-arrow">' + cs.arrow + "</span> " + cs.txt + "</span>" : '<span class="brd-state-pill">—</span>';
+    const _desc = (uni, st) => {
+      const nm = uni === "sp" ? "ה-S&P 500" : "Nasdaq 100";
+      if (!st) return "";
+      const s = st.score;
+      const l = s <= 20 ? ["חלש מאוד", "באזור Oversold עמוק — לרוב אזור קנייה."]
+        : s <= 40 ? ["חלש", "נמצא קרוב לרמות מכירת יתר (Oversold)."]
+        : s <= 60 ? ["ניטרלי", "מאוזן יחסית."]
+        : s <= 80 ? ["חזק", "מתקרב לרמות קניית-יתר (Overbought)."]
+        : ["חזק מאוד", "באזור Overbought — זהירות מהתחממות."];
+      return "רוחב השוק במדד " + nm + " " + l[0] + "<br>" + l[1];
+    };
+    const spSt = _st("sp"), ndxSt = _st("ndx");
+    const spCs = _cardState("sp"), ndxCs = _cardState("ndx");
+    const now = new Date(), _p2 = x => String(x).padStart(2, "0");
+    const dateStr = now.getDate() + "." + (now.getMonth() + 1) + "." + now.getFullYear() + " · " + _p2(now.getHours()) + ":" + _p2(now.getMinutes());
+    let insight;
+    if (spSt && ndxSt) {
+      const weaker = spSt.score <= ndxSt.score ? "S&P 500" : "Nasdaq 100";
+      const lean = (spSt.score + ndxSt.score) / 2;
+      const tone = lean <= 40 ? "עם נטייה לחולשה" : lean >= 60 ? "עם נטייה לחוזק" : "מעורב ומאוזן";
+      insight = "רוחב השוק " + tone + ". מדד " + weaker + " חלש יותר" + (lean <= 40 ? " ומתקרב לרמות מכירת-יתר" : "") + ".";
+    } else insight = "נתוני רוחב השוק נטענים…";
+    const el = document.createElement("div");
+    el.className = "breadth-card";
+    el.innerHTML =
+      '<div class="brd-date">🕐 ' + dateStr + "</div>" +
+      '<div class="brd-sp-state ' + (spCs ? spCs.cls : "zero") + '">' + _pillHtml(spCs) + "</div>" +
+      '<div class="brd-sp-desc">' + _desc("sp", spSt) + "</div>" +
+      cards("sp", "brd-sp-card") +
+      '<div class="brd-ndx-state ' + (ndxCs ? ndxCs.cls : "zero") + '">' + _pillHtml(ndxCs) + "</div>" +
+      '<div class="brd-ndx-desc">' + _desc("ndx", ndxSt) + "</div>" +
+      cards("ndx", "brd-ndx-card") +
+      '<div class="brd-insight">' + insight + "</div>" +
+      '<div class="brd-foot-left">Adi Koriat | @KoriatTrade</div>' +
+      '<div class="brd-foot-right">ניתוח שוק מעודכן | stratninja.win</div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function captureSummaryCard() {
+    // market page (now the first tab of the 'pulse' channel) → one comprehensive MEGA card (no 4-part chooser)
+    const _pg = (state.page === "pulse" && typeof pulseTab !== "undefined") ? pulseTab : state.page;
+    if (_pg === "market") { _captureRedesignCard(buildMarketCardEl); return; }
+    _doCaptureSummaryCard();
+  }
+  function _doCaptureSummaryCard() {
+    // on the merged "דופק השוק" page state.page is "pulse"; the visible sub-tab is in pulseTab → resolve it
+    const pg = (state.page === "pulse" && typeof pulseTab !== "undefined") ? pulseTab : state.page;
+    if (pg === "today") { _captureMoneyFlowCard(); return; }   // redesigned money-flow card
+    if (pg === "sp500") { _captureRedesignCard((sp500View === "heat" || sp500View === "risk") ? buildHeatmapShareCardEl : buildSpMapCardEl); return; }   // heat/risk → treemap card; breadth view → breadth-map card
+    if (pg === "breadth") { _captureRedesignCard(buildBreadthCardEl); return; }   // breadth "מעל הממוצעים" card
+    if (pg === "sectors") {   // combined FTFC review card (bull/bear chooser retired per Adi 2026-10-03)
+      if (!(SCAN && SCAN.rows && SCAN.rows.length)) { snToast("נתוני הסקטורים עדיין נטענים (~7MB) — נסה שוב בעוד רגע"); return; }
+      _captureRedesignCard(buildFtfcCardEl); return;
+    }
+    if (pg === "market" && _mktShareSection === "state") { _captureRedesignCard(buildMarketOverviewCardEl); return; }   // redesigned market-overview super-card
+    if (pg === "market" && _mktShareSection === "candlemap") { _captureRedesignCard(buildCandleMapCardEl); return; }   // redesigned Candle Map card
+    if (pg === "market" && _mktShareSection === "leaders") { _captureRedesignCard(buildLeadersCardEl); return; }   // redesigned Leaders/Laggards card
+    // market-page "After/Pre-Market" share during the gappers window → the new square gappers card (not the legacy landscape one)
+    if (pg === "market" && _mktShareSection === "movers") { const _m = (typeof _ilMinutes === "function") ? _ilMinutes() : 0; if (_m >= 16 * 60 + 30 && _m < 23 * 60) { _captureRedesignCard(buildGappersCardEl); return; } _captureRedesignCard(buildMoversCardEl); return; }
+    if (state.page === "favorites") { _captureRedesignCard(buildFavoritesCardEl); return; }   // redesigned favorites watchlist card
+    if (state.page === "journal") { openJournalShareChooser(); return; }   // choose: 🙏 single-trade ninja card OR period summary
+    if (state.page === "gappers") { _captureRedesignCard(buildGappersCardEl); return; }   // redesigned gappers pre-market card
+    snToast("מכין כרטיס סיכום…");
+    _prepHeroSquare(() => {
+      const el = buildShareCardEl();
+      setTimeout(() => {
+        html2canvas(el, { backgroundColor: "#0f1420", scale: _shotScale(), useCORS: true, logging: false })
+          .then(cv => { el.remove(); showShareModal(cv); })
+          .catch(() => { el.remove(); snToast("שגיאה בצילום — נסה שוב"); });
+      }, 300);
+    });
+  }
+  // shared capture for the redesigned 1080×1080 cards (embedded fonts, dark bg)
+  function _captureRedesignCard(builder) {
+    if (typeof html2canvas !== "function") { snToast("כלי הצילום עדיין נטען — נסה שוב בעוד רגע"); return; }
+    snToast("מכין כרטיס…");
+    _prepHeroSquare(() => {
+      const el = builder();
+      const run = () => html2canvas(el, { backgroundColor: "#0B1020", scale: _shotScale(), useCORS: true, logging: false })
+        .then(cv => { el.remove(); showShareModal(cv); })
+        .catch(() => { el.remove(); snToast("שגיאה בצילום — נסה שוב"); });
+      // wait for the embedded Heebo/Inter to be ready so the PNG isn't rendered with a fallback font
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => setTimeout(run, 80)); else setTimeout(run, 250);
+    });
+  }
+  function _captureMoneyFlowCard() { _captureRedesignCard(buildMoneyFlowCardEl); }
+  function captureFullScreen() {
+    const target = state.page === "journal" ? document.getElementById("journalContainer") : document.getElementById("page");
+    if (!target) { snToast("אין מה לצלם"); return; }
+    snToast("מצלם את המסך…");
+    const scale = _shotScale();
+    html2canvas(target, { backgroundColor: "#0f1420", scale: scale, useCORS: true, logging: false }).then(cv => {
+      const k = scale / 2;                       // footer was tuned for scale 2 — scale it with the shot
+      const w = cv.width, fh = Math.round(128 * k);
+      const out = document.createElement("canvas");
+      out.width = w; out.height = cv.height + fh;
+      const ctx = out.getContext("2d");
+      ctx.fillStyle = "#0f1420"; ctx.fillRect(0, 0, out.width, out.height);
+      ctx.drawImage(cv, 0, 0);
+      ctx.fillStyle = "#131a2b"; ctx.fillRect(0, cv.height, w, fh);
+      ctx.fillStyle = "#17c08a"; ctx.fillRect(0, cv.height, Math.round(6 * k), fh);
+      ctx.textBaseline = "middle"; ctx.textAlign = "right"; ctx.direction = "rtl";
+      ctx.fillStyle = "#ffffff"; ctx.font = "800 " + Math.round(36 * k) + "px Rubik, Arial";
+      ctx.fillText("StratNinja Scanner", w - 40 * k, cv.height + fh / 2 - 20 * k);
+      ctx.fillStyle = "#9aa3b2"; ctx.font = "500 " + Math.round(26 * k) + "px Rubik, Arial";
+      ctx.fillText("Adi Koriat · stratninja.win · " + new Date().toLocaleString("he-IL"), w - 40 * k, cv.height + fh / 2 + 24 * k);
+      showShareModal(out);
+    }).catch(() => snToast("שגיאה בצילום — נסה שוב"));
+  }
+  // ---- designed multi-timeframe Strat card (from scanner data — TradingView iframes can't
+  //      be screenshotted cross-origin, so we render a branded card of the Strat bar-types) ----
+  function buildMtfCardEl(sym, r) {
+    const chg = (r.c != null) ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : null);
+    const chgCol = (chg == null) ? "#8a93a6" : (chg >= 0 ? "#22c55e" : "#ef4444");
+    const chgTxt = (chg == null) ? "" : (chg >= 0 ? "+" : "") + chg.toFixed(2) + "%";
+    const price = (r.p != null) ? r.p : (r.tech && r.tech.px != null ? r.tech.px : null);
+    const TFS = [["Y", "שנתי"], ["Q", "רבעוני"], ["M", "חודשי"], ["W", "שבועי"], ["D", "יומי"]];
+    const bar = (k, he) => {
+      const cell = r[k], t = (cell && cell.t) || "1", dir = cell && cell.c;
+      const col = dir === "up" ? "#22c55e" : dir === "down" ? "#ef4444" : "#586074";
+      const arrow = dir === "up" ? "▲" : dir === "down" ? "▼" : "•";
+      return '<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:9px;background:#131c2e;border:1px solid #26324a;border-radius:14px;padding:15px 4px">' +
+        '<span style="font-size:13px;color:#93a0b8;font-weight:700">' + he + "</span>" +
+        '<span style="display:flex;align-items:center;justify-content:center;min-width:52px;height:38px;border-radius:10px;font-weight:800;font-size:17px;color:#fff;background:' + col + '">' + t + "</span>" +
+        '<span style="font-size:13px;color:' + col + '">' + arrow + "</span></div>";
+    };
+    const badges = [];
+    if (r.ftfc) { const ftfcBear = (r.D || {}).c === "down"; badges.push('<span style="padding:6px 12px;border-radius:9px;font-weight:800;font-size:13px;color:#0a0f1c;background:' + (ftfcBear ? "#ef4444" : "#22c55e") + '">FTFC ' + (ftfcBear ? "↓" : "✓") + "</span>"); }
+    if (r.sec) badges.push('<span style="padding:6px 12px;border-radius:9px;font-weight:700;font-size:13px;color:#cbd5e6;background:#1b2438">' + r.sec + "</span>");
+    const el = document.createElement("div");
+    el.style.cssText = "position:fixed;left:-9999px;top:0;width:660px;padding:30px;background:linear-gradient(150deg,#101a2c,#0a0f1c);border:1px solid #223;border-radius:22px;font-family:Rubik,Arial,sans-serif;direction:rtl;color:#eef2f8;box-sizing:border-box";
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">' +
+        '<img src="ninja-icon.png" style="width:38px;height:38px;border-radius:8px" crossorigin="anonymous">' +
+        '<div><div style="font-weight:800;font-size:20px">StratNinja</div><div style="font-size:12px;color:#8a93a6">כל הטיימפריימים · The Strat</div></div>' +
+      "</div>" +
+      '<div style="display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin-bottom:6px">' +
+        '<span style="font-size:40px;font-weight:800;letter-spacing:.5px">' + sym + "</span>" +
+        (price != null ? '<span style="font-size:24px;font-weight:700;color:#cbd5e6">$' + price.toFixed(2) + "</span>" : "") +
+        (chgTxt ? '<span style="font-size:22px;font-weight:800;color:' + chgCol + '">' + chgTxt + "</span>" : "") +
+      "</div>" +
+      (badges.length ? '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 18px">' + badges.join("") + "</div>" : '<div style="height:14px"></div>') +
+      '<div style="display:flex;gap:10px">' + TFS.map(x => bar(x[0], x[1])).join("") + "</div>" +
+      '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:22px;padding-top:16px;border-top:1px solid #223046;font-size:13px;color:#8a93a6">' +
+        "<span>Adi Koriat · @KoriatTrade</span><span>stratninja.win · " + new Date().toLocaleDateString("he-IL") + "</span></div>";
+    return el;
+  }
+  function captureMtfCard(sym) {
+    if (typeof html2canvas !== "function") { snToast("כלי הצילום עדיין נטען — נסה שוב בעוד רגע"); return; }
+    const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+    if (!r) { snToast("אין נתוני Strat למניה הזו — פתח אותה דרך סורק העסקאות כדי לצלם כרטיס"); return; }
+    snToast("מכין כרטיס מעוצב…");
+    const el = buildMtfCardEl(sym, r);
+    document.body.appendChild(el);
+    setTimeout(() => {
+      html2canvas(el, { backgroundColor: "#0a0f1c", scale: _shotScale(), useCORS: true, logging: false })
+        .then(cv => { el.remove(); showShareModal(cv); })
+        .catch(() => { el.remove(); snToast("שגיאה בצילום — נסה שוב"); });
+    }, 200);
+  }
+  // full screenshot INCLUDING the live TradingView charts — html2canvas can't read cross-origin
+  // iframes, so we use the Screen Capture API (captures rendered pixels, needs a one-time "share
+  // this tab" confirmation). Chrome/Edge auto-scope to the current tab via preferCurrentTab.
+  async function captureFullShot() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      snToast("הדפדפן לא תומך בצילום מסך מלא — השתמש בכרטיס המעוצב, או בצילום המובנה של כל גרף 📸"); return;
+    }
+    snToast("בחר \"הכרטיסייה הנוכחית\" בחלון שנפתח…");
+    let stream;
+    const dpr = window.devicePixelRatio || 1;
+    const idealW = Math.round((window.screen && window.screen.width || window.innerWidth) * dpr);
+    const idealH = Math.round((window.screen && window.screen.height || window.innerHeight) * dpr);
+    try {
+      // request the display's FULL physical resolution (dpr-scaled) so the grab isn't downsampled
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: "browser", width: { ideal: idealW }, height: { ideal: idealH }, frameRate: { ideal: 30 } },
+        preferCurrentTab: true, audio: false
+      });
+    } catch (e) { snToast("הצילום בוטל"); return; }
+    try {
+      const track = stream.getVideoTracks()[0];
+      try { await track.applyConstraints({ width: { ideal: idealW }, height: { ideal: idealH } }); } catch (x) {}
+      const video = document.createElement("video");
+      video.srcObject = stream; video.muted = true; video.playsInline = true;
+      await video.play();
+      await new Promise(r => setTimeout(r, 400));            // let a full frame paint
+      const cv = document.createElement("canvas");
+      cv.width = video.videoWidth || 1920; cv.height = video.videoHeight || 1080;
+      cv.getContext("2d").drawImage(video, 0, 0, cv.width, cv.height);
+      stream.getTracks().forEach(t => t.stop());
+      if (!cv.width || !cv.height) { snToast("לא התקבלה תמונה — נסה שוב"); return; }
+      showShareModal(cv);
+    } catch (e) { try { stream.getTracks().forEach(t => t.stop()); } catch (x) {} snToast("שגיאה בצילום — נסה שוב"); }
+  }
+  // copy a PNG blob to the clipboard (secure-context + supported browsers only)
+  function _copyImageBlob(blob, okMsg) {
+    try {
+      if (navigator.clipboard && window.ClipboardItem) {
+        return navigator.clipboard.write([new ClipboardItem({ "image/png": blob })])
+          .then(() => { snToast(okMsg || "✓ התמונה הועתקה ללוח — אפשר להדביק (Ctrl+V)"); return true; })
+          .catch(() => { snToast("לא ניתן להעתיק ללוח כאן — השתמש ב-📥 הורד"); return false; });
+      }
+    } catch (e) {}
+    snToast("העתקה ללוח לא נתמכת בדפדפן הזה — השתמש ב-📥 הורד");
+    return Promise.resolve(false);
+  }
+  // page-aware share caption + $cashtags (for the X tweet / WhatsApp text)
+  function shareTweetText() {
+    const page = (state.page === "pulse" && typeof pulseTab !== "undefined") ? pulseTab : state.page;   // resolve the pulse sub-tab
+    const src = (typeof scanSource === "function" ? scanSource() : []);
+    const cash = arr => arr.filter(Boolean).map(s => "$" + s).slice(0, 8).join(" ");
+    let cap = "סרקתי את השוק ב-StratNinja 📊", tags = [], customTagStr = null;
+    if (page === "journal") {
+      // reflect the card: the day/period result + return. No scanner $tickers (this is personal performance).
+      const s = _journalShareCap;
+      if (s && s.val) {
+        const em = s.dir === "pos" ? "🟢" : s.dir === "neg" ? "🔴" : "⚪";
+        if (s.open) cap = "🔓 " + em + " פוזיציות פתוחות · " + s.val + " לא ממומש · StratNinja";
+        else cap = "📅 " + em + " " + (s.isDay ? "יום מסחר" : "התקופה") + " " + s.val + (s.he && s.he !== "—" ? " · " + s.he : "") + " · StratNinja";
+      } else cap = "📅 הביצועים שלי ב-StratNinja";
+      tags = [];
+    } else if (page === "sectors") {
+      // match the card: sectors ranked by FTFC net over the SELECTED timeframe set — and name that set in the caption
+      const _tfl = _secFtfcLbl();
+      cap = "🗂️ המשכיות זמנית · FTFC " + _tfl + " · StratNinja" + (_ftfcShareInsight ? "\n💡 " + _ftfcShareInsight : "");   // copy the Ninja Insight too (Adi)
+      const TFS = _secFtfcTfs();
+      const bySec = {};
+      src.forEach(t => { const s = t.sector; if (!s || s === "אחר" || s === "מדדים") return; const o = bySec[s] = (bySec[s] || { g: 0, r: 0, n: 0 }); o.n++; const d = secFtfcDir(t, TFS); if (d === "up") o.g++; else if (d === "down") o.r++; });
+      const secs = Object.keys(bySec).filter(s => bySec[s].n >= 3 && etfFor(s)).map(s => { const o = bySec[s]; return { name: s, v: (o.g - o.r) / o.n }; }).sort((a, b) => b.v - a.v);
+      tags = secs.slice(0, 3).map(s => etfFor(s.name)).concat(secs.slice(-2).map(s => etfFor(s.name)));
+    } else if (page === "scanner") {
+      cap = "🔍 הסטאפים החזקים היום ב-StratNinja";
+      // match the 5 tickers the SHARE CARD actually shows: current filter + the user's current sort (not by-chg)
+      const scSrc = (typeof scanRowsView === "function") ? scanRowsView() : src;
+      let rows = []; try { rows = filterRows(scSrc); } catch (e) { rows = scSrc; }
+      try { rows = (typeof sortRows === "function") ? sortRows(rows) : rows; } catch (e) {}
+      tags = rows.slice(0, 5).map(t => t.sym);
+    } else if (page === "today") {
+      // match the card: the ETFs of the sectors/sub-sectors money is flowing INTO, at the card's timeframe
+      cap = "🎯 לאן הכסף זורם היום · StratNinja";
+      const frows = src.filter(t => t.ninja != null);
+      const vOf = o => _bcellVal(o, flowTf);
+      const secs = (typeof todaySectors === "function" ? todaySectors(frows) : []).filter(o => vOf(o) != null).sort((a, b) => vOf(b) - vOf(a));
+      const subs = (typeof todaySubsectors === "function" ? todaySubsectors(frows) : []).filter(o => vOf(o) != null).sort((a, b) => vOf(b) - vOf(a));
+      tags = secs.slice(0, 2).map(o => etfFor(o.name)).concat(subs.slice(0, 3).map(o => o.etf || subEtfFor(o.name))).filter(Boolean);
+    } else if (page === "gappers") {
+      cap = "⚡ הגאפרים של היום · StratNinja";
+      const g = (LIVE && LIVE.gappers) || { up: [], down: [] };
+      tags = (g.up || []).slice(0, 3).map(x => x.s).concat((g.down || []).slice(0, 2).map(x => x.s));
+    } else if (page === "favorites") {
+      cap = "⭐ רשימת המעקב שלי · StratNinja";
+      tags = (window.Prefs ? Prefs.favorites() : []).slice(0, 6);
+    } else if (page === "market" && _mktShareSection === "candlemap") {
+      cap = "🗺️ Candle Map · S&P 500 · StratNinja";   // structure map — not ticker-specific
+      tags = [];
+    } else if (page === "market" && _mktShareSection === "leaders") {
+      // the card shows leading/lagging SECTORS *and* stocks — the caption must carry both (sectors were missing)
+      cap = "🏆 מובילים ומפגרים היום · StratNinja";
+      const U = mktU();
+      const secLead = (U.sectorLeaders || []).filter(s => etfFor(s.name)).slice(0, 2).map(s => etfFor(s.name));
+      const secLag = (U.sectorLaggards || []).filter(s => etfFor(s.name)).slice(0, 1).map(s => etfFor(s.name));
+      const stkLead = (U.leaders || []).slice(0, 2).map(x => x.s);
+      const stkLag = (U.laggards || []).slice(0, 1).map(x => x.s);
+      tags = secLead.concat(secLag, stkLead, stkLag);
+    } else if (page === "market" && _mktShareSection === "movers") {
+      // MUST match the card's source: the movers cards use the WIDEST universe (.all), not the
+      // S&P-500 toggle — else the caption listed sp500 tickers (TPL/COHR/GLW) absent from the card.
+      const m = (typeof _ilMinutes === "function") ? _ilMinutes() : 0;
+      const U = (LIVE && LIVE.universes && LIVE.universes.all) || LIVE || {};
+      let data;
+      if (m >= 16 * 60 + 30 && m < 23 * 60) { cap = "⚡ הגאפרים של היום · StratNinja"; data = U.gappers || (LIVE && LIVE.gappers) || { up: [], down: [] }; }
+      else if (m >= 11 * 60 && m < 16 * 60 + 30) { cap = "🌅 תנועות לפני הפתיחה · StratNinja"; data = U.premovers || (LIVE && LIVE.premovers) || { up: [], down: [] }; }
+      else { cap = "🌙 תנועות אחרי הסגירה · StratNinja"; data = U.aftermovers || (LIVE && LIVE.aftermovers) || { up: [], down: [] }; }
+      // rank the same way the card does (by |%|) so the caption's tickers are the ones shown
+      const upS = (data.up || []).slice().sort((a, b) => (b.gp || 0) - (a.gp || 0));
+      const dnS = (data.down || []).slice().sort((a, b) => (a.gp || 0) - (b.gp || 0));
+      tags = upS.slice(0, 3).map(x => x.s).concat(dnS.slice(0, 2).map(x => x.s));
+    } else if (page === "market") {
+      // market-overview "state" card → the exact leaders/laggards it displays (SNDK/COHR · CHTR/STZ),
+      // not a generic top-FTFC list that has nothing to do with the card.
+      cap = "📊 סקירת השוק היום · StratNinja";
+      const U = mktU();
+      const lead = (U.leaders || []).slice().sort((a, b) => (b.c || 0) - (a.c || 0)).slice(0, 2).map(x => x.s);
+      const lag = (U.laggards || []).slice().sort((a, b) => (a.c || 0) - (b.c || 0)).slice(0, 2).map(x => x.s);
+      tags = lead.concat(lag);
+    } else if (page === "sp500" && (sp500View === "heat" || sp500View === "risk")) {
+      if (spHeatAvg) {
+        // "תנועת סקטור" mode → the sector ETFs themselves: 🟢 עולות (ETF > 1%) · 🔴 יורדות (ETF < -1%)
+        cap = "🔥 תנועת הסקטורים · S&P 500 · StratNinja";
+        const secs = ((LIVE && LIVE.sectors) || []).filter(s => etfFor(s.name) && s.chg != null);
+        const up = secs.filter(s => s.chg > 1).sort((a, b) => b.chg - a.chg).map(s => etfFor(s.name));
+        const dn = secs.filter(s => s.chg < -1).sort((a, b) => a.chg - b.chg).map(s => etfFor(s.name));
+        const upStr = up.length ? "🟢 עולות: " + up.map(t => "$" + t).join(" ") : "";
+        const dnStr = dn.length ? "🔴 יורדות: " + dn.map(t => "$" + t).join(" ") : "";
+        customTagStr = [upStr, dnStr].filter(Boolean).join("\n") || null;
+      } else {
+        // HEAT MAP / RISK card → one LEADING stock from EACH sector (the biggest gainer per sector)
+        cap = "🔥 מפת החום של השוק · S&P 500 · StratNinja";
+        const picks = [];
+        ((LIVE && LIVE.sectors) || []).forEach(s => {
+          if (!etfFor(s.name)) return;
+          const top = (s.stocks || []).filter(x => x.c != null).sort((a, b) => b.c - a.c)[0];
+          if (top && top.c > 0) picks.push(top);
+        });
+        tags = picks.sort((a, b) => (b.c || 0) - (a.c || 0)).slice(0, 8).map(x => x.s);
+      }
+    } else if (page === "sp500") {
+      // S&P 500 breadth-map card → the strong sector ETF, weak sector ETF + leading stocks it highlights
+      cap = "🗺️ רוחב שוק S&P 500 · StratNinja";
+      const mrows = ((SCAN && SCAN.rows) || []).filter(r => r.sp && r.c != null);
+      const bySec = {}; mrows.forEach(r => { const s = r.sec || "אחר"; (bySec[s] = bySec[s] || []).push(r); });
+      const secStat = Object.keys(bySec).filter(s => s !== "אחר" && s !== "מדדים" && bySec[s].length >= 4)
+        .map(s => { const arr = bySec[s]; const g = arr.filter(r => (r.c || 0) > 0.05).length; return { sec: s, pct: g / arr.length }; });
+      const strong = secStat.slice().sort((a, b) => b.pct - a.pct)[0], weak = secStat.slice().sort((a, b) => a.pct - b.pct)[0];
+      const t = [];
+      if (strong && etfFor(strong.sec)) t.push(etfFor(strong.sec));
+      if (weak && etfFor(weak.sec)) t.push(etfFor(weak.sec));
+      mrows.slice().sort((a, b) => (b.c || 0) - (a.c || 0)).slice(0, 3).forEach(r => { if (t.indexOf(r.s) < 0) t.push(r.s); });   // top leading stocks
+      tags = t;
+    } else {
+      cap = "📊 סקירת השוק היום ב-StratNinja";
+      tags = src.filter(t => t.ftfc).sort((a, b) => (b.chg || 0) - (a.chg || 0)).slice(0, 5).map(t => t.sym);
+    }
+    const tagStr = customTagStr != null ? customTagStr : cash(tags);
+    return cap + (tagStr ? "\n\n" + tagStr : "") + "\n\n" + SHARE_HASHTAGS + "\n\nstratninja.win";
+  }
+  const SHARE_HASHTAGS = "#Trading #TheStrat #StratNinja";
+  function showShareModal(canvas, capOverride) {
+    canvas.toBlob(blob => {
+      if (!blob) { snToast("שגיאה ביצירת התמונה"); return; }
+      const url = URL.createObjectURL(blob);
+      const file = new File([blob], "stratninja.png", { type: "image/png" });
+      // capOverride lets a specific share (e.g. one alert) supply a caption with ONLY its own tickers,
+      // instead of the page-wide list. Falls back to the page-aware caption when not provided.
+      let tweetTxt = (typeof capOverride === "string" && capOverride) ? capOverride : shareTweetText();
+      // ensure every share (incl. alert-card overrides) carries the hashtags, without duplicating stratninja.win
+      if (tweetTxt.indexOf("#StratNinja") < 0) tweetTxt = tweetTxt.replace(/\s*stratninja\.win\s*$/i, "").replace(/\s+$/, "") + "\n\n" + SHARE_HASHTAGS + "\n\nstratninja.win";
+      const tweet = "https://twitter.com/intent/tweet?text=" + encodeURIComponent(tweetTxt);
+      const canShareFiles = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+      const capPreview = tweetTxt.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br>");
+      const body =
+        '<img src="' + url + '" style="max-width:100%;border-radius:10px;border:1px solid var(--line);display:block">' +
+        '<div style="margin-top:10px;font-size:11px;color:var(--muted)">📝 הכיתוב שילווה את השיתוף (מותאם לדף):</div>' +
+        '<div style="margin-top:5px;white-space:pre-wrap;font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 11px">' + capPreview + "</div>" +
+        '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
+          '<button class="btn primary" id="shareNative" style="font-size:13px">📤 שתף · אינסטגרם / סטורי / וואטסאפ</button>' +
+          '<button class="btn ghost" id="copyClip" style="font-size:13px">📋 העתק תמונה</button>' +
+          '<button class="btn ghost" id="copyCap" style="font-size:13px">📝 העתק כיתוב</button>' +
+          '<a class="btn ghost" href="' + url + '" download="stratninja.png" style="font-size:13px">📥 הורד</a>' +
+          '<a class="btn ghost" href="' + tweet + '" target="_blank" rel="noopener" style="font-size:13px">𝕏 שתף ב-X</a>' +
+        "</div>" +
+        '<div class="note" style="margin-top:10px;font-size:11px;line-height:1.6">' +
+          '📱 <b>בפלאפון:</b> "שתף" פותח את גיליון השיתוף — משם ישר ל<b>אינסטגרם, סטורי, וואטסאפ</b> (עם הכיתוב והטיקרים).<br>' +
+          '🖥️ <b>במחשב:</b> אינסטגרם ויוטיוב לא מאפשרים פרסום מהדפדפן — לחץ <b>📥 הורד</b> + <b>📝 העתק כיתוב</b> והעלה ידנית.<br>' +
+          '𝕏 <b>ל-X:</b> "שתף ב-X" פותח ציוץ עם הכיתוב — הדבק את התמונה (Ctrl+V).' +
+        "</div>";
+      modal("📷 צילום ושיתוף", body);
+      // auto-copy right away (still within the click's activation window)
+      _copyImageBlob(blob);
+      { const cc = document.getElementById("copyClip"); if (cc) cc.onclick = () => _copyImageBlob(blob); }
+      { const cp = document.getElementById("copyCap"); if (cp) cp.onclick = () => { try { navigator.clipboard.writeText(tweetTxt); snToast("✓ הכיתוב הועתק — הדבק באינסטגרם/יוטיוב"); } catch (e) { snToast("לא ניתן להעתיק כאן"); } }; }
+      const sn = document.getElementById("shareNative");
+      if (sn) sn.onclick = () => {
+        if (canShareFiles) {
+          try { navigator.share({ files: [file], title: "StratNinja", text: tweetTxt }); }
+          catch (e) {}
+        } else {
+          // desktop: no OS share sheet → download + guide (IG/YouTube need manual upload via the app)
+          const a = document.createElement("a"); a.href = url; a.download = "stratninja.png"; a.click();
+          snToast("במחשב אין שיתוף ישיר — התמונה הורדה, העלה אותה לאינסטגרם/יוטיוב דרך האפליקציה 📱");
+        }
+      };
+    }, "image/png");
+  }
+  window._snCapture = captureShare;
+
+  // ---- shareable ALERT CARD (branded image per alert → native share / download) ----
+  function _alertRowFor(sym) {
+    const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+    if (r) return { sym: sym, name: r.name || r.nm || "", sector: r.sec, price: r.p || (r.tech ? r.tech.px : 0), chg: r.c != null ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : 0), Y: r.Y, Q: r.Q, M: r.M, W: r.W, D: r.D, ftfc: r.ftfc };
+    const tk = TICKERS.find(x => x.sym === sym);
+    if (tk) return { sym: sym, name: tk.name || "", sector: tk.sector, price: tk.price, chg: tk.chg, Y: tk.Y, Q: tk.Q, M: tk.M, W: tk.W, D: tk.D, ftfc: false };
+    return { sym: sym, name: "", sector: "", price: 0, chg: 0, Y: cell("1", "doji"), Q: cell("1", "doji"), M: cell("1", "doji"), W: cell("1", "doji"), D: cell("1", "doji"), ftfc: false };
+  }
+  // strip emojis/symbols from a preset name so the card's own icons carry the visual
+  function _acStrip(s) { return String(s || "").replace(/[☀-➿⬀-⯿️\u{1F000}-\u{1FAFF}]/gu, "").replace(/\s+/g, " ").trim(); }   // strip pictographic emoji but keep arrows (D→Y) & symbols
+  // a type-appropriate icon per signal (from keywords in the original preset name)
+  function _acIcon(name) {
+    const n = (name || "").toLowerCase();
+    if (/reversal|היפוך/.test(n)) return "👑";
+    if (/hammer|פטיש|inforce/.test(n)) return "🔨";
+    if (/mfi/.test(n)) return "💰";
+    if (/ftfc/.test(n)) return "📊";
+    if (/shooter|pro|ninja/.test(n)) return "🎯";
+    if (/breakout|פריצה|darvas|rectangle/.test(n)) return "🚀";
+    return "🔔";
+  }
+  // tidy a raw company name for the card: drop "Common Stock" / "Class A" suffixes, cap length
+  function _acCleanName(nm) {
+    let s = String(nm || "").trim();
+    if (!s) return "";
+    s = s.replace(/\s+(Class\s+[A-C]\s+)?Common\s+(Stock|Shares)$/i, "")
+         .replace(/\s+Class\s+[A-C]$/i, "")
+         .replace(/\s+(Common\s+)?(Stock|Shares)$/i, "")
+         .replace(/\s+/g, " ").trim();
+    if (s.length > 34) s = s.slice(0, 33).trim() + "…";
+    return s;
+  }
+  // fire time + price for this symbol from today's alert feed (stored when the alert fired)
+  function _acMeta(sym) {
+    try {
+      const feed = (window.Prefs && window.Prefs.alertFeed) ? window.Prefs.alertFeed() : [];
+      const today = new Date().toISOString().slice(0, 10);
+      const e = feed.find(x => x && x.sym === sym && x.date === today && (x.tm || x.px != null));
+      return e ? { tm: e.tm, px: e.px } : null;
+    } catch (e) { return null; }
+  }
+  // FTFC state derived from the 5 candle cells SHOWN on the card (D/W/M/Q/Y) so the label is always
+  // consistent with the tiles. "מלא" = all five point the same non-neutral direction; else "חלקי".
+  function _acFtfc(t) {
+    const dirs = ["D", "W", "M", "Q", "Y"].map(k => ((t && t[k]) || {}).c);
+    const allUp = dirs.every(d => d === "up");
+    const allDn = dirs.every(d => d === "down");
+    return { full: allUp || allDn, up: allUp, down: allDn };
+  }
+  function buildAlertCardEl(t, names) {
+    let rawNames = (Array.isArray(names) ? names : [names]).filter(Boolean).slice(0, 3);
+    names = rawNames.map(_acStrip).filter(Boolean);
+    if (!names.length) { names = ["התראה"]; rawNames = ["התראה"]; }
+    const primary = names[0], single = names.length === 1;
+    const sym = String(t.sym || "");
+    // dynamic ticker size — short tickers smaller so they don't feel empty; long ones a touch smaller to fit
+    const tsz = sym.length <= 2 ? 150 : sym.length <= 4 ? 135 : sym.length === 5 ? 112 : 94;   // big ticker (×1.5 per Adi)
+    const chg = t.chg == null ? 0 : Number(t.chg);
+    const chgTxt = (chg >= 0 ? "+" : "−") + Math.abs(chg).toFixed(2) + "%";
+    const chgArrow = chg >= 0 ? "▲" : "▼";
+    let secLine = "";
+    if (t.sector && t.sector !== "אחר") { const etf = etfFor(t.sector); secLine = escHtml(secHe(t.sector)) + (etf ? ' <span class="alc-etf">' + escHtml(etf) + "</span>" : ""); }
+    const meta = _acMeta(sym);
+    const _ftfc = _acFtfc(t);
+    const ftfcTxt = _ftfc.full ? ((_ftfc.down ? "🔴" : "🟢") + " FTFC מלא") : "FTFC חלקי";
+    // up to 3 preset names in fixed slots + the "max 3" dots
+    const P = [names[0] || "", names[1] || "", names[2] || ""];
+    // force a long preset name onto 2 lines (font-independent — natural wrapping is unreliable when the baked font is narrow)
+    const _acPresetHtml = (nm) => {
+      nm = String(nm || "");
+      if (nm.length <= 16) return escHtml(nm);
+      let sep = -1; const seps = [" - ", " – ", " · ", " | ", " / "];
+      for (let s = 0; s < seps.length; s++) { const i = nm.indexOf(seps[s]); if (i > 2 && i < nm.length - 2) { sep = i; break; } }
+      let a, b;
+      if (sep >= 0) { a = nm.slice(0, sep).trim(); b = nm.slice(sep + 1).replace(/^[\-–·|\/]\s*/, "").trim(); }
+      else {
+        const mid = Math.floor(nm.length / 2); let best = -1, bestD = 1e9;
+        for (let i = 0; i < nm.length; i++) { if (nm[i] === " ") { const d = Math.abs(i - mid); if (d < bestD) { bestD = d; best = i; } } }
+        if (best < 0) return escHtml(nm);
+        a = nm.slice(0, best).trim(); b = nm.slice(best).trim();
+      }
+      return escHtml(a) + "<br>" + escHtml(b);
+    };
+    const presetBoxes = P.map((nm, i) => '<div class="alc-preset alc-p' + (i + 1) + (nm ? "" : " alc-pempty") + '" title="' + escAttr(nm) + '">' + _acPresetHtml(nm) + "</div>").join("");
+    const dots = '<div class="alc-dots">' + [0, 1, 2].map(i => '<span class="alc-dot' + (i < names.length ? " on" : "") + '"></span>').join("") + "</div>";
+    // D/W/M/Q/Y per timeframe — Hebrew TF name on top + candle type below (coloured by direction)
+    const _TFHE = { D: "יומי", W: "שבועי", M: "חודשי", Q: "רבעוני", Y: "שנתי" };
+    const tfVals = ["D", "W", "M", "Q", "Y"].map((k, i) => { const c = t[k] || {}, v = c.t || "1"; const cls = c.c === "up" ? "up" : c.c === "down" ? "down" : "n"; return '<div class="alc-tf alc-tf' + i + '"><span class="alc-tfk">' + _TFHE[k] + '</span><span class="alc-tfv ' + cls + '">' + v + "</span></div>"; }).join("");
+    // alert time DD.MM • HH:MM
+    const _now = new Date(), _p2 = x => String(x).padStart(2, "0");
+    const dm = _p2(_now.getDate()) + "." + _p2(_now.getMonth() + 1);
+    const tm = (meta && meta.tm) ? meta.tm : (_p2(_now.getHours()) + ":" + _p2(_now.getMinutes()));
+    // template bakes everything (header / labels / icons / community CTA / footer) — overlay DATA only
+    const el = document.createElement("div"); el.className = "alert-card"; el.style.cssText = "position:fixed;left:-9999px;top:0;z-index:-1;";
+    el.innerHTML =
+      '<div class="alc-title"><span class="alc-title-pill">התראה חדשה</span></div>' +
+      '<div class="alc-ticker" style="font-size:' + tsz + 'px">' + escHtml(sym) + "</div>" +
+      '<div class="alc-price">' + money(t.price) + "</div>" +
+      '<div class="alc-chg ' + (chg >= 0 ? "pos" : "neg") + '">' + chgTxt + " " + chgArrow + "</div>" +
+      '<div class="alc-ftfc">' + ftfcTxt + "</div>" +
+      '<div class="alc-sector">' + (secLine || "—") + "</div>" +
+      presetBoxes + dots + tfVals +
+      '<div class="alc-time">' + dm + " • " + tm + "</div>" +
+      '<div class="alc-cta">לעוד הזדמנויות<br>הצטרפו אלינו לקהילה</div>';
+    document.body.appendChild(el);
+    return el;
+  }
+  function shareAlertCard(sym, names) {
+    if (typeof html2canvas !== "function") { snToast("כלי הצילום עדיין נטען — נסה שוב בעוד רגע"); return; }
+    snToast("מכין כרטיס…");
+    _prepHeroSquare(() => {
+      const _acRow = _alertRowFor(sym);
+      const el = buildAlertCardEl(_acRow, names);
+      // sharp alert-style caption (less duplication, tuned for an automated feed on X/Discord):
+      // 🔔 $SYM נכנסה לסריקות StratNinja  / • scan bullets + FTFC  / $SYM | ETF  / hashtags  / site
+      const _acNames = (Array.isArray(names) ? names : [names]).map(_acStrip).filter(Boolean).slice(0, 3);
+      const _acBul = _acNames.map(n => "• " + n);
+      _acBul.push("• " + (_acFtfc(_acRow).full ? "FTFC מלא" : "FTFC חלקי"));
+      const _acEtf = (_acRow.sector && _acRow.sector !== "אחר") ? etfFor(_acRow.sector) : "";
+      const _acSymLine = "$" + sym + (_acEtf ? " | " + _acEtf : "");
+      const acCap = "🔔 $" + sym + " נכנסה לסריקות StratNinja\n" + _acBul.join("\n") + "\n" + _acSymLine + "\n#Trading #TheStrat #StratNinja\nstratninja.win";
+      const run = () => html2canvas(el, { backgroundColor: "#0B1020", scale: _shotScale(), useCORS: true, logging: false })
+        .then(cv => { el.remove(); showShareModal(cv, acCap); })
+        .catch(() => { el.remove(); snToast("שגיאה בצילום — נסה שוב"); });
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => setTimeout(run, 80)); else setTimeout(run, 250);
+    });
+  }
+  // >3 matched presets → let the trader pick up to 3 for the card
+  function chooseAlertPresets(sym, allNames) {
+    const body = '<div class="note" style="margin-bottom:10px">בחר עד <b>3</b> סריקות שיופיעו בכרטיס של <b>' + escHtml(sym) + "</b>:</div>" +
+      '<div class="ac-choose">' + allNames.map((n, i) => '<label class="ac-choose-row"><input type="checkbox" data-acn="' + escAttr(n) + '"' + (i < 3 ? " checked" : "") + "><span>" + escHtml(n) + "</span></label>").join("") + "</div>" +
+      '<button class="btn primary" id="acChooseGo" style="margin-top:14px;font-size:14px">📤 שתף כרטיס</button>';
+    modal("📤 שתף כרטיס התראה", body);
+    document.querySelectorAll("[data-acn]").forEach(c => c.onchange = () => {
+      const on = Array.prototype.slice.call(document.querySelectorAll("[data-acn]:checked"));
+      if (on.length > 3) { c.checked = false; snToast("אפשר עד 3 סריקות בכרטיס"); }
+    });
+    { const go = document.getElementById("acChooseGo"); if (go) go.onclick = () => { const picked = Array.prototype.slice.call(document.querySelectorAll("[data-acn]:checked")).map(c => c.dataset.acn).slice(0, 3); if (!picked.length) { snToast("בחר לפחות סריקה אחת"); return; } closeModal(); shareAlertCard(sym, picked); }; }
+  }
+  window._snShareAlert = shareAlertCard;
+  const CAP_OPTS = [["all", "הכל"], ["mega", "Mega (>$200B)"], ["large", "Large ($10B–200B)"], ["mid", "Mid ($2B–10B)"], ["small", "Small ($300M–2B)"], ["micro", "Micro (<$300M)"]];
+  const CAP_RANGES = { mega: [2e11, Infinity], large: [1e10, 2e11], mid: [2e9, 1e10], small: [3e8, 2e9], micro: [0, 3e8] };
+  function fmtCap(n) {
+    if (n == null) return "—";
+    if (n >= 1e12) return "$" + (n / 1e12).toFixed(2) + "T";
+    if (n >= 1e9) return "$" + (n / 1e9).toFixed(1) + "B";
+    if (n >= 1e6) return "$" + (n / 1e6).toFixed(0) + "M";
+    return "$" + n;
+  }
+  // ---- table sorting ----
+  const scanSort = { col: "chg", dir: -1 };   // default: biggest gainers first (עולה %). dir: -1 desc, 1 asc
+  function dirRank(cell) { const c = cell && cell.c; return c === "up" ? 1 : c === "down" ? -1 : 0; }
+  // rank a Strat timeframe cell by bar TYPE (2U > 3 > 2D > 1), color as tiebreak — so sorting a TF
+  // column groups by pattern: 2U (new high) at the top, 1 (inside) at the bottom. null = no data → last.
+  function tfRank(cell) {
+    if (!cell || !cell.t) return null;
+    const base = ({ "2U": 4, "3": 3, "2D": 2, "1": 1 })[cell.t];
+    if (base == null) return null;
+    const dir = cell.c === "up" ? 1 : cell.c === "down" ? -1 : 0;
+    return base * 3 + dir;
+  }
+  function sortVal(t, col) {
+    if (col === "sym") return t.sym;
+    if (col === "sec") return t.sector;
+    if (col === "etf") return etfFor(t.sector);
+    if (col === "price") return t.price;
+    if (col === "mc") return t.mc;
+    if (col === "chg") return t.chg;
+    if (col === "ftfc") return t.ftfc ? 1 : 0;
+    if (col === "ninja") return t.ninja;
+    if (col === "ind") return t.ind || "";
+    if (_isTfCol(col)) return tfRank(t[col]);
+    const k = t.tech || {};
+    if (col === "rsi") return k.rsi;
+    if (col === "mfi") return k.mfi;
+    if (col === "rvol") return k.rvol;
+    if (col === "vol") return k.vol;
+    if (col === "voltrend") return k.voltrend;
+    if (col === "volavgtrend") return k.volavgtrend;
+    if (col === "mfitrend") return k.mfitrend;
+    if (col === "mfiturn") return k.mfiturn === "up" ? 1 : k.mfiturn === "down" ? -1 : 0;
+    if (col === "earn") return k.earn == null ? 9999 : k.earn;
+    if (col === "dhi52") return k.dhi52;
+    if (col === "atrp") return k.atrp;
+    if (col === "gap") return k.gap;
+    if (col === "dma") { const dmap = k[_dmapKey(techState.maType)]; return dmap ? dmap[techState.maPeriod] : null; }
+    if (col === "comp") return _compSpread(k);
+    if (col === "bbsq") return _bbVal(k, "bbsq");
+    if (col === "bbw") return _bbVal(k, "bbw");
+    if (col === "bbp") return _bbVal(k, "bbp");
+    if (col === "swd") return _pivActive() ? (techState.pivRev === "bull" ? _pivLoD(k) : _pivHiD(k)) : ((techState.swSide === "low" || techState.swSide === "breakLo") ? _swLoD(k) : _swHiD(k));
+    if (col === "trend") return _trendVal(k);
+    if (col === "fib") return k.fibr;
+    return null;
+  }
+  function sortRows(rows) {
+    if (!scanSort.col) return rows;
+    const col = scanSort.col, dir = scanSort.dir;
+    return rows.slice().sort((a, b) => {
+      let va = sortVal(a, col), vb = sortVal(b, col);
+      const na = va == null || va === "" || (typeof va === "number" && isNaN(va));
+      const nb = vb == null || vb === "" || (typeof vb === "number" && isNaN(vb));
+      if (na && nb) return 0; if (na) return 1; if (nb) return -1;   // blanks always last
+      if (typeof va === "string") return dir * va.localeCompare(vb);
+      return dir * (va - vb);
+    });
+  }
+  function onSortClick(col) {
+    if (scanSort.col === col) scanSort.dir *= -1;
+    else { scanSort.col = col; scanSort.dir = col === "sym" ? 1 : -1; }  // numbers high→low first
+    reRender();
+  }
+  function sortableTh(label, col, extra) {
+    const active = scanSort.col === col;
+    const arrow = active ? (scanSort.dir < 0 ? " ▼" : " ▲") : "";
+    return '<th class="sortable" data-sortcol="' + col + '" style="cursor:pointer;user-select:none"' + (extra || "") + ">" + label + arrow + "</th>";
+  }
+  function resetScan() {
+    scanState.tfs = ["D"]; scanState.tfsExtra = []; scanState.patterns = []; scanState.dir = "all"; scanState.shape = []; scanState.broad = "off"; scanState.seq = { c2: [], c1: [], cc: [], c2col: "", c1col: "", cccol: "" }; scanState.inforce = "off"; scanState.sigShape = []; scanState.ifcType = [];
+    scanState.sector = []; scanState.subsec = []; scanState.universe = "all"; scanState.sym = ""; scanState.ftfc = false; scanState.priceMin = ""; scanState.priceMax = ""; scanState.capMin = ""; scanState.capMax = "";
+    scanState.mtf = newMtf(); scanState.indOpen = false;
+    resetTech(); techState.techOpen = false;
+  }
+  // ➕ custom-timeframe picker (adds a server-computed extra Strat TF to the scanner)
+  function closeTfMenu() { const p = document.getElementById("tfAddPop"); if (p) p.remove(); document.removeEventListener("click", _tfMenuOutside); }
+  function _tfMenuOutside(e) { const p = document.getElementById("tfAddPop"); if (p && !p.contains(e.target) && e.target.id !== "tfAdd") closeTfMenu(); }
+  function openTfAddMenu(btn) {
+    closeTfMenu();
+    const availI = INTRADAY_TFS.filter(t => scanState.tfsExtra.indexOf(t) < 0);   // intraday
+    const availX = EXTRA_TFS.filter(t => scanState.tfsExtra.indexOf(t) < 0);       // daily-based custom
+    if (!availI.length && !availX.length) return;
+    const pop = document.createElement("div"); pop.className = "tf-addpop"; pop.id = "tfAddPop";
+    const grp = (lbl, arr) => arr.length ? '<div class="tf-addpop-grp">' + lbl + '</div><div class="tf-addpop-grid">' +
+      arr.map(t => '<button class="chip" data-addtf="' + t + '">' + t + "</button>").join("") + "</div>" : "";
+    pop.innerHTML = '<div class="tf-addpop-lbl">➕ טיימפריים סטראט מותאם</div>' +
+      grp("⏱️ תוך-יומי", availI) + grp("📆 יומי ומעלה", availX) +
+      '<div class="tf-addpop-note">TheStrat אגנוסטי לזמן — הוסף כל מסגרת וסנן לפיה כמו D/W/M/Q/Y.</div>';
+    document.body.appendChild(pop);
+    // anchor the popover's RIGHT edge to the + button (RTL-natural), opening just below it — not detached
+    const r = btn.getBoundingClientRect(), pw = pop.offsetWidth;
+    let left = r.right + window.scrollX - pw;
+    left = Math.max(8 + window.scrollX, Math.min(left, window.scrollX + document.documentElement.clientWidth - pw - 8));
+    pop.style.left = left + "px";
+    pop.style.top = (r.bottom + window.scrollY + 6) + "px";
+    pop.querySelectorAll("[data-addtf]").forEach(b => b.onclick = () => {
+      const t = b.dataset.addtf;
+      if (scanState.tfsExtra.indexOf(t) < 0) scanState.tfsExtra.push(t);
+      if (scanState.tfs.indexOf(t) < 0) scanState.tfs.push(t);
+      closeTfMenu(); reRender();
+    });
+    setTimeout(() => document.addEventListener("click", _tfMenuOutside), 0);
+  }
+  // ETF-ticker menu (money-flow panels): analyze the sector ETF, or open charts of all its stocks
+  function closeSecMenu() { const p = document.getElementById("secEtfPop"); if (p) p.remove(); document.removeEventListener("click", _secMenuOutside); }
+  function _secMenuOutside(e) { const p = document.getElementById("secEtfPop"); if (p && !p.contains(e.target) && !(e.target.classList && e.target.classList.contains("flow-etf"))) closeSecMenu(); }
+  function openSecMenu(el) {
+    closeSecMenu();
+    const etf = el.dataset.secetf, name = el.dataset.secname, isSub = el.dataset.secsub === "1";
+    const label = isSub ? name : secHe(name);
+    // "table" option: prefer the S&P above-open table (renderSp500Drill) ONLY when it covers most of the
+    // group. For groups that are mostly non-S&P (Crypto, gold miners, אחר…) it would show a misleading
+    // subset (e.g. gold-mining GDX → only NEM), so fall back to the full scanner table (renderSecDrill).
+    let aoCount = 0;
+    if (isSub) ((LIVE && LIVE.sectors) || []).forEach(sec => (sec.stocks || []).forEach(x => { if ((x.ind || "") === name) aoCount++; }));
+    else { const sec = ((LIVE && LIVE.sectors) || []).find(x => x.name === name); aoCount = sec ? (sec.stocks || []).length : 0; }
+    const fullCount = (typeof scanSource === "function") ? scanSource().filter(t => t[isSub ? "ind" : "sector"] === name).length : 0;
+    const hasAoTable = aoCount > 0 && (fullCount === 0 || aoCount >= fullCount * 0.6);   // above-open only if it covers ≥60% of the group
+    const showTable = hasAoTable || fullCount > 0;
+    const tableLbl = "📋 טבלת " + (isSub ? "הענף" : "הסקטור") + (hasAoTable ? " (מעל פתיחה)" : "");
+    const pop = document.createElement("div"); pop.className = "tf-addpop sec-menu"; pop.id = "secEtfPop";
+    pop.innerHTML = '<div class="tf-addpop-lbl">' + escHtml(label) + (etf ? " · " + escHtml(etf) : "") + "</div>" +
+      (etf ? '<button class="sec-menu-item" data-secact="etf">📊 ניתוח תעודת הסל (' + escHtml(etf) + ")</button>" : "") +
+      '<button class="sec-menu-item" data-secact="grid">🗂️ גרפים של כל הסקטור</button>' +
+      '<button class="sec-menu-item" data-secact="scan">🎯 הצב בסורק (סנן לפי ' + (isSub ? "הענף" : "הסקטור") + ")</button>" +
+      (showTable ? '<button class="sec-menu-item" data-secact="table">' + tableLbl + "</button>" : "");
+    document.body.appendChild(pop);
+    // position directly under the clicked chip. Use absolute `left` (RTL-safe — insetInlineStart maps to
+    // the RIGHT edge in an RTL page, which is what made the menu jump to a detached spot), clamped to viewport.
+    const r = el.getBoundingClientRect(), pw = pop.offsetWidth || 220, vw = document.documentElement.clientWidth;
+    let left = Math.min(r.left + window.scrollX, window.scrollX + vw - pw - 8);
+    left = Math.max(window.scrollX + 8, left);
+    pop.style.insetInlineStart = "auto";
+    pop.style.left = left + "px";
+    pop.style.top = (r.bottom + window.scrollY + 6) + "px";
+    { const eb = pop.querySelector('[data-secact="etf"]'); if (eb) eb.onclick = () => { closeSecMenu(); openChart(etf, "D"); }; }
+    pop.querySelector('[data-secact="grid"]').onclick = () => {
+      closeSecMenu();
+      const key = isSub ? "ind" : "sector";
+      const stocks = scanSource().filter(t => t[key] === name);
+      if (stocks.length) openChartGrid(stocks, { title: label + " · כל המניות (" + stocks.length + ")" });
+      else snToast("אין מניות זמינות לסקטור הזה כרגע");
+    };
+    pop.querySelector('[data-secact="scan"]').onclick = () => {
+      closeSecMenu();
+      // set the scanner's sector/sub-sector filter to this one, then jump to the scanner
+      if (isSub) { scanState.sector = []; scanState.subsec = [name]; }
+      else { scanState.sector = [name]; scanState.subsec = []; }
+      setPage("scanner");
+      snToast("🎯 הסורק סונן לפי " + label);
+    };
+    { const tb = pop.querySelector('[data-secact="table"]'); if (tb) tb.onclick = () => {
+      closeSecMenu();
+      if (hasAoTable && typeof renderSp500Drill === "function") renderSp500Drill(name, isSub);
+      else if (typeof renderSecDrill === "function") renderSecDrill(isSub ? null : name, isSub ? name : null);   // scanner-based table (no above-open data for this group)
+    }; }
+    setTimeout(() => document.addEventListener("click", _secMenuOutside), 0);
+  }
+  function _mapScanRows(rows) {
+    return rows.map(r => {
+      const o = { sym: r.s, sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0),
+        chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0), mc: r.mc, ninja: r.ninja,
+        Y: r.Y, Q: r.Q, M: r.M, W: r.W, D: r.D, ftfc: r.ftfc, tech: r.tech, sp: r.sp, comm: r.comm };
+      XTRA_ALL.forEach(tf => { if (r[tf]) o[tf] = r[tf]; });   // custom Strat timeframes (daily-based + intraday)
+      return o;
+    });
+  }
+  // LIVE scan data — used by market / sectors / today / alerts (always current)
+  function scanSource() {
+    if (SCAN && SCAN.rows && SCAN.rows.length) return _mapScanRows(SCAN.rows);
+    return TICKERS;
+  }
+  // scanner PAGE only: live OR yesterday's completed-daily snapshot (the "📅 אתמול" toggle)
+  function scanRowsView() {
+    if (scanView === "yday") return (SCAN_YDAY && SCAN_YDAY.rows && SCAN_YDAY.rows.length) ? _mapScanRows(SCAN_YDAY.rows) : [];   // never silently fall back to live
+    if (SCAN && SCAN.rows && SCAN.rows.length) return _mapScanRows(SCAN.rows);
+    return TICKERS;
+  }
+  function scanInsights(rows, universe) {
+    const n = rows.length;
+    if (!n) return [];
+    const facts = [];
+    const pctOf = k => Math.round(k / n * 100);
+    // sector concentration
+    const sec = {}; rows.forEach(r => { sec[r.sector] = (sec[r.sector] || 0) + 1; });
+    const topSec = Object.keys(sec).map(k => [k, sec[k]]).sort((a, b) => b[1] - a[1])[0];
+    if (topSec && topSec[0]) facts.push({ i: "🗂️", t: pctOf(topSec[1]) + "% מהתוצאות בסקטור <b>" + topSec[0] + "</b> (" + topSec[1] + " מניות)" });
+    // sub-sector (industry) concentration
+    const ind = {}; rows.forEach(r => { if (r.ind) ind[r.ind] = (ind[r.ind] || 0) + 1; });
+    const topInd = Object.keys(ind).map(k => [k, ind[k]]).sort((a, b) => b[1] - a[1])[0];
+    if (topInd && topInd[1] >= 2) facts.push({ i: "🏭", t: pctOf(topInd[1]) + "% בתת-סקטור <b>" + topInd[0] + "</b> (" + topInd[1] + " מניות)" });
+    // FTFC rate
+    const ftfc = rows.filter(r => r.ftfc).length;
+    if (ftfc) facts.push({ i: "🎯", t: pctOf(ftfc) + "% בהמשכיות-טיימפריימים מלאה (<b>FTFC</b>) — יישור חזק בין הזמנים" });
+    // daily direction bias
+    const green = rows.filter(r => (r.D || {}).c === "up").length, red = rows.filter(r => (r.D || {}).c === "down").length;
+    if (green || red) {
+      const dom = green >= red ? green : red;
+      facts.push({ i: green >= red ? "🟢" : "🔴", t: pctOf(dom) + "% מהנרות היומיים " + (green > red ? "ירוקים (הטיה שורית)" : red > green ? "אדומים (הטיה דובית)" : "מאוזנים") });
+    }
+    // most common daily pattern
+    const pat = {}; rows.forEach(r => { const t = (r.D || {}).t; if (t) pat[t] = (pat[t] || 0) + 1; });
+    const topPat = Object.keys(pat).map(k => [k, pat[k]]).sort((a, b) => b[1] - a[1])[0];
+    if (topPat) facts.push({ i: "📊", t: "התבנית היומית הנפוצה: <b>" + topPat[0] + "</b> ב-" + pctOf(topPat[1]) + "% מהתוצאות" });
+    // conflict candles (2U red / 2D green)
+    const conflict = rows.filter(r => { const d = r.D || {}; return (d.t === "2U" && d.c === "down") || (d.t === "2D" && d.c === "up"); }).length;
+    if (conflict) facts.push({ i: "⚔️", t: pctOf(conflict) + "% נרות ב<b>קונפליקט</b> (2U אדום / 2D ירוק) — סימן להיפוך אפשרי" });
+    // multi-TF confluence
+    if (scanState.tfs.length > 1) facts.push({ i: "⚡", t: "קונפלואנס: התבנית מתקיימת על <b>" + scanState.tfs.length + " טיימפריימים</b> בו-זמנית — סטאפ נדיר וחזק יותר" });
+    // selectivity
+    facts.push({ i: "🔎", t: "הסינון צימצם ל-<b>" + n + "</b> מתוך " + universe + " מניות (" + Math.round(n / universe * 100) + "% מהיקום)" });
+    return facts;
+  }
+  // MA-relation modes that use the ± percentage input
+  function _maPctShownFor(rel) { return ["near", "far", "farAbove", "farBelow", "touchAbove", "touchBelow"].indexOf(rel) >= 0; }
+  function _maPctShown() { return _maPctShownFor(techState.maRel); }
+  // does a stock's tech bag pass ONE MA condition (position/distance/touch vs an SMA/EMA period)?
+  // shared by the primary MA filter + every stacked (+) extra condition. rel "off" = no constraint.
+  function _maCondPass(k, type, period, rel, pct) {
+    if (!rel || rel === "off") return true;
+    const mk = _dmapKey(type);                            // dsma / dema / dwma
+    const dmap = k[mk];
+    const d = dmap ? dmap[period] : null;                 // signed % distance of CLOSE from the MA
+    if (d == null) return false;
+    if (rel === "near" && Math.abs(d) > pct) return false;
+    if (rel === "far" && Math.abs(d) < pct) return false;
+    if (rel === "farAbove" && d < pct) return false;      // stretched far ABOVE the MA (direction is the trader's call: momentum vs mean-reversion)
+    if (rel === "farBelow" && d > -pct) return false;     // stretched far BELOW the MA (direction is the trader's call: momentum vs mean-reversion)
+    if (rel === "above" && d <= 0) return false;
+    if (rel === "below" && d >= 0) return false;
+    if (rel === "touchAbove" || rel === "touchBelow") {   // wick "touch" — mirrors the SMA150 Sniper
+      const loMap = k[mk + "_lo"], hiMap = k[mk + "_hi"];
+      const dLo = loMap ? loMap[period] : null, dHi = hiMap ? hiMap[period] : null;
+      if (rel === "touchAbove") { if (d <= 0 || dLo == null || Math.abs(dLo) > pct) return false; }
+      else { if (d >= 0 || dHi == null || Math.abs(dHi) > pct) return false; }
+    }
+    return true;
+  }
+  // plain-language explanation of exactly what the "מיקום מול ממוצע" filter does right now
+  function maRelHint() {
+    const ma = techState.maType + techState.maPeriod, p = techState.maPct;
+    switch (techState.maRel) {
+      case "above": return "מציג רק מניות שהמחיר שלהן <b>מעל</b> " + ma + " (מגמה חיובית / מעל התמיכה).";
+      case "below": return "מציג רק מניות שהמחיר שלהן <b>מתחת</b> ל-" + ma + " (חולשה / מתחת להתנגדות).";
+      case "near":  return "מציג מניות שהמחיר <b>עד " + p + "%</b> מ-" + ma + " — נוגעות/נבחנות מול הממוצע (אזור כניסה).";
+      case "far":   return "מציג מניות שהמחיר <b>יותר מ-" + p + "%</b> מ-" + ma + " — מתוחות / רחוקות מהממוצע (שני הכיוונים).";
+      case "farAbove": return "מציג מניות שהמחיר <b>יותר מ-" + p + "% מעל</b> " + ma + " — <b>מתוחות הרבה מעל הממוצע</b>. הכיוון תלוי בגישה: מומנטום = המשך למעלה · חזרה-לממוצע = פולבק.";
+      case "farBelow": return "מציג מניות שהמחיר <b>יותר מ-" + p + "% מתחת</b> ל-" + ma + " — <b>מתוחות הרבה מתחת לממוצע</b>. הכיוון תלוי בגישה: מומנטום = המשך למטה · חזרה-לממוצע = ריבאונד.";
+      case "touchAbove": return "🎯 כמו ה-<b>SMA150 Sniper</b> בדיסקורד: המניה סגרה <b>מעל</b> " + ma + ", וה-<b>נמוך</b> ירד עד <b>" + p + "%</b> מהממוצע (צלפה בו מלמעלה).";
+      case "touchBelow": return "🎯 כמו ה-Sniper בדיסקורד: המניה סגרה <b>מתחת</b> ל-" + ma + ", וה-<b>גבוה</b> נגע עד <b>" + p + "%</b> מהממוצע (מלמטה).";
+      default: return "";
+    }
+  }
+  // Searchable combobox (type-to-filter). opts = [{val,label}]; the label carries the English name +
+  // ETF ticker so typing either narrows the list. The <input> keeps `id` so state/glow logic is unchanged.
+  function searchComboHtml(id, opts, curVal, placeholder) {
+    const cur = opts.find(o => o.val === curVal);
+    const curLabel = (curVal && curVal !== "all" && cur) ? cur.label : "";
+    const list = opts.map(o => '<div class="combo-opt' + (o.val === curVal ? " sel" : "") + '" data-cval="' + escAttr(o.val) + '">' + escHtml(o.label) + "</div>").join("");
+    return '<div class="search-combo" data-combo="' + id + '">' +
+      '<input class="combo-input" id="' + id + '" autocomplete="off" placeholder="' + escAttr(placeholder) + '" value="' + escAttr(curLabel) + '">' +
+      '<span class="combo-caret">▾</span>' +
+      '<div class="combo-list hidden">' + list + "</div></div>";
+  }
+  function wireSearchCombo(id, onPick) {
+    const wrap = document.querySelector('.search-combo[data-combo="' + id + '"]');
+    if (!wrap) return;
+    const input = wrap.querySelector(".combo-input");
+    const list = wrap.querySelector(".combo-list");
+    const opts = Array.prototype.slice.call(list.querySelectorAll(".combo-opt"));
+    const savedLabel = input.value;
+    const doFilter = () => {
+      const q = input.value.trim().toLowerCase();
+      opts.forEach(o => { o.style.display = o.textContent.toLowerCase().indexOf(q) >= 0 ? "" : "none"; });
+    };
+    const close = () => list.classList.add("hidden");
+    input.addEventListener("focus", () => { input.value = ""; list.classList.remove("hidden"); doFilter(); });
+    input.addEventListener("input", () => { list.classList.remove("hidden"); doFilter(); });
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") { const f = opts.find(o => o.style.display !== "none"); if (f) { e.preventDefault(); onPick(f.dataset.cval); } }
+      else if (e.key === "Escape") { input.value = savedLabel; close(); input.blur(); }
+    });
+    input.addEventListener("blur", () => { setTimeout(() => { close(); input.value = savedLabel; }, 160); });
+    opts.forEach(o => o.addEventListener("mousedown", e => { e.preventDefault(); onPick(o.dataset.cval); }));
+    const caret = wrap.querySelector(".combo-caret");
+    if (caret) caret.addEventListener("mousedown", e => { e.preventDefault(); if (list.classList.contains("hidden")) input.focus(); else { close(); input.blur(); } });
+  }
+  // multi-select variant: checkboxes, pick several without closing, apply (reRender) on close
+  function multiComboHtml(id, opts, sel, placeholder) {
+    const selArr = sel || [];
+    const summary = !selArr.length ? "" : (selArr.length === 1 ? (opts.find(o => o.val === selArr[0]) || { label: selArr[0] }).label : selArr.length + " נבחרו");
+    const list = opts.map(o => { const on = selArr.indexOf(o.val) >= 0;
+      return '<div class="combo-opt-m' + (on ? " on" : "") + '" data-cval="' + escAttr(o.val) + '"><span class="cbx">' + (on ? "☑" : "☐") + "</span>" + escHtml(o.label) + "</div>"; }).join("");
+    return '<div class="search-combo multi" data-combo="' + id + '">' +
+      '<input class="combo-input" id="' + id + '" autocomplete="off" placeholder="' + escAttr(placeholder) + '" value="' + escAttr(summary) + '">' +
+      '<span class="combo-caret">▾</span>' +
+      '<div class="combo-list hidden">' + (opts.length ? '<div class="combo-clear" data-clear="1">✕ נקה בחירה (הכל)</div>' : "") + list + "</div></div>";
+  }
+  // Apply a multi-combo change IMMEDIATELY (live), then reopen the SAME dropdown after the full
+  // re-render so the user can keep toggling options without it closing. Mirrors the #scanSym live-filter
+  // pattern (reRender first, then restore focus on the freshly-built node).
+  function _mcReopenCombo(id, q, scroll, apply) {
+    apply();   // full reRender (rebuilds the filter bar + the results table)
+    const wrap = document.querySelector('.search-combo[data-combo="' + id + '"]');
+    if (!wrap) return;
+    const input = wrap.querySelector(".combo-input");
+    const list = wrap.querySelector(".combo-list");
+    if (!input || !list) return;
+    list.classList.remove("hidden");
+    try { input.focus({ preventScroll: true }); } catch (e) { try { input.focus(); } catch (e2) {} }
+    input.value = q || "";                                     // restore the typed search (the focus handler clears it)
+    const ql = input.value.trim().toLowerCase();
+    list.querySelectorAll(".combo-opt-m").forEach(o => { o.style.display = o.textContent.toLowerCase().indexOf(ql) >= 0 ? "" : "none"; });
+    try { list.scrollTop = scroll || 0; } catch (e) {}
+  }
+  // `arr` MUST be the live scanState array (mutated in place). onClose fires only if something changed.
+  function wireMultiCombo(id, arr, onClose) {
+    const wrap = document.querySelector('.search-combo[data-combo="' + id + '"]');
+    if (!wrap) return;
+    const input = wrap.querySelector(".combo-input");
+    const list = wrap.querySelector(".combo-list");
+    const opts = Array.prototype.slice.call(list.querySelectorAll(".combo-opt-m"));
+    let dirty = false;
+    const labelOf = v => { const o = opts.find(x => x.dataset.cval === v); return o ? o.textContent.replace(/^[☑☐]\s*/, "").trim() : v; };
+    const summary = () => !arr.length ? "" : (arr.length === 1 ? labelOf(arr[0]) : arr.length + " נבחרו");
+    const doFilter = () => { const q = input.value.trim().toLowerCase(); opts.forEach(o => { o.style.display = o.textContent.toLowerCase().indexOf(q) >= 0 ? "" : "none"; }); };
+    const closeList = () => { list.classList.add("hidden"); input.value = summary(); if (dirty) { dirty = false; onClose(); } };
+    input.addEventListener("focus", () => { input.value = ""; list.classList.remove("hidden"); doFilter(); });
+    input.addEventListener("input", () => { list.classList.remove("hidden"); doFilter(); });
+    input.addEventListener("keydown", e => { if (e.key === "Escape") { closeList(); input.blur(); } });
+    input.addEventListener("blur", () => setTimeout(closeList, 160));
+    const setMark = o => { const on = arr.indexOf(o.dataset.cval) >= 0; o.classList.toggle("on", on); const c = o.querySelector(".cbx"); if (c) c.textContent = on ? "☑" : "☐"; };
+    opts.forEach(o => o.addEventListener("mousedown", e => {   // preventDefault keeps focus on the input → list stays open
+      e.preventDefault(); const v = o.dataset.cval, i = arr.indexOf(v);
+      if (i >= 0) arr.splice(i, 1); else arr.push(v);
+      setMark(o);
+      _mcReopenCombo(id, input.value, list.scrollTop, onClose);   // apply the filter NOW; keep the dropdown open
+    }));
+    const clear = list.querySelector("[data-clear]");
+    if (clear) clear.addEventListener("mousedown", e => { e.preventDefault(); if (arr.length) { arr.length = 0; opts.forEach(setMark); _mcReopenCombo(id, input.value, list.scrollTop, onClose); } });
+    const caret = wrap.querySelector(".combo-caret");
+    if (caret) caret.addEventListener("mousedown", e => { e.preventDefault(); if (list.classList.contains("hidden")) input.focus(); else { closeList(); input.blur(); } });
+  }
+
+  // Strategy Launcher (redesign): ready-made scans. Each applies ONLY scanState fields via resetScan()
+  // (deterministic clean slate) — no change to the filter engine. Results are the existing scanner's.
+  var _SCAN_PRESETS = [
+    ["green5", "🟢", "ירוק · כל הזמנים", "נר עולה על D·W·M·Q·Y"],
+    ["revup", "🔼", "היפוך שורי", "היפוך Strat שורי · יומי"],
+    ["cont2u", "📈", "2U · המשכיות", "נר כיווני עולה · D+W"],
+    ["out3", "💥", "נר חיצוני (3)", "התרחבות טווח · D+W"],
+    ["red5", "🔴", "אדום · כל הזמנים", "נר יורד על D·W·M·Q·Y"],
+    ["revdn", "🔽", "היפוך דובי", "היפוך Strat דובי · יומי"]
+  ];
+  function _scanApplyPreset(id) {
+    if (id === "green5") { scanState.dir = "up"; scanState.tfs = ["D", "W", "M", "Q", "Y"]; }
+    else if (id === "red5") { scanState.dir = "down"; scanState.tfs = ["D", "W", "M", "Q", "Y"]; }
+    else if (id === "revup") { scanState.broad = "up"; scanState.tfs = ["D"]; }
+    else if (id === "revdn") { scanState.broad = "down"; scanState.tfs = ["D"]; }
+    else if (id === "out3") { scanState.patterns = ["3"]; scanState.tfs = ["D", "W"]; }
+    else if (id === "cont2u") { scanState.patterns = ["2U"]; scanState.tfs = ["D", "W"]; }
+  }
+  // match counts: snapshot state, run each preset through the REAL filter engine, restore
+  function _scanLaunchCounts(all) {
+    const counts = {};
+    if (!all || !all.length) return counts;
+    const snapS = {}, snapT = {};
+    for (const k in scanState) snapS[k] = Array.isArray(scanState[k]) ? scanState[k].slice() : scanState[k];
+    for (const k in techState) snapT[k] = Array.isArray(techState[k]) ? techState[k].slice() : techState[k];
+    try { _SCAN_PRESETS.forEach(p => { resetScan(); _scanApplyPreset(p[0]); counts[p[0]] = filterRows(all).length; }); } catch (e) {}
+    for (const k in snapS) scanState[k] = snapS[k];
+    for (const k in snapT) techState[k] = snapT[k];
+    return counts;
+  }
+  function _scanLauncher(counts) {
+    counts = counts || {};
+    const cards = _SCAN_PRESETS.map(p => {
+      const c = counts[p[0]];
+      const cnt = (c != null) ? '<span class="sl-cnt">● ' + c + " התאמות</span>" : "";
+      return '<button class="sl-card" data-launch="' + p[0] + '"><span class="sl-ico">' + p[1] + '</span><span class="sl-nm">' + p[2] + '</span><span class="sl-ds">' + p[3] + "</span>" + cnt + "</button>";
+    }).join("");
+    const custom = '<button class="sl-card sl-custom" data-launch="custom"><span class="sl-ico">⚙️</span><span class="sl-nm">מותאם אישית</span></button>';
+    return '<div class="panel scan-launch"><div class="sl-head"><span class="sl-h-ic">⚡</span><h3>התחל מאסטרטגיה</h3><span class="muted sl-h-sub">סריקה מוכנה בלחיצה — או בנה מותאם</span></div>' +
+      '<div class="sl-row">' + cards + custom + "</div></div>";
+  }
+  // insights band above the results (live market breadth + filtered-result stats)
+  function _scanInsights(all) {
+    const rows = (all && all.length) ? filterRows(all) : [];
+    const b = (mktU().breadth) || {};
+    const ap = b.total ? Math.round(b.above / b.total * 100) : null;
+    const bull = rows.length ? Math.round(rows.filter(r => (r.chg != null ? r.chg : 0) > 0).length / rows.length * 100) : null;
+    const ftfc = rows.filter(r => r.ftfc).length;
+    const sl = mktU().sectorLeaders; const sec = (sl && sl[0] && (sl[0].name || sl[0].sym)) || "—";
+    return '<div class="scan-insband">' +
+      '<div class="sib hl"><span class="l">כיוון שורי</span><span class="v" style="color:var(--green)">' + (bull == null ? "—" : bull + "%") + "</span></div>" +
+      '<div class="sib"><span class="l">FTFC מלא</span><span class="v">' + ftfc + "</span></div>" +
+      '<div class="sib"><span class="l">סקטור מוביל</span><span class="v sib-sec">' + sec + "</span></div>" +
+      '<div class="sib warn"><span class="l">רוחב שוק</span><span class="v">' + (ap == null ? "—" : ap + "%") + "</span></div>" +
+      "</div>";
+  }
+  function renderScanner() {
+    const all = scanRowsView();
+    const uni = scanSource();     // stable LIVE universe — keeps the sector/sub-sector option lists filled in yesterday view
+    const isLive = !!(SCAN && SCAN.rows && SCAN.rows.length);
+    const hasTech = all.some(t => t.tech) || uni.some(t => t.tech);
+    const sectors = Array.from(new Set(uni.map(t => t.sector))).sort();
+    const subsectors = Array.from(new Set(uni.filter(t => !scanState.sector.length || scanState.sector.indexOf(t.sector) >= 0).map(t => t.ind).filter(Boolean))).sort();
+    // drop any selected sub-sector that no longer belongs to the chosen sectors (prevents a stuck-empty result)
+    if (scanState.subsec.length) scanState.subsec = scanState.subsec.filter(x => subsectors.indexOf(x) >= 0);
+    const patBtn = p => '<button class="chip' + (scanState.patterns.indexOf(p) >= 0 ? " on" : "") + '" data-pat="' + p + '">' + p + "</button>";
+    const tfBtn = f => '<button class="chip' + (scanState.tfs.indexOf(f) >= 0 ? " on" : "") + '" data-tff="' + f + '">' + f + "</button>";
+    const dirBtn = (v, l) => '<button class="chip' + (scanState.dir === v ? " on" : "") + '" data-dir="' + v + '">' + l + "</button>";
+    const uniBtn = (v, l) => '<button class="chip' + (scanState.universe === v ? " on" : "") + '" data-scanuni="' + v + '">' + l + "</button>";
+    const filters =
+      '<div class="panel filters"><h3>פילטרים <span class="muted" style="font-size:12px">בחר כמה טיימפריימים = חיפוש קונפלואנס (התבנית מתקיימת על כולם)</span></h3><div class="frow">' +
+        '<div class="fgrp"><label>טיימפריימים · רב-בחירה</label><div class="chips">' +
+          ["D", "W", "M", "Q", "Y"].map(tfBtn).join("") +
+          scanState.tfsExtra.map(f => '<button class="chip tf-extra' + (scanState.tfs.indexOf(f) >= 0 ? " on" : "") + '" data-tff="' + f + '">' + f + '<span class="tf-x" data-rmtf="' + f + '" title="הסר">✕</span></button>').join("") +
+          '<button class="chip tf-addbtn" id="tfAdd" title="הוסף טיימפריים סטראט מותאם">➕</button>' +
+        "</div></div>" +
+        // נר — סוג (1/2U/2D/3) · צבע (ירוק/אדום) · צורה (פטיש/דוג׳י…) merged into ONE popover chip
+        '<div class="fgrp"><label>🕯️ נר <span class="muted" style="font-size:10px">· סוג · צבע · צורה</span></label>' +
+          '<div class="nrf-row"><span class="nrf-lbl">סוג</span><div class="chips">' + ["1", "2U", "2D", "3"].map(patBtn).join("") + "</div></div>" +
+          '<div class="nrf-row"><span class="nrf-lbl">צבע</span><div class="chips">' + dirBtn("all", "הכל") + dirBtn("up", "🟢 ירוק") + dirBtn("down", "🔴 אדום") + "</div></div>" +
+          '<div class="nrf-row"><span class="nrf-lbl">צורה</span>' + multiComboHtml("scanShape", SHAPE_MULTI, scanState.shape, "כל צורות הנר") + "</div>" +
+        "</div>" +
+        seqBuilder() +
+        // IN FORCE — standalone (works WITHOUT a sequence pattern): the close is holding beyond the prior bar's extreme.
+        // 🔼 = above the prior high (2U in force / long trigger) · 🔽 = below the prior low. Optionally require the
+        // prior "signal" bar to be a given shape → e.g. 🔼 + פטיש = "we're above the high of a prior hammer".
+        '<div class="fgrp"><label>IN FORCE <span class="muted" style="font-size:10px">· מעבר לקצה הנר הקודם</span></label><div class="chips" style="align-items:center">' +
+          '<button class="chip' + (scanState.inforce === "up" ? " on" : "") + '" data-inforce="up" title="הסגירה מעל הגבוה של הנר הקודם בטיימפריים הנבחר — טריגר לונג מוחזק (עובד גם בלי תבנית)">🔼 מעל הגבוה</button>' +
+          '<button class="chip' + (scanState.inforce === "down" ? " on" : "") + '" data-inforce="down" title="הסגירה מתחת לנמוך של הנר הקודם — טריגר שורט מוחזק">🔽 מתחת לנמוך</button>' +
+          ((scanState.inforce === "up" || scanState.inforce === "down")
+            ? multiComboHtml("scanSigShape", SHAPE_MULTI, scanState.sigShape, "כל נר איתות") +
+              '<span class="muted" style="margin-inline-start:8px;font-size:11px">סוג נר הייחוס:</span>' +
+              '<span class="chips">' + ["1", "2U", "2D", "3"].map(x =>
+                '<button class="chip' + (scanState.ifcType.indexOf(x) >= 0 ? " on" : "") + '" data-ifctype="' + x + '" title="פרצנו מעבר לקצה של נר קודם מסוג ' + x + ' (1 = נר פנימי · 3 = נר חיצוני)">' + x + "</button>").join("") + "</span>"
+            : "") +
+        "</div></div>" +
+        '<div class="fgrp"><label>🔄 היפוך <span class="muted" style="font-size:10px">· נר Strat · תמיכת/התנגדות פיבוט</span></label>' +
+          '<div class="chips">' +
+          [["any", "⚡ כל היפוך"], ["up", "🔼 היפוך שורי"], ["down", "🔽 היפוך דובי"]].map(o => '<button class="chip' + (scanState.broad === o[0] ? " on" : "") + '" data-broad="' + o[0] + '" title="נר היפוך לפי Strat (2D שנרקלם / 2U שנדחה)">' + o[1] + "</button>").join("") + "</div>" +
+          '<div class="chips" style="align-items:center;margin-top:8px"><span class="muted" style="font-size:10px;margin-inline-end:2px">🎯 פיבוט:</span>' +
+          [["off", "— הכל"], ["bull", "🟢 שורי · נשמרה מעל השפל"], ["bear", "🔴 דובי · נדחתה מתחת לשיא"]].map(o => '<button class="chip' + (techState.pivRev === o[0] ? " on" : "") + '" data-pivrev="' + o[0] + '" title="היפוך על פיבוט אמיתי: שורי = עשתה נמוך לפיבוט התחתון ונשמרה מעליו · דובי = עלתה לפיבוט העליון ונדחתה">' + o[1] + "</button>").join("") +
+          (_pivActive() ? '<span class="muted">±</span><input id="tPivPct" type="number" step="0.5" min="0" style="width:50px" value="' + techState.pivPct + '"><span class="muted">%</span>' +
+            '<span class="muted" style="margin-inline-start:6px" title="רגישות הפיבוט — כמה נרות מכל צד. יותר פיבוטים = קרובים/קטנים · גדולים = רק סווינגים משמעותיים">〽️</span><select id="tPivK">' +
+            ["3", "5", "10"].map(kv => '<option value="' + kv + '"' + (techState.pivK === kv ? " selected" : "") + ">" + (kv === "3" ? "יותר פיבוטים" : kv === "5" ? "רגיל" : "פיבוטים גדולים") + "</option>").join("") + "</select>" : "") +
+          "</div></div>" +
+        '<div class="fgrp"><label>📏 קרוב לשיא/שפל תקופתי <span class="muted" style="font-size:10px">(קצה טווח · בחירת כמה מסגרות = קונפלואנס בכולן יחד)</span></label><div class="chips" style="align-items:center;flex-wrap:wrap"><select id="tPextTest">' +
+          [["off", "— כבוי"], ["high", "🔺 קרוב לשיא"], ["low", "🔻 קרוב לשפל"], ["any", "⚡ שניהם"]].map(o => '<option value="' + o[0] + '"' + (techState.pextTest === o[0] ? " selected" : "") + ">" + o[1] + "</option>").join("") +
+          "</select>" + (_pextActive()
+            ? '<span class="muted">±</span><input id="tPextPct" type="number" step="0.5" min="0" style="width:52px" value="' + techState.pextPct + '"><span class="muted">%</span>' +
+              '<span class="chips" style="margin-inline-start:8px">' + ["Y", "Q", "M"].map(tf =>
+                '<button class="chip' + ((techState.pextTfs || []).indexOf(tf) >= 0 ? " on" : "") + '" data-pexttf="' + tf + '">' + (TF_HE_SHORT[tf] || tf) + "</button>").join("") + "</span>" +
+              '<select id="tPextRange" title="קודמת = השיא/שפל של התקופה המושלמת הקודמת (למשל יולי בסריקה חודשית — רמת ההדק להתרחבות) · נוכחית = התקופה שעדיין נסחרת (אוגוסט)" style="margin-inline-start:8px">' +
+                '<option value="prior"' + (techState.pextRange !== "current" ? " selected" : "") + ">תקופה קודמת (מושלמת)</option>" +
+                '<option value="current"' + (techState.pextRange === "current" ? " selected" : "") + ">תקופה נוכחית (נסחרת)</option>" +
+              "</select>"
+            : "") + "</div></div>" +
+        // ── universe / identity row (Adi's row 2): forced onto its own line by enhanceFilterBar via .fgrp-uni ──
+        '<div class="fgrp fgrp-uni"><label>יקום · רשימה</label><div class="chips" style="align-items:center">' + uniBtn("all", "הכל") + uniBtn("sp500", "S&P 500") + uniBtn("etf", "📜 תעודות סל") + uniBtn("comm", "⭐ קהילה") + '<button class="chip" id="scanSuggest" title="הצע מניה חדשה לסורק — עוברת בדיקה ואישור">➕ הצע מניה</button></div></div>' +
+        '<div class="fgrp fgrp-uni"><label>סימבול</label><input id="scanSym" placeholder="AAPL" value="' + scanState.sym + '"></div>' +
+        '<div class="fgrp fgrp-uni"><label>סקטור <span class="muted" style="font-size:10px">· רב-בחירה</span></label>' + multiComboHtml("scanSector", sectors.map(s => ({ val: s, label: s + (etfFor(s) ? " (" + etfFor(s) + ")" : "") })), scanState.sector, "הכל · הקלד לחיפוש") + "</div>" +
+        '<div class="fgrp fgrp-uni"><label>תת-סקטור <span class="muted" style="font-size:10px">· רב-בחירה</span></label>' + multiComboHtml("scanSubsec", subsectors.map(s => ({ val: s, label: s + (subEtfFor(s) ? " (" + subEtfFor(s) + ")" : "") })), scanState.subsec, "הכל · הקלד לחיפוש") + "</div>" +
+        '<div class="fgrp fgrp-uni"><label>מחיר ($)</label><div class="chips" style="align-items:center"><input id="scanPmin" type="number" min="0" step="1" placeholder="מ-" style="width:74px" value="' + scanState.priceMin + '"><span class="muted">–</span><input id="scanPmax" type="number" min="0" step="1" placeholder="עד" style="width:74px" value="' + scanState.priceMax + '"></div></div>' +
+        '<div class="fgrp fgrp-uni"><label>שווי שוק <span class="muted" style="font-size:10px">(B=מיליארד · M=מיליון)</span></label><div class="chips" style="align-items:center"><input id="scanCapMin" type="text" placeholder="מ- 2B" style="width:72px" value="' + escAttr(scanState.capMin) + '"><span class="muted">–</span><input id="scanCapMax" type="text" placeholder="עד 100B" style="width:72px" value="' + escAttr(scanState.capMax) + '"></div></div>' +
+        '<div class="fgrp fgrp-uni"><label>🎯 מבחן פתיחה תקופתית <span class="muted" style="font-size:10px">(תמיכה/התנגדות על פתיחת Y/Q/M)</span></label><div class="chips" style="align-items:center;flex-wrap:wrap"><select id="tPopenTest">' +
+          [["off", "— כבוי"], ["support", "🟢 תמיכה (לונג)"], ["resistance", "🔴 התנגדות (שורט)"], ["any", "⚡ שניהם"]].map(o => '<option value="' + o[0] + '"' + (techState.popenTest === o[0] ? " selected" : "") + ">" + o[1] + "</option>").join("") +
+          "</select>" + (_popenActive()
+            ? '<span class="muted">≤</span><input id="tPopenMult" type="number" step="0.1" min="0" style="width:52px" value="' + techState.popenMult + '"><span class="muted">×ATR</span>' +
+              '<span class="chips" style="margin-inline-start:8px">' + ["Y", "Q", "M"].map(tf =>
+                '<button class="chip' + ((techState.popenTfs || []).indexOf(tf) >= 0 ? " on" : "") + '" data-popentf="' + tf + '">' + (TF_HE_SHORT[tf] || tf) + "</button>").join("") + "</span>" +
+              '<select id="tPopenTouch" title="נגיעה רגילה = הסגירה בטווח הרמה · פתיל = הנר נגע ברמה עם פתיל וסגר בצד השני (דחייה — חזק יותר)" style="margin-inline-start:8px">' +
+                '<option value="price"' + (techState.popenTouch === "price" ? " selected" : "") + ">נגיעה רגילה</option>" +
+                '<option value="wick"' + (techState.popenTouch === "wick" ? " selected" : "") + ">🕯️ פתיל (דחייה)</option>" +
+              "</select>"
+            : "") + "</div></div>" +
+      "</div></div>";
+
+    // ---- technical filters (collapsible) ----
+    const opt = (v, cur, lbl) => '<option value="' + v + '"' + (String(cur) === String(v) ? " selected" : "") + ">" + (lbl == null ? v : lbl) + "</option>";
+    const onChip = (on, id, lbl) => '<button class="chip' + (on ? " on" : "") + '" id="' + id + '">' + lbl + "</button>";
+    const cnt = techActiveCount();
+    let techInner = "";
+    if (true) {   // always render inner — the panel now lives inside a dropdown chip in the filter bar
+      techInner = !hasTech
+        ? '<div class="note" style="margin-top:6px">⏳ הנתונים הטכניים ייטענו בהרצת הסורק הבאה בשרת.</div>'
+        : '<div class="frow tech-row">' +
+            '<div class="fgrp tf-ind-grp"><label>אינדיקטורים · מסגרת זמן <span class="muted" style="font-size:10px">(RSI·MFI·RVOL·ATR)</span></label><div class="chips" style="align-items:center"><select id="tTechTf">' +
+              ["D", "W", "M", "Q", "Y"].map(t => opt(t, techState.techTf, t + " · " + (TF_HE_SHORT[t] || t))).join("") + "</select>" +
+              (techState.techTf !== "D" ? '<span class="tf-ind-badge">' + (TF_HE_SHORT[techState.techTf] || techState.techTf) + "</span>" : "") + "</div></div>" +
+            '<div class="fgrp"><label>מיקום מול ממוצע (MA)</label><div class="chips" style="align-items:center">' +
+              '<select id="tMaType">' + opt("SMA", techState.maType) + opt("EMA", techState.maType) + opt("WMA", techState.maType) + '</select>' +
+              '<select id="tMaPer">' + MA_PERIODS.map(p => opt(p, techState.maPeriod)).join("") + '</select>' +
+              '<select id="tMaRel">' + opt("off", techState.maRel, "— בלי סינון") + opt("above", techState.maRel, "מעל הממוצע") + opt("below", techState.maRel, "מתחת לממוצע") + opt("near", techState.maRel, "עד ±% מהממוצע") + opt("far", techState.maRel, "יותר מ-±% מהממוצע (2 הכיוונים)") + opt("farAbove", techState.maRel, "יותר מ-% מעל הממוצע ⬆ (מתוח למעלה)") + opt("farBelow", techState.maRel, "יותר מ-% מתחת לממוצע ⬇ (מתוח למטה)") + opt("touchAbove", techState.maRel, "🎯 נגיעה מלמעלה (צל תחתון)") + opt("touchBelow", techState.maRel, "🎯 נגיעה מלמטה (צל עליון)") + '</select>' +
+              (_maPctShown() ? '<input id="tMaPct" type="number" step="0.5" min="0" style="width:58px" value="' + techState.maPct + '"><span class="muted">%</span>' : "") +
+            "</div>" + (techState.maRel !== "off" ? '<div class="ma-hint">' + maRelHint() + "</div>" : "") +
+            '<div id="maExtraWrap">' + (techState.maExtra || []).map((c, i) =>
+              '<div class="chips ma-ex" style="align-items:center;margin-top:6px">' +
+                '<span class="ma-and">＋ וגם</span>' +
+                '<select data-maex="type" data-idx="' + i + '">' + opt("SMA", c.type) + opt("EMA", c.type) + opt("WMA", c.type) + '</select>' +
+                '<select data-maex="period" data-idx="' + i + '">' + MA_PERIODS.map(p => opt(p, c.period)).join("") + '</select>' +
+                '<select data-maex="rel" data-idx="' + i + '">' + [["above", "מעל הממוצע"], ["below", "מתחת לממוצע"], ["near", "עד ±% מהממוצע"], ["far", "יותר מ-±% מהממוצע"], ["farAbove", "יותר מ-% מעל ⬆ (מתוח למעלה)"], ["farBelow", "יותר מ-% מתחת ⬇ (מתוח למטה)"], ["touchAbove", "🎯 נגיעה מלמעלה (צל תחתון)"], ["touchBelow", "🎯 נגיעה מלמטה (צל עליון)"]].map(o => opt(o[0], c.rel, o[1])).join("") + '</select>' +
+                (_maPctShownFor(c.rel) ? '<input type="number" step="0.5" min="0" style="width:54px" data-maex="pct" data-idx="' + i + '" value="' + c.pct + '"><span class="muted">%</span>' : "") +
+                '<button class="ma-del" data-maexdel="' + i + '" title="הסר תנאי" type="button">✕</button>' +
+              "</div>"
+            ).join("") + "</div>" +
+            '<button id="maExtraAdd" class="ma-add" type="button">＋ הוסף תנאי ממוצע</button>' +
+            "</div>" +
+            '<div class="fgrp"><label>RSI</label><div class="chips" style="align-items:center"><input id="tRsiMin" type="number" min="0" max="100" style="width:54px" value="' + techState.rsiMin + '"><span class="muted">–</span><input id="tRsiMax" type="number" min="0" max="100" style="width:54px" value="' + techState.rsiMax + '"></div></div>' +
+            '<div class="fgrp"><label>MFI · כסף חכם</label><div class="chips" style="align-items:center"><input id="tMfiMin" type="number" min="0" max="100" style="width:54px" value="' + techState.mfiMin + '"><span class="muted">–</span><input id="tMfiMax" type="number" min="0" max="100" style="width:54px" value="' + techState.mfiMax + '"></div></div>' +
+            '<div class="fgrp"><label>RVOL ≥</label><input id="tRvolMin" type="number" step="0.1" min="0" placeholder="—" style="width:62px" value="' + techState.rvolMin + '"></div>' +
+            '<div class="fgrp"><label>ווליום ≥</label><select id="tVolMin">' +
+              opt("0", techState.volMin, "— הכל") + opt("500000", techState.volMin, "500K") + opt("1000000", techState.volMin, "1M") + opt("2000000", techState.volMin, "2M") +
+              opt("5000000", techState.volMin, "5M") + opt("10000000", techState.volMin, "10M") + opt("20000000", techState.volMin, "20M") + "</select></div>" +
+            '<div class="fgrp"><label>📊 מגמת ווליום <span class="muted" style="font-size:10px">(ימים רצופים · עד 20)</span></label><div class="chips" style="align-items:center"><select id="tVolTrendDir">' +
+              opt("off", techState.volTrendDir, "— הכל") + opt("up", techState.volTrendDir, "📈 עולה") + opt("down", techState.volTrendDir, "📉 יורד") + "</select>" +
+              (_volTrendActive() ? '<span class="muted">≥</span><input id="tVolTrendDays" type="number" min="1" max="20" step="1" style="width:52px" value="' + _volTrendDays() + '"><span class="muted">ימים רצוף</span>' : "") + "</div></div>" +
+            '<div class="fgrp"><label>📊 ווליום מול הממוצע <span class="muted" style="font-size:10px">(ימים רצופים · עד 20)</span></label><div class="chips" style="align-items:center"><select id="tVolAvgDir">' +
+              opt("off", techState.volAvgDir, "— הכל") + opt("above", techState.volAvgDir, "📈 מעל הממוצע") + opt("below", techState.volAvgDir, "📉 מתחת לממוצע") + "</select>" +
+              (_volAvgActive() ? '<span class="muted">≥</span><input id="tVolAvgDays" type="number" min="1" max="20" step="1" style="width:52px" value="' + _volAvgDays() + '"><span class="muted">ימים רצוף</span>' : "") + "</div></div>" +
+            '<div class="fgrp"><label>💧 מגמת MFI <span class="muted" style="font-size:10px">(ימים רצופים · עד 20)</span></label><div class="chips" style="align-items:center"><select id="tMfiTrendDir">' +
+              opt("off", techState.mfiTrendDir, "— הכל") + opt("up", techState.mfiTrendDir, "📈 עולה") + opt("down", techState.mfiTrendDir, "📉 יורד") + "</select>" +
+              (_mfiTrendActive() ? '<span class="muted">≥</span><input id="tMfiTrendDays" type="number" min="1" max="20" step="1" style="width:52px" value="' + _mfiTrendDays() + '"><span class="muted">ימים רצוף</span>' : "") + "</div></div>" +
+            '<div class="fgrp"><label>🔄 היפוך MFI <span class="muted" style="font-size:10px">(מקיצוניות)</span></label><div class="chips" style="align-items:center"><select id="tMfiTurn">' +
+              opt("off", techState.mfiTurn, "— הכל") + opt("up", techState.mfiTurn, "📈 מלמטה (מתחת 20 ↑)") + opt("down", techState.mfiTurn, "📉 מלמעלה (מעל 80 ↓)") + opt("any", techState.mfiTurn, "⚡ שניהם") + "</select></div></div>" +
+            '<div class="fgrp"><label>🗓️ דיווח תוצאות <span class="muted" style="font-size:10px">(קרבה לדוח הבא)</span></label><div class="chips" style="align-items:center"><select id="tEarnDir">' +
+              opt("far", techState.earnDir, "מעל (רחוק — בטוח למסחר)") + opt("near", techState.earnDir, "עד (קרוב — לקראת דוח)") + "</select>" +
+              '<input id="tEarnMin" type="number" min="1" max="95" step="1" placeholder="—" style="width:64px" value="' + (techState.earnMin === "" ? "" : techState.earnMin) + '"><span class="muted">ימים</span></div></div>' +
+            '<div class="fgrp"><label>ממוצע ≥ (נזילות)</label><div class="chips" style="align-items:center"><select id="tAvgVolMin">' +
+              opt("0", techState.avgVolMin, "— הכל") + opt("300000", techState.avgVolMin, "300K") + opt("500000", techState.avgVolMin, "500K") + opt("1000000", techState.avgVolMin, "1M") +
+              opt("2000000", techState.avgVolMin, "2M") + opt("5000000", techState.avgVolMin, "5M") + opt("10000000", techState.avgVolMin, "10M") +
+              '</select><select id="tAvgVolPer">' + opt("30", techState.avgVolPeriod, "30י") + opt("90", techState.avgVolPeriod, "90י") + "</select></div></div>" +
+            '<div class="fgrp"><label>52ש׳ <span class="muted" style="font-size:10px">(מרחק משיא/שפל · טווח מ-עד %. למשל 0–3=קרוב · 20–100=שוק דובי)</span></label><div class="chips" style="align-items:center;flex-wrap:wrap"><select id="tExt52">' +
+              opt("off", techState.ext52, "— הכל") + opt("high", techState.ext52, "מרחק מהשיא") + opt("low", techState.ext52, "מרחק מהשפל") +
+              "</select>" + (techState.ext52 !== "off" ? '<span class="muted">מ-</span><input id="tExt52From" type="number" step="0.5" min="0" placeholder="0" style="width:52px" value="' + techState.ext52From + '"><span class="muted">עד</span><input id="tExt52To" type="number" step="0.5" min="0" placeholder="∞" style="width:52px" value="' + techState.ext52To + '"><span class="muted">%</span>' : "") + "</div></div>" +
+            '<div class="fgrp"><label>ATR% <span class="muted" style="font-size:10px">(תנודתיות · מ-עד)</span></label><div class="chips" style="align-items:center"><input id="tAtrpMin" type="number" step="0.5" min="0" placeholder="מ-" style="width:60px" value="' + techState.atrpMin + '"><span class="muted">–</span><input id="tAtrpMax" type="number" step="0.5" min="0" placeholder="עד" style="width:60px" value="' + techState.atrpMax + '"></div></div>' +
+            '<div class="fgrp"><label>תנועה % <span class="muted" style="font-size:10px">(לפי מסגרת זמן)</span></label><div class="chips" style="align-items:center">' +
+              '<select id="tChgTf" title="מסגרת הזמן של התנועה">' + opt("1d", techState.chgTf, "יומי") + opt("1w", techState.chgTf, "שבועי") + opt("1m", techState.chgTf, "חודשי") + opt("1q", techState.chgTf, "רבעוני") + opt("1y", techState.chgTf, "שנתי") + "</select>" +
+              '<input id="tChgMin" type="number" step="0.5" placeholder="מ-" style="width:60px" value="' + techState.chgMin + '"><span class="muted">–</span><input id="tChgMax" type="number" step="0.5" placeholder="עד" style="width:60px" value="' + techState.chgMax + '"></div></div>' +
+            '<div class="fgrp"><label>גאפ (פתיחה מול אתמול)</label><div class="chips" style="align-items:center"><select id="tGapDir">' +
+              opt("off", techState.gapDir, "— הכל") + opt("up", techState.gapDir, "גאפ אפ ↑") + opt("down", techState.gapDir, "גאפ דאון ↓") + opt("any", techState.gapDir, "⚡ שניהם") +
+              "</select>" + (_gapActive() ? '<span class="muted">≥</span><input id="tGapPct" type="number" step="0.5" min="0" style="width:56px" value="' + techState.gapPct + '"><span class="muted">%</span>' : "") + "</div></div>" +
+            '<div class="fgrp"><label>🌙 תנועת פרה/אפטר <span class="muted" style="font-size:10px">(מחוץ למסחר)</span></label><div class="chips" style="align-items:center"><select id="tExtMove">' +
+              opt("off", techState.extMove, "— הכל") + opt("up", techState.extMove, "🟢 עולה ↑") + opt("down", techState.extMove, "🔴 יורדת ↓") + opt("any", techState.extMove, "⚡ שניהם") +
+              "</select>" + (_extActive() ? '<span class="muted">≥</span><input id="tExtPct" type="number" step="0.5" min="0" style="width:56px" value="' + techState.extPct + '"><span class="muted">%</span>' : "") +
+              ((LIVE && LIVE.extWin) ? ' <span class="pos" style="font-size:10px">· ' + (LIVE.extWin === "pre" ? "פרה-מרקט פעיל" : "אפטר-מרקט פעיל") + "</span>" : ' <span class="muted" style="font-size:10px">· פעיל רק בשעות פרה/אפטר-מרקט</span>') + "</div></div>" +
+          "</div>";
+    }
+    const techBadge = cnt ? ' <span class="badge-ftfc">' + cnt + ' פעילים</span>' : ' <span class="muted" style="font-size:12px">נטרלי · שנה ערך כדי לסנן</span>';
+    const techPanel = '<div class="panel filters"><h3 id="techToggle" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;margin:0"><span>📈 פילטרים טכניים' + techBadge + '</span><span style="font-size:14px">' + (techState.techOpen ? "▲" : "▼") + "</span></h3>" + techInner + "</div>";
+
+    // ---- multi-timeframe (MTF) analysis: a separate bar-type+color condition per timeframe ----
+    const mtfCnt = mtfActiveCount();
+    const MTF_TYPE_OPTS = [{ val: "1", label: "1" }, { val: "2U", label: "2U" }, { val: "2D", label: "2D" }, { val: "3", label: "3" }];
+    const mtfTypeSel = tf => multiComboHtml("mtft_" + tf, MTF_TYPE_OPTS, scanState.mtf[tf].t, "— כל —");
+    const mtfColorSel = tf => '<select data-mtfc="' + tf + '">' + [["", "— כל"], ["up", "🟢 ירוק"], ["down", "🔴 אדום"]].map(o => '<option value="' + o[0] + '"' + (scanState.mtf[tf].c === o[0] ? " selected" : "") + ">" + o[1] + "</option>").join("") + "</select>";
+    let mtfInner = "";
+    if (true) {   // always render inner — folded into a dropdown chip in the filter bar
+      mtfInner = '<div class="mtf-rows">' + MTF_TFS.map(tf =>
+        '<div class="mtf-cond"><span class="mtf-tf-lbl">' + MTF_TF_HE[tf] + "</span>" + mtfTypeSel(tf) + mtfColorSel(tf) + "</div>").join("") + "</div>" +
+        '<div class="note" style="margin-top:8px;font-size:11px">💡 בחר סוג נר וצבע לכל טיימפריים בנפרד — <b>כולם צריכים להתקיים יחד</b>. לדוגמה: חודשי = <b>2U</b>, יומי = <b>2D + 🟢</b> (2D בקונפליקט). קונפליקט = 2D ירוק / 2U אדום. תנאים אלה מצטרפים לשאר הפילטרים.</div>';
+    }
+    const mtfBadge = mtfCnt ? ' <span class="badge-ftfc">' + mtfCnt + ' פעילים</span>' : ' <span class="muted" style="font-size:12px">תנאי נפרד לכל טיימפריים</span>';
+    const mtfPanel = '<div class="panel filters"><h3 id="mtfToggle" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;margin:0"><span>🔀 ניתוח מרובה-זמן (MTF)' + mtfBadge + '</span><span style="font-size:14px">' + (scanState.mtfOpen ? "▲" : "▼") + "</span></h3>" + mtfInner + "</div>";
+
+    // ---- indicator scanners (compression / Bollinger / swing) — collapsible, stack AND on top of everything ----
+    const indCnt = indActiveCount();
+    let indInner = "";
+    if (true) {   // always render inner — folded into a dropdown chip in the filter bar
+      indInner = !hasTech
+        ? '<div class="note" style="margin-top:6px">⏳ הנתונים הטכניים ייטענו בהרצת הסורק הבאה בשרת.</div>'
+        : '<div class="frow tech-row">' +
+            '<div class="fgrp"><label>📉 דחיסת ממוצעים ≤ % <span class="muted" style="font-size:10px">(SMA 20/50/100/200)</span></label><input id="tCompMax" type="number" step="0.5" min="0" placeholder="—" style="width:70px" value="' + techState.compMax + '"></div>' +
+            '<div class="fgrp"><label>🔒 ממוצע שטוח / דחיסה <span class="muted" style="font-size:10px">(ה-SMA הנבחר זז ≤ % בטווח הימים — דשדוש / קפיץ דרוך)</span></label>' +
+              '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">' +
+                '<select id="tFlatSma" title="איזה ממוצע">' + [10, 20, 50, 100, 150, 200].map(p => opt(String(p), techState.flatSma, "SMA " + p)).join("") + "</select>" +
+                '<select id="tFlatDays" title="כמות ימים">' + [5, 10, 15, 20, 25, 30, 35, 40, 45, 50].map(d => opt(String(d), techState.flatDays, d + " ימים")).join("") + "</select>" +
+                '<input id="tFlatMax" type="number" step="0.5" min="0.5" max="10" placeholder="≤ %" style="width:64px" value="' + techState.flatMax + '">' +
+              "</div></div>" +
+            '<div class="fgrp"><label>🎈 תקופת בולינגר</label><select id="tBbPeriod">' + opt("20", techState.bbPeriod, "20 (קלאסי)") + opt("50", techState.bbPeriod, "50 (ארוך)") + "</select></div>" +
+            '<div class="fgrp"><label>🎈 בולינגר דחיסה ≤ <span class="muted" style="font-size:10px">(אחוזון 0–100, יחסי למניה)</span></label><input id="tBbSqMax" type="number" step="5" min="0" max="100" placeholder="—" style="width:70px" value="' + techState.bbSqMax + '"></div>' +
+            '<div class="fgrp"><label>🧨 TTM Squeeze <span class="muted" style="font-size:10px">(בולינגר בתוך קלטנר — קפיץ דרוך / רגע השחרור)</span></label>' +
+              '<div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap">' +
+                '<select id="tSqzMode">' + opt("off", techState.sqzMode, "— כבוי") + opt("on", techState.sqzMode, "קפיץ דרוך (בדחיסה)") + opt("fired", techState.sqzMode, "רגע השחרור") + "</select>" +
+                '<input id="tSqzMinBars" type="number" step="1" min="1" placeholder="≥ ימים" title="מינימום ימים רצופים בדחיסה (אנרגיה שנצברה)" style="width:76px" value="' + techState.sqzMinBars + '">' +
+              "</div></div>" +
+            '<div class="fgrp"><label>🎈 רוחב בולינגר ≤ <span class="muted" style="font-size:10px">(% אבסולוטי — צר ממש)</span></label><input id="tBbwMax" type="number" step="0.5" min="0" placeholder="—" style="width:70px" value="' + techState.bbwMax + '"></div>' +
+            '<div class="fgrp"><label>🎈 בולינגר · מיקום ברצועות <span class="muted" style="font-size:10px">(%B · חזרה לממוצע · בחירה מרובה)</span></label>' +
+              multiComboHtml("tBbPos", [
+                { val: "lowerZone", label: "בחלק התחתון · נוגעת מבפנים (%B≤20)" },
+                { val: "upperZone", label: "בחלק העליון · נוגעת מבפנים (%B≥80)" },
+                { val: "below", label: "מתחת לרצועה · LONG (%B≤0)" },
+                { val: "above", label: "מעל הרצועה · SHORT (%B≥100)" },
+                { val: "rev", label: "שני הקצוות · חזרה לממוצע" },
+              ], _bbPosArr(), "— הכל") + "</div>" +
+            '<div class="fgrp"><label>〽️ סווינג <span class="muted" style="font-size:10px">(שיא/שפל אופקי · קרבה · בדיקת פריצה)</span></label><div class="chips" style="align-items:center"><select id="tSwSide">' +
+              opt("off", techState.swSide, "— הכל") +
+              opt("high", techState.swSide, "קרוב לשיא") + opt("low", techState.swSide, "קרוב לתחתית") +
+              opt("breakHi", techState.swSide, "🚀 פריצת שיא + בדיקה") + opt("breakLo", techState.swSide, "🔻 שבירת שפל + בדיקה") +
+              "</select>" + (_swActive() ? '<span class="muted">±</span><input id="tSwPct" type="number" step="0.5" min="0" style="width:54px" value="' + techState.swPct + '"><span class="muted">%</span>' +
+                '<span class="muted" style="margin-inline-start:8px" title="רגישות הפיבוט — כמה נרות מכל צד. יותר פיבוטים = פיבוטים קרובים/קטנים · גדולים = רק סווינגים משמעותיים">〽️</span><select id="tSwK">' +
+                opt("3", techState.swK, "יותר פיבוטים") + opt("5", techState.swK, "רגיל") + opt("10", techState.swK, "פיבוטים גדולים") + "</select>" : "") + "</div></div>" +
+            '<div class="fgrp"><label>📐 קווי מגמה אלכסוניים</label><div class="chips" style="align-items:center"><select id="tTrendMode">' +
+              opt("off", techState.trendMode, "— הכל") +
+              opt("touchsup", techState.trendMode, "נגיעה בתמיכה ⤢") + opt("touchres", techState.trendMode, "נגיעה בהתנגדות ⤡") +
+              opt("breakup", techState.trendMode, "פריצת התנגדות ⬆") + opt("breakdn", techState.trendMode, "שבירת תמיכה ⬇") +
+              "</select>" + ((techState.trendMode === "touchsup" || techState.trendMode === "touchres") ? '<span class="muted">±</span><input id="tTrendPct" type="number" step="0.5" min="0" style="width:54px" value="' + techState.trendPct + '"><span class="muted">%</span>' : "") + "</div></div>" +
+            '<div class="fgrp"><label>🌀 פיבונאצי (ריטרייסמנט)</label><div class="chips" style="align-items:center"><select id="tFibLevel">' +
+              opt("off", techState.fibLevel, "— הכל") +
+              opt("23.6", techState.fibLevel, "23.6%") + opt("38.2", techState.fibLevel, "38.2%") +
+              opt("61.8", techState.fibLevel, "61.8%") + opt("78.6", techState.fibLevel, "78.6%") + opt("88.6", techState.fibLevel, "88.6%") +
+              opt("gp", techState.fibLevel, "⭐ Golden Pocket") + "</select>" +
+              (_fibActive() ? '<select id="tFibDir">' + opt("any", techState.fibDir, "כל כיוון") + opt("up", techState.fibDir, "פולבק בטרנד עולה ↗") + opt("down", techState.fibDir, "תיקון בטרנד יורד ↘") + opt("touchAbove", techState.fibDir, "🎯 נגיעה מלמעלה (צל תחתון · תמיכה)") + opt("touchBelow", techState.fibDir, "🎯 נגיעה מלמטה (צל עליון · התנגדות)") + '</select><span class="muted">±</span><input id="tFibTol" type="number" step="0.5" min="0" style="width:50px" value="' + techState.fibTol + '"><span class="muted">%</span>' : "") + "</div></div>" +
+          "</div>" +
+          '<div class="note" style="margin-top:8px;font-size:11px">💡 <b>דחיסת ממוצעים</b> = טווח ה-SMA כאחוז מהמחיר (נמוך=צפוף). <b>בולינגר דחיסה</b> = אחוזון רוחב הרצועות מול 6 חודשים (נמוך=לפני פריצה). <b>סווינג</b> = קרוב לרמת שיא/תחתית אחרונה. <b>קווי מגמה</b> = קו אלכסוני שנמתח דרך שיאים/תחתיות: <u>נגיעה</u>=בטווח ±% מהקו · <u>פריצה/שבירה</u>=חצה את הקו. <b>פיבונאצי</b> = כמה המחיר תיקן מה-swing האחרון (ZigZag לפי סטיית ATR); בחר רמה (או Golden Pocket 0.618–0.65) + כיוון + ±% קרבה. כל פילטר מוסיף עמודה וממוין בלחיצה על הכותרת — ומצטרף (AND) לכל שאר הסינונים.</div>' +
+          (_bbPosActive() ? '<div class="note" style="margin-top:6px;border-inline-start:3px solid #F2C94C;background:rgba(242,201,76,.07);font-size:11px">🎯 <b>חזרה לממוצע:</b> מתחת לרצועה = <b class="pos">LONG</b> (oversold) · מעל הרצועה = <b class="neg">SHORT</b> (overbought). ⚠ <b>מתחת/מעל הרצועה לבד זה לרוב "סכין נופל"</b> — בשוק טרנד המחיר יכול להמשיך לאורך הרצועה. <b>מומלץ להמתין ל-reclaim</b> (המחיר חוזר לתוך הרצועה) לפני כניסה. סינון reclaim אוטומטי ייווסף אחרי בדיקות backtest.</div>' : "");
+    }
+    const indBadge = indCnt ? ' <span class="badge-ftfc">' + indCnt + ' פעילים</span>' : ' <span class="muted" style="font-size:12px">דחיסה · בולינגר · סווינג · קווי מגמה · פיבונאצי</span>';
+    const indPanel = '<div class="panel filters"><h3 id="indToggle" style="cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;margin:0"><span>🎯 סורקי אינדיקטורים' + indBadge + '</span><span style="font-size:14px">' + (scanState.indOpen ? "▲" : "▼") + "</span></h3>" + indInner + "</div>";
+
+    const techOn = techActive();
+    const maLabel = techState.maType + techState.maPeriod;
+    let rows = sortRows(filterRows(all));
+    // ★ "favorites on top": stable-partition the (already sorted) rows so starred symbols rise to the head
+    if (scanState.favTop && window.Prefs) {
+      const fav = rows.filter(t => window.Prefs.isFav(t.sym)), rest = rows.filter(t => !window.Prefs.isFav(t.sym));
+      if (fav.length) rows = fav.concat(rest);
+    }
+    const CAP = 300;
+    const shown = rows.slice(0, CAP);
+    const dmapKey = _dmapKey(techState.maType);
+    // optional result columns — shown if the user toggled them on OR the matching filter is active
+    const optCols = [
+      { key: "ind", th: "תת-סקטור", tip: "תת-הסקטור (התעשייה) של המניה + תעודת הסל שלה", cell: (k, dma, t) => '<td class="tname" style="text-align:start">' + (t && t.ind ? t.ind + (subEtfFor(t.ind) ? ' <span class="muted">· ' + subEtfFor(t.ind) + "</span>" : "") : '<span class="muted">—</span>') + "</td>", active: scanState.subsec.length > 0 },
+      { key: "rsi", th: "RSI" + _tfSuf(), tip: "RSI (0–100): מדד מומנטום. מעל 70 = קניית-יתר, מתחת 30 = מכירת-יתר" + _tfTip(), cell: k => { const v = _techVal(k, "rsi"); return '<td class="' + rsiCls(v) + '">' + (v == null ? "—" : v.toFixed(0)) + "</td>"; }, active: techState.rsiMin > 0 || techState.rsiMax < 100 },
+      { key: "mfi", th: "MFI" + _tfSuf(), tip: "MFI (0–100): תזרים כסף — כמו RSI אך משוקלל בווליום ('כסף חכם'). מעל 80 קניית-יתר, מתחת 20 מכירת-יתר" + _tfTip(), cell: k => { const v = _techVal(k, "mfi"); return '<td class="' + mfiCls(v) + '">' + (v == null ? "—" : v.toFixed(0)) + "</td>"; }, active: techState.mfiMin > 0 || techState.mfiMax < 100 },
+      { key: "rvol", th: "RVOL" + _tfSuf(), tip: "ווליום יחסי: נפח המסחר היום חלקי הממוצע. מעל 1× = פעילות ערה מהרגיל" + _tfTip(), cell: k => { const v = _techVal(k, "rvol"); return "<td>" + (v == null ? "—" : v.toFixed(2) + "×") + "</td>"; }, active: _rv() > 0 },
+      { key: "vol", th: "ווליום", tip: "נפח: מספר המניות שנסחרו היום", cell: k => "<td>" + fmtVol(k.vol) + "</td>", active: techState.volMin > 0 },
+      { key: "voltrend", th: "מגמת נפח", tip: "רצף ימים רצופים של ווליום עולה (📈) או יורד (📉) — עקביות מרמזת על עניין בונה או דועך, לקראת שינוי כיוון אפשרי", cell: k => { const v = k.voltrend; return v ? "<td class='" + (v > 0 ? "pos" : "neg") + "'>" + (v > 0 ? "📈 " + v : "📉 " + Math.abs(v)) + " ימים</td>" : '<td class="muted">—</td>'; }, active: _volTrendActive() },
+      { key: "volavgtrend", th: "נפח מול ממוצע", tip: "כמה ימים ברציפות הווליום מעל (📈) או מתחת (📉) לממוצע 20 הימים — עניין מוגבר מתמשך או רגיעה", cell: k => { const v = k.volavgtrend; return v ? "<td class='" + (v > 0 ? "pos" : "neg") + "'>" + (v > 0 ? "📈 מעל " + v : "📉 מתחת " + Math.abs(v)) + " ימים</td>" : '<td class="muted">—</td>'; }, active: _volAvgActive() },
+      { key: "mfitrend", th: "מגמת MFI", tip: "רצף ימים רצופים של MFI עולה (📈) או יורד (📉) — תזרים כסף בונה או דועך", cell: k => { const v = k.mfitrend; return v ? "<td class='" + (v > 0 ? "pos" : "neg") + "'>" + (v > 0 ? "📈 " + v : "📉 " + Math.abs(v)) + " ימים</td>" : '<td class="muted">—</td>'; }, active: _mfiTrendActive() },
+      { key: "mfiturn", th: "היפוך MFI", tip: "MFI משנה כיוון מקיצוניות: 📈 מלמטה (היה מתחת 20 ומתהפך למעלה) · 📉 מלמעלה (היה מעל 80 ומתהפך למטה)", cell: k => { const v = k.mfiturn; return v === "up" ? '<td class="pos">📈 מלמטה</td>' : v === "down" ? '<td class="neg">📉 מלמעלה</td>' : '<td class="muted">—</td>'; }, active: _mfiTurnActive() },
+      { key: "earn", th: "דיווח", tip: "ימים עד דוח התוצאות הקרוב (מקור: Finnhub). '95+' = אין דיווח ידוע ב-95 הימים הקרובים (רחוק/בטוח)", cell: k => { const v = k.earn; return v == null ? '<td class="pos">🟢 95+ ימים</td>' : "<td class='" + (v <= 7 ? "neg" : "") + "'>📅 " + (v === 0 ? "היום" : "בעוד " + v + " ימים") + "</td>"; }, active: techState.earnMin !== "" },
+      { key: "atrp", th: "ATR%" + _tfSuf(), tip: "ATR%: טווח התנועה הממוצע כאחוז מהמחיר — מדד תנודתיות" + _tfTip(), cell: k => { const v = _techVal(k, "atrp"); return "<td>" + (v == null ? "—" : v.toFixed(2) + "%") + "</td>"; }, active: _atrpActive() },
+      { key: "gap", th: "גאפ", tip: "גאפ: פער הפתיחה של היום מול סגירת אתמול (%)", cell: k => "<td>" + dPct(k.gap) + "</td>", active: _gapActive() },
+      { key: "ext", th: "🌙 פרה/אפטר", tip: "תנועת המחיר מחוץ לשעות המסחר (פרה-מרקט לפני הפתיחה · אפטר-מרקט אחרי הסגירה). מוצג רק כשחלון כזה פעיל.", cell: (k, dma, t) => { const e = _extOf(t.sym); return "<td>" + (e == null ? '<span class="muted">—</span>' : dPct(e)) + "</td>"; }, active: _extActive() },
+      { key: "dma", th: "Δ " + maLabel, tip: "מרחק המחיר (%) מהממוצע-הנע שבחרת בפילטר הטכני", cell: (k, dma) => "<td>" + dPct(dma) + "</td>", active: techState.maRel !== "off" },
+      { key: "dhi52", th: "Δ שיא52", tip: "מרחק המחיר משיא 52 השבועות (0% = בשיא)", cell: k => "<td>" + dPct(k.dhi52) + "</td>", active: techState.ext52 !== "off" },
+      { key: "comp", th: "דחיסת MA", tip: "דחיסת ממוצעים: כמה הממוצעים הנעים צפופים זה לזה — נמוך = קפיץ דחוס לפני פריצה", cell: k => { const sp = _compSpread(k); return '<td class="sma-spread">' + (sp == null ? "—" : sp.toFixed(2) + "%") + "</td>"; }, active: _compActive() },
+      { key: "flat", th: "SMA שטוח", tip: "כמה ה-SMA הנבחר זז (%) בטווח הימים שבחרת — נמוך = ממוצע שטוח / דשדוש צר", cell: k => { const v = _flatVal(k); return '<td class="sma-spread">' + (v == null ? "—" : v.toFixed(2) + "%") + "</td>"; }, active: _flatActive() },
+      { key: "sqz", th: "🧨 Squeeze", tip: "TTM Squeeze — בולינגר מתכווץ בתוך קלטנר. 🧨 = בדחיסה (המספר = ימים רצופים · חץ = כיוון מומנטום) · 💥 = רגע השחרור. יותר ימים בדחיסה = יותר אנרגיה נצברה", cell: k => { const s = k.sqz; if (!s || !s.length) return '<td class="muted">—</td>'; const ar = s[2] > 0 ? ' <span class="pos">▲</span>' : s[2] < 0 ? ' <span class="neg">▼</span>' : ""; if (s[0] === 1) return '<td title="בדחיסה ' + s[1] + ' ימים רצופים">🧨 ' + s[1] + "ד" + ar + "</td>"; if (s[0] === 2) return '<td title="הדחיסה השתחררה הרגע">💥' + ar + "</td>"; return '<td class="muted">—</td>'; }, active: _sqzActive() },
+      { key: "bbsq", th: "BB דחיסה" + (techState.bbPeriod === "50" ? " (50)" : ""), tip: "דחיסת בולינגר (יחסי): אחוז הימים (~חצי שנה) עם רצועות צרות יותר — נמוך = הכי דחוס שהמניה הייתה. תופס גם מניות תנודתיות בקפיץ יחסי", cell: k => { const v = _bbVal(k, "bbsq"); return "<td>" + (v == null ? "—" : v.toFixed(0)) + "</td>"; }, active: _bbActive() },
+      { key: "bbw", th: "רוחב BB" + (techState.bbPeriod === "50" ? " (50)" : ""), tip: "רוחב רצועות בולינגר כאחוז מהמחיר (אבסולוטי): נמוך = רצועות צרות ממש עכשיו. p25 של השוק ≈ 10%", cell: k => { const v = _bbVal(k, "bbw"); return "<td>" + (v == null ? "—" : v.toFixed(1) + "%") + "</td>"; }, active: _bbwActive() },
+      { key: "bbp", th: "%B" + (techState.bbPeriod === "50" ? " (50)" : ""), tip: "מיקום המחיר ברצועות בולינגר: 0=רצועה תחתונה · 100=עליונה. מתחת ל-0 = מתחת לרצועה (מועמד LONG לחזרה לממוצע) · מעל 100 = מעל הרצועה (מועמד SHORT)", cell: k => { const v = _bbVal(k, "bbp"); return "<td>" + (v == null ? "—" : v <= 0 ? '<b class="pos">' + v.toFixed(0) + " ▲</b>" : v >= 100 ? '<b class="neg">' + v.toFixed(0) + " ▼</b>" : v.toFixed(0)) + "</td>"; }, active: _bbPosActive() },
+      { key: "swd", th: "Δ סווינג", tip: "מרחק המחיר (%) מנקודת הסווינג/פיבוט האחרונה (שיא/תחתית מקומית)", cell: k => "<td>" + dPct(_pivActive() ? (techState.pivRev === "bull" ? _pivLoD(k) : _pivHiD(k)) : ((techState.swSide === "low" || techState.swSide === "breakLo") ? _swLoD(k) : _swHiD(k))) + "</td>", active: _swActive() || _pivActive() },
+      { key: "trend", th: "Δ קו מגמה", tip: "מרחק המחיר (%) מקו המגמה האלכסוני הרלוונטי. ~0 = נגיעה · חיובי = מעל הקו · שלילי = מתחת · במוסגר מספר הנגיעות שמאשרות את הקו", cell: k => { const v = _trendVal(k), n = _trendTouches(k); return "<td>" + dPct(v) + (v != null && n ? ' <span class="muted" style="font-size:10px">·' + n + "</span>" : "") + "</td>"; }, active: _trendActive() },
+      { key: "fib", th: "פיבו %", tip: "רמת הריטרייסמנט של המחיר ב-swing האחרון, לוגריתמי וכמו TradingView (0% = בשיא ה-swing · 100% = בשפל). ↗ = פולבק בטרנד עולה (רמות=תמיכה) · ↘ = תיקון/באונס בטרנד יורד (רמות=התנגדות)", cell: k => { const v = k.fibr; if (v == null) return '<td class="muted">—</td>'; const arr = k.fibdir === "up" ? "↗" : "↘"; return "<td>" + v.toFixed(1) + "% <span class='muted' style='font-size:10px'>" + arr + "</span></td>"; }, active: _fibActive() },
+    ];
+    // a filter becoming active auto-adds its column (once); the user can still remove it via the chip
+    optCols.forEach(c => { if (c.active && colState[c.key] == null) colState[c.key] = true; });
+    const visCols = optCols.filter(c => colState[c.key]);
+    const body = shown.map(t => {
+      const k = t.tech || {};
+      const dma = (k[dmapKey] || {})[techState.maPeriod];
+      const techCells = visCols.map(c => c.cell(k, dma, t)).join("");
+      const s = t.sym;
+      const tfCellsSel = ["Y", "Q", "M", "W", "D"].map(k => showCol(k) ? "<td>" + tf(t[k], s, k) + "</td>" : "").join("") +
+        scanState.tfsExtra.map(k => "<td>" + tf(t[k], s, k) + "</td>").join("");   // custom + intraday TF cells
+      return "<tr>" +
+        "<td>" + star(t.sym) + "</td>" +
+        '<td class="sym"><span class="tsym clickable" data-chart="' + t.sym + '" data-tf="D">' + t.sym + "</span></td>" +
+        (showCol("sec") ? '<td class="tname" style="text-align:start">' + t.sector + "</td>" : "") +
+        (showCol("etf") ? "<td>" + (etfFor(t.sector) ? '<span class="tsym clickable etf-chip" data-chart="' + etfFor(t.sector) + '" data-tf="D">' + etfFor(t.sector) + "</span>" : '<span class="muted">—</span>') + "</td>" : "") +
+        (showCol("price") ? '<td data-flick="scp-' + t.sym + '">' + money(t.price) + "</td>" : "") +
+        (showCol("mc") ? "<td>" + fmtCap(t.mc) + "</td>" : "") +
+        (showCol("chg") ? '<td data-flick="scc-' + t.sym + '">' + pct(t.chg) + "</td>" : "") +
+        tfCellsSel +
+        (showCol("ftfc") ? "<td>" + ftfcBadge(t) + "</td>" : "") +
+        seqCells(t) +
+        techCells +
+        '<td><a class="tvlink" href="https://www.tradingview.com/chart/?symbol=' + t.sym + '" target="_blank" rel="noopener">📈</a></td>' +
+      "</tr>";
+    }).join("");
+
+    const filterActive = scanState.patterns.length || scanState.dir !== "all" || scanState.shape.length || scanState.broad !== "off" || _pivActive() || seqActive() || scanState.sector.length || scanState.subsec.length || scanState.sym || scanState.ftfc || scanState.priceMin !== "" || scanState.priceMax !== "" || scanState.capMin !== "" || scanState.capMax !== "" || scanState.tfs.length > 1 || cnt || mtfCnt || indCnt;
+    const facts = filterActive ? scanInsights(rows, all.length) : [];
+    const insightsPanel =
+      '<div class="panel scan-insights"><h3>🧠 תובנות על התוצאות</h3>' +
+      (facts.length
+        ? facts.map(f => '<div class="insight"><span class="ins-ico">' + f.i + '</span><span>' + f.t + "</span></div>").join("")
+        : '<div class="ins-empty">סַנֵּן לפי תבנית, טיימפריים, סקטור או פילטר טכני — ואציג לך עובדות מעניינות על מה שיצא. 🔍</div>') +
+      "</div>";
+
+    const baseTh = {
+      sec: sortableTh("סקטור", "sec", ' title="הסקטור של המניה"'),
+      etf: sortableTh("ת\"ס", "etf", ' title="תעודת הסל (ETF) שמייצגת את הסקטור"'),
+      price: sortableTh("מחיר", "price", ' title="המחיר הנוכחי"'),
+      mc: sortableTh("שווי", "mc", ' title="שווי שוק (מחיר × מספר מניות)"'),
+      chg: sortableTh("%", "chg", ' title="שינוי במחיר היום באחוזים"'),
+      Y: sortableTh("Y", "Y", ' title="נר Strat בטיימפריים השנתי"'), Q: sortableTh("Q", "Q", ' title="נר Strat בטיימפריים הרבעוני"'),
+      M: sortableTh("M", "M", ' title="נר Strat בטיימפריים החודשי"'), W: sortableTh("W", "W", ' title="נר Strat בטיימפריים השבועי"'),
+      D: sortableTh("D", "D", ' title="נר Strat בטיימפריים היומי"'),
+      ftfc: sortableTh("FTFC", "ftfc", ' title="FTFC — המשכיות טיימפריימים מלאה: כל הטיימפריימים באותו כיוון (ירוק=עולה, אדום=יורד)"'),
+    };
+    // each custom TF the user added (2D/3D… + intraday 15m…4H) becomes its own Strat column, right after D
+    scanState.tfsExtra.forEach(x => { baseTh[x] = sortableTh(x, x, ' title="נר Strat בטיימפריים ' + x + '"'); });
+    const baseOrder = ["sec", "etf", "price", "mc", "chg", "Y", "Q", "M", "W", "D"].concat(scanState.tfsExtra, ["ftfc"]);
+    const head =
+      '<th class="fav-th"><button class="fav-toptgl' + (scanState.favTop ? " on" : "") + '" id="favTopTgl" title="' + (scanState.favTop ? "בטל — הצג לפי המיון הרגיל" : "הצג את המועדפים (⭐) בראש הרשימה") + '">★</button></th>' + sortableTh("סימבול", "sym", ' title="סימבול המניה · לחץ על השם בשורה לגרף"') +
+      baseOrder.filter(showCol).map(k => baseTh[k]).join("") +
+      (seqActive() ? '<th title="C2 — 2 נרות אחורה (הנר הראשון ברצף)">C2</th><th title="C1 — 1 נר אחורה">C1</th><th title="CC — הנר הנוכחי">CC</th>' : "") +
+      visCols.map(c => sortableTh(c.th, c.key, c.tip ? ' title="' + escAttr(c.tip) + '"' : "")).join("") +
+      "<th></th>";
+    const nCols = 2 + baseOrder.filter(showCol).length + (seqActive() ? 3 : 0) + visCols.length + 1;
+    // the period-open filter needs each cell's .o (period open) — older "אתמול" snapshots (saved before
+    // 2026-08-27) lack it, so explain instead of showing a silent "0 results".
+    const _popenNoData = _popenActive() && all.length && !all.some(t => (t.Y && t.Y.o != null) || (t.Q && t.Q.o != null) || (t.M && t.M.o != null));
+    const emptyMsg = _popenNoData
+      ? 'מבחן הפתיחה התקופתית לא זמין בתצוגה הזו (הנתון נוסף ב-27/08) — עברו ל🔴 לייב, או המתינו לסנאפשוט "אתמול" הבא.'
+      : "אין תוצאות לפילטרים האלה";
+    const colChips = '<div class="col-picker"><span class="muted" style="font-size:12px">➕ עמודות:</span>' +
+      '<span class="muted col-grp-lbl">בסיס:</span>' +
+      BASE_COLS.map(([k, lbl]) => '<button class="chip col-chip' + (showCol(k) ? " on" : "") + '" data-col="' + k + '" title="הצג/הסתר את עמודת ' + escAttr(lbl) + '">' + lbl + "</button>").join("") +
+      '<span class="col-sep"></span><span class="muted col-grp-lbl">נוספות:</span>' +
+      optCols.map(c => '<button class="chip col-chip' + (colState[c.key] ? " on" : "") + '" data-col="' + c.key + '" title="' + escAttr((c.tip ? c.tip : c.th) + (c.active ? " · פילטר פעיל" : "")) + '">' + c.th + (c.active ? " •" : "") + "</button>").join("") + "</div>";
+    const resultsPanel =
+      '<div class="panel scan-results"><h3><span>תוצאות <span class="muted" style="font-size:12px">' + rows.length + " מתוך " + all.length + (rows.length > CAP ? " · מוצגות " + CAP + " הראשונות" : "") + "</span></span>" + (rows.length ? '<span style="display:flex;gap:8px"><button class="btn ghost" id="scanGrid" style="font-size:12px;font-weight:600">📊 תצוגת גרפים</button><button class="btn ghost" id="scanCopy" style="font-size:12px;font-weight:600">📋 העתק ' + rows.length + " טיקרים</button></span>" : "") + "</h3>" + colChips +
+      '<div class="tablewrap"><table class="scan-table"><thead><tr>' + head + "</tr></thead><tbody>" +
+      (shown.length ? body : '<tr><td colspan="' + nCols + '" class="muted" style="text-align:center;padding:30px">אין תוצאות לפילטרים האלה</td></tr>') +
+      "</tbody></table></div>" + colorLegend() + "</div>";
+
+    const presets = (window.Prefs && window.Prefs.scanPresets) ? window.Prefs.scanPresets() : [];
+    if (_selPreset && !presets.some(p => p.id === _selPreset)) _selPreset = "";  // stale id (deleted) → clear
+    // group the load-preset dropdown by CATEGORY (in the list's order) with a thin native divider (<optgroup>)
+    const _poGroups = {}, _poSeq = [];
+    presets.forEach(p => { const c = p.cat || ""; if (_poSeq.indexOf(c) < 0) _poSeq.push(c); (_poGroups[c] = _poGroups[c] || []).push(p); });
+    const _poOpt = p => '<option value="' + escAttr(p.id) + '"' + (p.id === _selPreset ? " selected" : "") + ">" + escAttr(p.name) + "</option>";
+    const presetOpts = '<option value="">— טען פריסט —</option>' +
+      _poSeq.map(c => { const o = _poGroups[c].map(_poOpt).join(""); return c ? '<optgroup label="' + escAttr(_catLabel(c)) + '">' + o + "</optgroup>" : o; }).join("");
+    const topBar = '<div class="panel filters scan-topbar">' +
+      '<div class="stb-grp stb-view"><span class="muted stb-lbl">👁️ תצוגה:</span>' +
+        '<button class="btn ' + (scanView === "live" ? "primary" : "ghost") + ' sm" data-scanview="live" title="הסריקה החיה — נר הטיימפריים הנוכחי שמתהווה עכשיו">🔴 לייב</button>' +
+        '<button class="btn ' + (scanView === "yday" ? "primary" : "ghost") + ' sm" data-scanview="yday" title="הסריקה כפי שנסגרה אתמול — נרות יומיים מושלמים (למצוא פטיש/2U של אתמול)">📅 אתמול' + (scanView === "yday" && SCAN_YDAY && SCAN_YDAY.snapDate ? " · " + SCAN_YDAY.snapDate : "") + "</button>" +
+      "</div>" +
+      '<div class="stb-grp">' +
+        '<button class="btn ghost stb-reset" id="scanReset" title="נקה את כל הפילטרים">↺ איפוס פילטרים</button>' + "</div>" +
+      '<div class="stb-grp stb-presets"><span class="muted stb-lbl">⭐ סריקות שמורות:</span>' +
+        '<select id="presetSel">' + presetOpts + "</select>" +
+        '<button class="btn ghost" id="presetSave" title="שמור את הפילטרים הנוכחיים כסריקה חדשה">💾 שמור</button>' +
+        (presets.length ? '<button class="btn ghost" id="presetDel" title="מחק את הסריקה הנבחרת">🗑 מחק</button>' : "") +
+        (presets.length ? '<button class="btn ghost" id="presetShare" title="שתף את הסריקה הנבחרת — קישור להעתקה">🔗 שתף</button>' : "") +
+        '<button class="btn ghost" id="presetOrder" title="נהל, סדר, שתף וגבה את הסריקות לקובץ (או שחזר מגיבוי)">🗂️ נהל / גבה</button>' +
+        /* פעמון ההתראות הוסר מכאן (Adi) — הוא כבר קיים בדוק העליון (snDockBell). */
+      "</div></div>";
+    return (
+      '<div class="page-head"><h1>סורק עסקאות</h1><div class="sub">כאן מוצאים מניות למסחר: סוננו לפי תבניות Strat, טיימפריימים ופילטרים טכניים — וממוינים לפי <b>העולות/היורדות</b> של היום.</div></div>' +
+      (scanView === "yday"
+        ? '<div class="scan-yday-note">📅 <b>תצוגת אתמול</b> — ' + (SCAN_YDAY ? "הסריקה כפי שנסגרה" + (SCAN_YDAY.snapDate ? " (" + SCAN_YDAY.snapDate + ")" : "") + ", עם נרות יומיים מושלמים. " : (_ydayLoaded ? "אין עדיין נתוני אתמול — הסנאפשוט נשמר אוטומטית אחרי סגירת המסחר בארה\"ב. " : "טוען נתונים… ")) + '<button class="btn ghost sm" data-scanview="live">🔴 חזור ללייב</button></div>'
+        : (isLive ? liveBanner() : DEMO)) +
+      topBar +
+      // single-column, compact: filter boxes ABOVE the table (floating popovers — don't push content),
+      // the live insights band right above the results, then the table — so results are reachable fast
+      // without scrolling past a tall rail (Adi 2026-10-27).
+      '<div class="scan-filters">' + filters + techPanel + mtfPanel + indPanel + "</div>" +
+      _scanInsights(all) +
+      '<div class="scan-layout">' + resultsPanel + insightsPanel + "</div>"
+    );
+  }
+  function filterRows(all) {
+    const tfs = scanState.tfs.length ? scanState.tfs : ["D"];
+    const techOn = techActive();
+    return all.filter(t => {
+      // hide "pinned" names — frozen M&A / take-private targets (abnormally low ATR% + tight range), dead
+      // price action the server keeps in the feed (for S&P breadth) but shouldn't clutter the scanner.
+      // Exception: when the trader explicitly types a symbol, don't hide it.
+      if (t.tech && t.tech.pin && !scanState.sym) return false;
+      if (scanState.universe === "sp500" && !t.sp) return false;
+      if (scanState.universe === "etf" && !(t.tech && t.tech.etf)) return false;   // "📜 תעודות סל" — only ETF-flagged rows
+      if (scanState.universe === "comm" && !t.comm) return false;
+      if (scanState.sector.length && scanState.sector.indexOf(t.sector) < 0) return false;
+      if (scanState.subsec.length && scanState.subsec.indexOf(t.ind) < 0 && !(t.tech && t.tech.subx && t.tech.subx.some(x => scanState.subsec.indexOf(x) >= 0))) return false;   // match primary ind OR a secondary composite membership (e.g. Mag 7)
+      if (scanState.sym && t.sym.indexOf(scanState.sym.toUpperCase()) < 0) return false;
+      if (scanState.ftfc && !t.ftfc) return false;
+      if (scanState.priceMin !== "" || scanState.priceMax !== "") {
+        const px = t.price || (t.tech ? t.tech.px : 0);
+        if (scanState.priceMin !== "" && px < parseFloat(scanState.priceMin)) return false;
+        if (scanState.priceMax !== "" && px > parseFloat(scanState.priceMax)) return false;
+      }
+      { const cMin = _parseCap(scanState.capMin), cMax = _parseCap(scanState.capMax);
+        if (cMin != null || cMax != null) {
+          const mc = t.mc;
+          if (mc == null) return false;
+          if (cMin != null && mc < cMin) return false;
+          if (cMax != null && mc > cMax) return false;
+        } }
+      // % move (signed, from–to) over the chosen timeframe. 1D = the always-present change field;
+      // 1W/1M/1Q/1Y = the scanner tech block (c5/c20/c63/c252).
+      if (_chgActive()) {
+        const _ctf = techState.chgTf || "1d";
+        let cg;
+        if (_ctf === "1d") cg = t.chg == null ? (t.tech ? t.tech.chg : null) : t.chg;
+        else { const _f = { "1w": "c5", "1m": "c20", "1q": "c63", "1y": "c252" }[_ctf]; cg = (t.tech && _f) ? t.tech[_f] : null; }
+        if (cg == null) return false;
+        if (techState.chgMin !== "" && cg < parseFloat(techState.chgMin)) return false;
+        if (techState.chgMax !== "" && cg > parseFloat(techState.chgMax)) return false;
+      }
+      for (let i = 0; i < tfs.length; i++) {
+        const c = t[tfs[i]] || t.D;
+        // sequence builder (C2 ← C1 ← CC): match the last-3 DIRECTIONAL bar types (seq3d). Empty cell = wildcard.
+        if (seqActive()) {
+          const q = scanState.seq;
+          if (q.c2.length || q.c1.length || q.cc.length) {
+            const sd = (c.seq3d || "").split("-");   // [C2, C1, CC] bar types
+            if (sd.length < 3) return false;
+            if (q.c2.length && q.c2.indexOf(sd[0]) < 0) return false;
+            if (q.c1.length && q.c1.indexOf(sd[1]) < 0) return false;
+            if (q.cc.length && q.cc.indexOf(sd[2]) < 0) return false;
+          }
+          if (q.c2col || q.c1col || q.cccol) {
+            // CC colour = the current candle's OWN close direction (c.c), present on EVERY TF.
+            // seq3col holds the 3-bar colour history and is now stored on intraday cells too, so
+            // C2/C1 colour filters (e.g. "the 2D must be GREEN" = a failed/reversal 2D) work on every
+            // TF. On the rare cell without it (too few bars) hasSc=false → C2/C1 colours fall back to wildcard.
+            const sc = (c.seq3col || "").split("-");   // [C2, C1, CC] colours (up/down/"")
+            const hasSc = sc.length >= 3;
+            if (q.cccol) { const cc = c.c || (hasSc ? sc[2] : ""); if (cc !== q.cccol) return false; }
+            if (hasSc) {                               // C2/C1 need the last-3 history → wildcard on intraday
+              if (q.c2col && sc[0] !== q.c2col) return false;
+              if (q.c1col && sc[1] !== q.c1col) return false;
+            }
+          }
+        }
+        if (scanState.patterns.length && scanState.patterns.indexOf(c.t) < 0) return false;
+        if (scanState.dir !== "all" && c.c !== scanState.dir) return false;
+        if (scanState.shape.length && scanState.shape.indexOf(c.sh || "") < 0) return false;
+        // IN FORCE (standalone): the CLOSE is holding beyond the prior bar's extreme — ifc="up" (above prior high)
+        // / "down" (below prior low). Works with any candle type and WITHOUT a sequence pattern. When a signal
+        // shape is set, also require the prior bar (the one we broke) to be that shape → e.g. above a prior hammer.
+        if (scanState.inforce === "up" || scanState.inforce === "down") {
+          const ifcVal = (c.ifc !== undefined) ? c.ifc
+            : (c.t === "2U" && c.br !== "down" ? "up" : (c.t === "2D" && c.br !== "up" ? "down" : ""));
+          if (ifcVal !== scanState.inforce) return false;
+          if (scanState.sigShape.length && scanState.sigShape.indexOf(c.psh || "") < 0) return false;
+          // reference-bar Strat type: the bar whose extreme we broke = the MIDDLE of seq3d
+          // ("C2-C1-CC", so C1 = the prior/reference bar). "IN FORCE 1" = above an inside bar's high, etc.
+          if (scanState.ifcType.length) {
+            const refType = (c.seq3d || "").split("-")[1] || "";
+            if (scanState.ifcType.indexOf(refType) < 0) return false;
+          }
+        }
+        if (scanState.broad === "1-1") {
+          // double inside — the last TWO bars are both inside (1). coiled consolidation before a breakout.
+          const sq = (c.seq3 || "").split("-");
+          if (sq.length < 2 || sq[sq.length - 1] !== "1" || sq[sq.length - 2] !== "1") return false;
+        } else if (scanState.broad !== "off") {
+          if (scanState.broad === "any" || scanState.broad === "up" || scanState.broad === "down") {
+            const br = c.br || "";
+            if (scanState.broad === "any" && !br) return false;
+            if ((scanState.broad === "up" || scanState.broad === "down") && br !== scanState.broad) return false;
+          } else {   // combo pattern — 2-bar (3-2) or 3-bar (2-1-2), matched at the END of the last-3 sequence
+            const p = scanState.broad.split("-"), sq = (c.seq3 || "").split("-");
+            if (sq.length < 3) return false;
+            const n = p.length;                                         // pattern length (2 or 3)
+            const inf = scanState.inforce;                              // "off" | "up" | "down" | true(legacy=any)
+            const inforceOn = inf === true || inf === "up" || inf === "down" || inf === "any";
+            // IN FORCE toggle also means "the sequence is COMPLETED" (last n bars) vs a setup approaching the final bar.
+            // (the precise close-beyond-extreme check is handled by the standalone IN FORCE block above.)
+            if (inforceOn) {
+              if (sq.slice(3 - n).join("-") !== scanState.broad) return false;   // full pattern completed (last n bars)
+            } else if (sq.slice(3 - (n - 1)).join("-") !== p.slice(0, n - 1).join("-")) return false;   // setup: approaching the final bar
+          }
+        }
+      }
+      // multi-timeframe (MTF): a separate per-TF condition (type + color), all must hold together (AND)
+      for (let m = 0; m < MTF_TFS.length; m++) {
+        const tf = MTF_TFS[m], cond = scanState.mtf[tf];
+        if (!cond || ((!cond.t || !cond.t.length) && !cond.c)) continue;
+        const cell = t[tf];
+        if (!cell) return false;
+        if (cond.t && cond.t.length && cond.t.indexOf(cell.t) < 0) return false;   // cell must be one of the chosen types
+        if (cond.c && cell.c !== cond.c) return false;
+      }
+      if (techOn) {
+        const k = t.tech;
+        if (!k) return false;
+        // primary MA condition + every stacked (+) extra — ALL must hold (AND)
+        if (!_maCondPass(k, techState.maType, techState.maPeriod, techState.maRel, techState.maPct)) return false;
+        if (techState.maExtra && techState.maExtra.length) {
+          for (let mi = 0; mi < techState.maExtra.length; mi++) {
+            const c = techState.maExtra[mi];
+            if (c && c.rel !== "off" && !_maCondPass(k, c.type, c.period, c.rel, c.pct)) return false;
+          }
+        }
+        if (techState.rsiMin > 0 || techState.rsiMax < 100) { const rv = _techVal(k, "rsi"); if (rv == null || rv < techState.rsiMin || rv > techState.rsiMax) return false; }
+        if (techState.mfiMin > 0 || techState.mfiMax < 100) { const mv = _techVal(k, "mfi"); if (mv == null || mv < techState.mfiMin || mv > techState.mfiMax) return false; }
+        const rvmin = _rv();
+        if (rvmin > 0) { const rvv = _techVal(k, "rvol"); if (rvv == null || rvv < rvmin) return false; }
+        if (techState.volMin > 0 && (!k.vol || k.vol < techState.volMin)) return false;
+        if (!_volTrendPass(k)) return false;
+        if (!_volAvgPass(k)) return false;
+        if (!_mfiTrendPass(k)) return false;
+        if (!_mfiTurnPass(k)) return false;
+        if (techState.earnMin !== "") {
+          const _em = +techState.earnMin;
+          if (techState.earnDir === "near") { if (k.earn == null || k.earn > _em) return false; }   // earnings WITHIN N days (lead-up to a report)
+          else if (k.earn != null && k.earn < _em) return false;                                     // earnings at least N days away (null = no report ≤95d → safe)
+        }
+        if (techState.avgVolMin > 0) {
+          const av = techState.avgVolPeriod === "90" ? k.avol90 : k.avol30;
+          if (av == null || av < techState.avgVolMin) return false;
+        }
+        if (techState.ext52 === "high" || techState.ext52 === "low") {
+          const _e52 = techState.ext52 === "high" ? k.dhi52 : k.dlo52;   // dhi52 = % מתחת לשיא (≤0) · dlo52 = % מעל השפל (≥0)
+          if (_e52 == null) return false;
+          const _e52d = Math.abs(_e52);                                  // מרחק באחוזים מהשיא/שפל
+          const _e52f = parseFloat(techState.ext52From) || 0;            // מ- (ברירת מחדל 0)
+          const _e52t = (techState.ext52To === "" || techState.ext52To == null) ? Infinity : (parseFloat(techState.ext52To) || 0);   // עד ("" = ללא גבול)
+          if (_e52d < _e52f || _e52d > _e52t) return false;
+        }
+        if (_atrpActive()) { const av2 = _techVal(k, "atrp"); if (av2 == null) return false; if (techState.atrpMin !== "" && av2 < _atrp()) return false; const _amx = _atrpMax(); if (_amx != null && av2 > _amx) return false; }
+        if (techState.gapDir === "up" && (k.gap == null || k.gap < (parseFloat(techState.gapPct) || 0))) return false;
+        if (techState.gapDir === "down" && (k.gap == null || k.gap > -(parseFloat(techState.gapPct) || 0))) return false;
+        if (techState.gapDir === "any" && (k.gap == null || Math.abs(k.gap) < (parseFloat(techState.gapPct) || 0))) return false;   // gap up OR down beyond the threshold
+        if (_extActive()) {   // extended-hours (pre/post market) move ≥ % — only matches while an extended window is live (LIVE.ext populated)
+          const e = _extOf(t.sym), p = parseFloat(techState.extPct) || 0;
+          if (techState.extMove === "up" && (e == null || e < p)) return false;
+          if (techState.extMove === "down" && (e == null || e > -p)) return false;
+          if (techState.extMove === "any" && (e == null || Math.abs(e) < p)) return false;
+        }
+        if (_popenActive() && !_popenTest(t)) return false;   // price must be within N×ATR of a Y/Q/M open (support/resistance)
+        if (_pextActive() && !_pextTest(t)) return false;     // price must be within pextPct% of a Y/Q/M high/low
+      }
+      // indicator scanners (compression / Bollinger / swing / trend-lines / Fibonacci) — own collapsible panel, stack AND independently
+      if (_compActive() || _flatActive() || _bbActive() || _bbwActive() || _bbPosActive() || _swActive() || _pivActive() || _trendActive() || _fibActive() || _sqzActive()) {
+        const k = t.tech;
+        if (!k) return false;
+        if (_compActive()) { const sp = _compSpread(k); if (sp == null || sp > parseFloat(techState.compMax)) return false; }
+        if (_flatActive()) { const v = _flatVal(k); if (v == null || v > parseFloat(techState.flatMax)) return false; }
+        if (_bbActive()) { const v = _bbVal(k, "bbsq"); if (v == null || v > parseFloat(techState.bbSqMax)) return false; }
+        if (_sqzActive()) { const s = k.sqz; if (!s || !s.length) return false;
+          if (techState.sqzMode === "on") { if (s[0] !== 1) return false; const mb = parseInt(techState.sqzMinBars, 10); if (!isNaN(mb) && mb > 0 && (s[1] || 0) < mb) return false; }
+          else if (techState.sqzMode === "fired") { if (s[0] !== 2) return false; } }
+        if (_bbwActive()) { const v = _bbVal(k, "bbw"); if (v == null || v > parseFloat(techState.bbwMax)) return false; }
+        if (_bbPosActive()) { const b = _bbVal(k, "bbp"); if (b == null) return false;
+          // multi-select: a stock passes if it matches ANY of the chosen band positions (OR)
+          const _bpTest = m => m === "above" ? b >= 100 : m === "below" ? b <= 0 : m === "upperZone" ? b >= 80 : m === "lowerZone" ? b <= 20 : m === "rev" ? (b <= 0 || b >= 100) : false;
+          if (!_bbPosArr().some(_bpTest)) return false; }
+        // pivot distance at the active sensitivity (k=3 more pivots / k=5 default / k=10 major)
+        const _shd = _swHiD(k), _sld = _swLoD(k);
+        if (techState.swSide === "high" && (_shd == null || Math.abs(_shd) > techState.swPct)) return false;
+        if (techState.swSide === "low" && (_sld == null || Math.abs(_sld) > techState.swPct)) return false;
+        // breakout retest = broke ABOVE the swing high and pulled back to it (still above, within pct)
+        if (techState.swSide === "breakHi" && (_shd == null || _shd < 0 || _shd > techState.swPct)) return false;
+        // breakdown retest = broke BELOW the swing low and pulled back to it (still below, within pct)
+        if (techState.swSide === "breakLo" && (_sld == null || _sld > 0 || _sld < -techState.swPct)) return false;
+        // 🎯 pivot reversal (its own filter, in the היפוך section) — uses its own tolerance + sensitivity
+        if (_pivActive()) {
+          // bull = came down to the last pivot LOW and is HOLDING ABOVE it (0 ≤ dist ≤ pct) — ACAD held 19.89, sits above; BBAR/LAC broke below → excluded (dist < 0)
+          if (techState.pivRev === "bull") { const d = _pivLoD(k); if (d == null || d < 0 || d > techState.pivPct) return false; }
+          // bear = rallied up to the last pivot HIGH and is REJECTED below it (-pct ≤ dist ≤ 0)
+          if (techState.pivRev === "bear") { const d = _pivHiD(k); if (d == null || d > 0 || d < -techState.pivPct) return false; }
+        }
+        if (_trendActive() && !_trendPass(k)) return false;
+        if (_fibActive() && !_fibPass(k)) return false;
+      }
+      return true;
+    });
+  }
+  // ---- compact filter bar: collapse the main filters panel's groups into dropdown chips ----
+  // Keeps every existing control + its wiring (nodes are MOVED, never re-created), so no logic changes.
+  let _fbarOpen = null;          // label of the group whose popover is open (persists across re-renders)
+  let _fbarScroll = 0;           // scrollTop of the open popover body — preserved across re-renders (so filtering doesn't jump it to top)
+  function _fgrpActive(fgrp) {
+    // a "selected" chip counts as active UNLESS it's a neutral "all/off" default (צבע נר=הכל, יקום=הכל)
+    if (fgrp.querySelector('.chip.on:not([data-dir="all"]):not([data-scanuni="all"]):not([data-pivrev="off"]), .seq-cc.on, .seq-col.on')) return true;
+    if ([...fgrp.querySelectorAll("input")].some(i => (i.value || "").trim() !== "")) return true;
+    if ([...fgrp.querySelectorAll("select")].some(s => s.selectedIndex > 0)) return true;
+    if (fgrp.querySelector(".combo-opt-m.on")) return true;   // active multi-combo selection
+    return false;
+  }
+  function enhanceFilterBar() {
+    // the MAIN filters panel is the .panel.filters that holds the timeframe buttons ([data-tff])
+    const tff = document.querySelector("#page [data-tff]");
+    const panel = tff ? tff.closest(".panel.filters") : null;
+    const frow = panel ? panel.querySelector(":scope > .frow") : null;
+    if (!frow || panel.classList.contains("fbar")) return;
+    panel.classList.add("fbar");
+    let reopened = null;
+    [...frow.children].forEach(fgrp => {
+      if (!fgrp.classList || !fgrp.classList.contains("fgrp")) return;
+      const label = fgrp.querySelector(":scope > label, :scope > details > summary");
+      let name = "סינון";
+      if (label) {
+        const lc = label.cloneNode(true);
+        lc.querySelectorAll(".muted, .seq-sumname").forEach(s => s.remove());
+        name = (lc.textContent || "").replace(/·.*$/, "").trim() || "סינון";
+      }
+      const pop = document.createElement("div");
+      pop.className = "fpop" + (fgrp.classList.contains("fgrp-seq") ? " fpop-wide" : "") + (fgrp.classList.contains("fgrp-uni") ? " fpop-uni" : "");
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "fpop-btn";
+      btn.innerHTML = '<span class="fpop-dot"></span><span class="fpop-name"></span><span class="fpop-caret">▾</span>';
+      btn.querySelector(".fpop-name").textContent = name;
+      const body = document.createElement("div");
+      body.className = "fpop-body";
+      frow.insertBefore(pop, fgrp);
+      pop.appendChild(btn); pop.appendChild(body); body.appendChild(fgrp);
+      if (_fgrpActive(fgrp)) pop.classList.add("active");
+      pop.dataset.fname = name;
+      if (_fbarOpen === name) { pop.classList.add("open"); reopened = pop; }
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const wasOpen = pop.classList.contains("open");
+        frow.querySelectorAll(".fpop.open").forEach(p => p.classList.remove("open"));
+        if (wasOpen) { _fbarOpen = null; }
+        else { pop.classList.add("open"); _fbarOpen = name; const d = pop.querySelector("details"); if (d) d.open = true; }
+      });
+    });
+    if (reopened) { const d = reopened.querySelector("details"); if (d) d.open = true; }
+    // Force the universe/identity filters (יקום · סימבול · סקטור · תת-סקטור · מחיר · שווי שוק) onto
+    // their OWN row (Adi's row 2): a full-width flex break sits right before the first .fpop-uni chip,
+    // and the tech/indicator/MTF group chips are inserted BEFORE that break so they stay on row 1.
+    const _uniAnchor = frow.querySelector(".fpop-uni");
+    let _uniBreak = null;
+    if (_uniAnchor) { _uniBreak = document.createElement("div"); _uniBreak.className = "fbar-break"; frow.insertBefore(_uniBreak, _uniAnchor); }
+    // ── fold the technical / indicator / MTF accordions into the SAME bar as wide dropdown chips ──
+    // row 1 = tech + indicators (before the break); row 2 = MTF (after the break, with the universe filters)
+    [["techToggle", "📈 פילטרים טכניים", 1], ["indToggle", "🎯 אינדיקטורים", 1], ["mtfToggle", "🔀 MTF", 2]].forEach(([id, fallbackName, row]) => {
+      const h3 = document.getElementById(id);
+      const p = h3 ? h3.closest(".panel.filters") : null;
+      if (!p || p === panel) return;
+      const titleSpan = h3.querySelector("span");
+      let name = fallbackName;
+      if (titleSpan) { const c = titleSpan.cloneNode(true); c.querySelectorAll(".badge-ftfc, .muted").forEach(s => s.remove()); name = (c.textContent || "").trim() || fallbackName; }
+      const active = !!h3.querySelector(".badge-ftfc");
+      const pop = document.createElement("div");
+      pop.className = "fpop fpop-wide fpop-panel";
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "fpop-btn";
+      btn.innerHTML = '<span class="fpop-dot"></span><span class="fpop-name"></span><span class="fpop-caret">▾</span>';
+      btn.querySelector(".fpop-name").textContent = name;
+      const body = document.createElement("div");
+      body.className = "fpop-body";
+      [...p.children].forEach(ch => { if (ch !== h3) body.appendChild(ch); });   // move inner (keep the h3 out)
+      if (row === 2 || !_uniBreak) frow.appendChild(pop); else frow.insertBefore(pop, _uniBreak);   // tech/ind → row 1 (before break); MTF → row 2 (after)
+      pop.appendChild(btn); pop.appendChild(body);
+      pop.dataset.fname = name;
+      if (active) pop.classList.add("active");
+      if (_fbarOpen === name) pop.classList.add("open");
+      btn.addEventListener("click", e => {
+        e.stopPropagation();
+        const wasOpen = pop.classList.contains("open");
+        frow.querySelectorAll(".fpop.open").forEach(x => x.classList.remove("open"));
+        if (wasOpen) { _fbarOpen = null; } else { pop.classList.add("open"); _fbarOpen = name; }
+      });
+      p.remove();   // drop the now-empty panel shell
+    });
+    if (!document._fbarDocBound) {
+      document._fbarDocBound = true;
+      document.addEventListener("click", e => {
+        if (e.target.closest(".fpop") || e.target.closest(".combo-list")) return;
+        document.querySelectorAll(".fpop.open").forEach(p => p.classList.remove("open"));
+        _fbarOpen = null;
+      });
+    }
+    // restore the open popover's inner scroll (so changing a filter value doesn't jump it back to the top)
+    if (_fbarOpen && _fbarScroll) {
+      const ob = frow.querySelector(".fpop.open .fpop-body");
+      if (ob) requestAnimationFrame(() => { try { ob.scrollTop = _fbarScroll; } catch (e) {} });
+    }
+  }
+  function wireScanner() {
+    document.querySelectorAll("[data-tff]").forEach(b => b.onclick = e => { if (e.target && e.target.dataset && e.target.dataset.rmtf) return; const f = b.dataset.tff, i = scanState.tfs.indexOf(f); if (i >= 0) scanState.tfs.splice(i, 1); else scanState.tfs.push(f); reRender(); });
+    document.querySelectorAll("[data-rmtf]").forEach(x => x.onclick = e => { e.stopPropagation(); const f = x.dataset.rmtf; scanState.tfsExtra = scanState.tfsExtra.filter(t => t !== f); const i = scanState.tfs.indexOf(f); if (i >= 0) scanState.tfs.splice(i, 1); reRender(); });
+    { const add = $("#tfAdd"); if (add) add.onclick = e => { e.stopPropagation(); openTfAddMenu(add); }; }
+    // multi-timeframe (MTF) controls
+    { const mt = $("#mtfToggle"); if (mt) mt.onclick = () => { scanState.mtfOpen = !scanState.mtfOpen; reRender(); }; }
+    { const it = $("#indToggle"); if (it) it.onclick = () => { scanState.indOpen = !scanState.indOpen; reRender(); }; }
+    { const ft = $("#favTopTgl"); if (ft) ft.onclick = () => { scanState.favTop = !scanState.favTop; reRender(); }; }
+    // panel-visibility chips + saved-scan presets
+    document.querySelectorAll("[data-panel]").forEach(b => b.onclick = () => togglePanel(b.dataset.panel));
+    { const psel = $("#presetSel"); if (psel) psel.onchange = () => { _selPreset = psel.value; if (!_selPreset) { reRender(); return; } const p = (window.Prefs.scanPresets() || []).find(x => x.id === _selPreset); if (p) { applyScanConfig(p.cfg); autoOpenPanels(); scanSort.col = null; reRender(); } }; }
+    // scroll the mouse-wheel while hovering the saved-scans dropdown to flip between presets
+    { const psel = $("#presetSel"); if (psel) psel.addEventListener("wheel", e => {
+        if (psel.options.length < 2) return;   // only the "— טען פריסט —" placeholder → nothing to cycle
+        e.preventDefault();
+        const now = Date.now();
+        if (now - _presetWheelTs < 220) return;   // throttle rapid trackpad deltas
+        _presetWheelTs = now;
+        let i = psel.selectedIndex + (e.deltaY > 0 ? 1 : -1);
+        i = Math.max(0, Math.min(psel.options.length - 1, i));
+        if (i === psel.selectedIndex) return;
+        psel.selectedIndex = i;
+        psel.dispatchEvent(new Event("change"));
+      }, { passive: false }); }
+    { const psave = $("#presetSave"); if (psave) psave.onclick = () => openPresetSaveDialog(); }
+    { const pdel = $("#presetDel"); if (pdel) pdel.onclick = () => { if (!_selPreset) { alert("בחר סריקה שמורה מהרשימה כדי למחוק אותה."); return; } const p = (window.Prefs.scanPresets() || []).find(x => x.id === _selPreset); if (p && !confirm('למחוק את הסריקה "' + p.name + '"?')) return; window.Prefs.deleteScanPreset(_selPreset); _selPreset = ""; reRender(); }; }
+    { const psh = $("#presetShare"); if (psh) psh.onclick = () => { if (!_selPreset) { alert("בחר סריקה שמורה מהרשימה כדי לשתף אותה."); return; } const p = (window.Prefs.scanPresets() || []).find(x => x.id === _selPreset); sharePreset(p); }; }
+    { const por = $("#presetOrder"); if (por) por.onclick = () => openPresetManager(); }
+    { const bell = $("#alertBell"); if (bell) bell.onclick = () => openAlertsFeed("feed"); updateAlertBell(); }
+    MTF_TFS.forEach(tf => wireMultiCombo("mtft_" + tf, scanState.mtf[tf].t, reRender));   // multi-select bar-type per timeframe
+    document.querySelectorAll("[data-mtfc]").forEach(s => s.onchange = () => { scanState.mtf[s.dataset.mtfc].c = s.value; reRender(); });
+    document.querySelectorAll("[data-pat]").forEach(b => b.onclick = () => { const p = b.dataset.pat, i = scanState.patterns.indexOf(p); if (i >= 0) scanState.patterns.splice(i, 1); else scanState.patterns.push(p); reRender(); });
+    document.querySelectorAll("[data-dir]").forEach(b => b.onclick = () => { scanState.dir = b.dataset.dir; reRender(); });
+    document.querySelectorAll("[data-scanuni]").forEach(b => b.onclick = () => { scanState.universe = b.dataset.scanuni; reRender(); });
+    { const sg = $("#scanSuggest"); if (sg) sg.onclick = () => openSuggestTicker(); }
+    wireMultiCombo("scanShape", scanState.shape, reRender);   // multi-select current-candle shape
+    // sequence builder: toggle a bar-type in a cell (multi-select), clear, or quick-fill a known pattern
+    document.querySelectorAll("[data-seqcell]").forEach(b => b.onclick = () => { const arr = scanState.seq[b.dataset.seqcell], v = b.dataset.seqval, i = arr.indexOf(v); if (i >= 0) arr.splice(i, 1); else arr.push(v); reRender(); });
+    document.querySelectorAll("[data-seqcol]").forEach(b => b.onclick = () => { const key = b.dataset.seqcol + "col", v = b.dataset.seqcolv; scanState.seq[key] = (scanState.seq[key] === v) ? "" : v; reRender(); });
+    document.querySelectorAll("[data-broad]").forEach(b => b.onclick = () => { const v = b.dataset.broad; scanState.broad = (scanState.broad === v) ? "off" : v; reRender(); });   // built-in reversal filter
+    document.querySelectorAll("[data-pivrev]").forEach(b => b.onclick = () => { const v = b.dataset.pivrev; techState.pivRev = (techState.pivRev === v || v === "off") ? "off" : v; reRender(); });   // 🎯 pivot reversal (lives in the היפוך section)
+    { const sc = $("#seqClear"); if (sc) sc.onclick = () => { scanState.seq = { c2: [], c1: [], cc: [], c2col: "", c1col: "", cccol: "" }; reRender(); }; }
+    document.querySelectorAll("[data-seqfill]").forEach(b => b.onclick = () => { const p = b.dataset.seqfill.split("|"); scanState.seq = { c2: p[0] ? p[0].split(",") : [], c1: p[1] ? p[1].split(",") : [], cc: p[2] ? p[2].split(",") : [], c2col: "", c1col: "", cccol: "" }; reRender(); });
+    document.querySelectorAll("[data-inforce]").forEach(b => b.onclick = () => { const d = b.dataset.inforce; scanState.inforce = (scanState.inforce === d) ? "off" : d; if (scanState.inforce === "off") { scanState.sigShape = []; scanState.ifcType = []; } reRender(); });
+    document.querySelectorAll("[data-ifctype]").forEach(b => b.onclick = () => { const v = b.dataset.ifctype; const i = scanState.ifcType.indexOf(v); if (i >= 0) scanState.ifcType.splice(i, 1); else scanState.ifcType.push(v); reRender(); });
+    wireMultiCombo("scanSigShape", scanState.sigShape, reRender);   // multi-select signal-bar shape
+    wireMultiCombo("scanSector", scanState.sector, () => reRender());
+    wireMultiCombo("scanSubsec", scanState.subsec, () => reRender());
+    // live filter as you type (not only on Enter) — restore focus + caret after the re-render
+    const sym = $("#scanSym");
+    if (sym) sym.oninput = () => {
+      const pos = sym.selectionStart;
+      scanState.sym = sym.value;
+      reRender();
+      const ns = $("#scanSym");
+      if (ns) { ns.focus(); try { ns.setSelectionRange(pos, pos); } catch (e) {} }
+    };
+    document.querySelectorAll("[data-sortcol]").forEach(th => th.onclick = () => onSortClick(th.dataset.sortcol));
+    { const cMin = $("#scanCapMin"); if (cMin) cMin.oninput = () => { const p = cMin.selectionStart; scanState.capMin = cMin.value; reRender(); const n = $("#scanCapMin"); if (n) { n.focus(); try { n.setSelectionRange(p, p); } catch (e) {} } }; }
+    { const cMax = $("#scanCapMax"); if (cMax) cMax.oninput = () => { const p = cMax.selectionStart; scanState.capMax = cMax.value; reRender(); const n = $("#scanCapMax"); if (n) { n.focus(); try { n.setSelectionRange(p, p); } catch (e) {} } }; }
+    const pmin = $("#scanPmin"); if (pmin) pmin.onchange = () => { scanState.priceMin = pmin.value; reRender(); };
+    const pmax = $("#scanPmax"); if (pmax) pmax.onchange = () => { scanState.priceMax = pmax.value; reRender(); };
+    const ftfc = $("#scanFtfc"); if (ftfc) ftfc.onclick = () => { scanState.ftfc = !scanState.ftfc; reRender(); };
+    const reset = $("#scanReset"); if (reset) reset.onclick = () => { resetScan(); _selPreset = ""; scanSort.col = "chg"; scanSort.dir = -1; if (window.Prefs && window.Prefs.setScanPanels) window.Prefs.setScanPanels(ALL_PANELS_ON); reRender(); };   // clearing filters clears the preset + restores all panels
+    // Strategy Launcher: each card resets to a clean slate then applies ONLY scanState fields
+    document.querySelectorAll("#page [data-launch]").forEach(el => el.onclick = () => {
+      resetScan(); _scanApplyPreset(el.dataset.launch); _selPreset = ""; reRender();
+    });
+    // live / yesterday view toggle (buttons in the top bar + the yesterday banner)
+    document.querySelectorAll("[data-scanview]").forEach(b => b.onclick = () => { const v = b.dataset.scanview; if (v === scanView) return; scanView = v; if (v === "yday") fetchYesterday(); reRender(); });
+    // technical controls
+    const bind = (id, ev, fn) => { const e = $("#" + id); if (e) e[ev] = fn; };
+    bind("techToggle", "onclick", () => { techState.techOpen = !techState.techOpen; reRender(); });
+    bind("tTechTf", "onchange", e => { techState.techTf = e.target.value; reRender(); });
+    bind("tMaType", "onchange", e => { techState.maType = e.target.value; reRender(); });
+    bind("tMaPer", "onchange", e => { techState.maPeriod = e.target.value; reRender(); });
+    bind("tMaRel", "onchange", e => { techState.maRel = e.target.value; reRender(); });
+    bind("tMaPct", "onchange", e => { techState.maPct = parseFloat(e.target.value) || 0; reRender(); });
+    // stacked (+) MA conditions: add / edit / remove
+    bind("maExtraAdd", "onclick", () => { (techState.maExtra = techState.maExtra || []).push({ type: techState.maType || "SMA", period: techState.maPeriod || "50", rel: "above", pct: techState.maPct || 2 }); reRender(); });
+    (document.querySelectorAll ? document.querySelectorAll("#maExtraWrap [data-maex]") : []).forEach(el => { el.onchange = () => { const i = +el.dataset.idx, f = el.dataset.maex; if (!techState.maExtra[i]) return; techState.maExtra[i][f] = (f === "pct") ? (parseFloat(el.value) || 0) : el.value; reRender(); }; });
+    (document.querySelectorAll ? document.querySelectorAll("#maExtraWrap [data-maexdel]") : []).forEach(b => { b.onclick = () => { techState.maExtra.splice(+b.dataset.maexdel, 1); reRender(); }; });
+    bind("tRsiMin", "onchange", e => { techState.rsiMin = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tRsiMax", "onchange", e => { techState.rsiMax = e.target.value === "" ? 100 : (parseFloat(e.target.value) || 0); reRender(); });
+    bind("tMfiMin", "onchange", e => { techState.mfiMin = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tMfiMax", "onchange", e => { techState.mfiMax = e.target.value === "" ? 100 : (parseFloat(e.target.value) || 0); reRender(); });
+    bind("tRvolMin", "onchange", e => { techState.rvolMin = e.target.value; reRender(); });
+    bind("tVolMin", "onchange", e => { techState.volMin = parseInt(e.target.value, 10) || 0; reRender(); });
+    bind("tVolTrendDir", "onchange", e => { techState.volTrendDir = e.target.value; reRender(); });
+    bind("tVolTrendDays", "onchange", e => { techState.volTrendDays = Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)); reRender(); });
+    bind("tVolAvgDir", "onchange", e => { techState.volAvgDir = e.target.value; reRender(); });
+    bind("tVolAvgDays", "onchange", e => { techState.volAvgDays = Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)); reRender(); });
+    bind("tMfiTrendDir", "onchange", e => { techState.mfiTrendDir = e.target.value; reRender(); });
+    bind("tMfiTrendDays", "onchange", e => { techState.mfiTrendDays = Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)); reRender(); });
+    bind("tMfiTurn", "onchange", e => { techState.mfiTurn = e.target.value; reRender(); });
+    bind("tEarnMin", "onchange", e => { const v = e.target.value.trim(); techState.earnMin = v === "" ? "" : Math.max(1, Math.min(95, parseInt(v, 10) || 1)); reRender(); });
+    bind("tEarnDir", "onchange", e => { techState.earnDir = e.target.value; reRender(); });
+    bind("tAvgVolMin", "onchange", e => { techState.avgVolMin = parseInt(e.target.value, 10) || 0; reRender(); });
+    bind("tAvgVolPer", "onchange", e => { techState.avgVolPeriod = e.target.value; reRender(); });
+    bind("tExt52", "onchange", e => { techState.ext52 = e.target.value; reRender(); });
+    bind("tExt52From", "onchange", e => { techState.ext52From = (e.target.value || "").trim(); reRender(); });
+    bind("tExt52To", "onchange", e => { techState.ext52To = (e.target.value || "").trim(); reRender(); });
+    bind("tPopenTest", "onchange", e => {
+      techState.popenTest = e.target.value;
+      // re-enabling after all timeframes were cleared → restore the default Y/Q/M so the chips reappear
+      if (techState.popenTest !== "off" && !(techState.popenTfs && techState.popenTfs.length)) techState.popenTfs = ["Y", "Q", "M"];
+      reRender();
+    });
+    bind("tPopenMult", "onchange", e => { techState.popenMult = parseFloat(e.target.value) || 0.5; reRender(); });
+    bind("tPopenTouch", "onchange", e => { techState.popenTouch = e.target.value; reRender(); });
+    document.querySelectorAll("[data-popentf]").forEach(b => b.onclick = () => {
+      const tf = b.dataset.popentf, arr = techState.popenTfs || [], i = arr.indexOf(tf);
+      if (i >= 0) arr.splice(i, 1); else arr.push(tf);
+      techState.popenTfs = arr;
+      if (!arr.length) techState.popenTest = "off";   // removed the last timeframe → turn the filter off cleanly (recoverable — pick a direction to re-enable)
+      reRender();
+    });
+    bind("tPextTest", "onchange", e => {
+      techState.pextTest = e.target.value;
+      if (techState.pextTest !== "off" && !(techState.pextTfs && techState.pextTfs.length)) techState.pextTfs = ["Y", "Q", "M"];
+      reRender();
+    });
+    bind("tPextPct", "onchange", e => { techState.pextPct = parseFloat(e.target.value) || 5; reRender(); });
+    bind("tPextRange", "onchange", e => { techState.pextRange = e.target.value; reRender(); });
+    document.querySelectorAll("[data-pexttf]").forEach(b => b.onclick = () => {
+      const tf = b.dataset.pexttf, arr = techState.pextTfs || [], i = arr.indexOf(tf);
+      if (i >= 0) arr.splice(i, 1); else arr.push(tf);
+      techState.pextTfs = arr;
+      if (!arr.length) techState.pextTest = "off";
+      reRender();
+    });
+    bind("tAtrpMin", "onchange", e => { techState.atrpMin = e.target.value; reRender(); });
+    bind("tAtrpMax", "onchange", e => { techState.atrpMax = e.target.value; reRender(); });
+    bind("tChgTf", "onchange", e => { techState.chgTf = e.target.value; reRender(); });
+    bind("tChgMin", "onchange", e => { techState.chgMin = e.target.value; reRender(); });
+    bind("tChgMax", "onchange", e => { techState.chgMax = e.target.value; reRender(); });
+    bind("tGapDir", "onchange", e => { techState.gapDir = e.target.value; reRender(); });
+    bind("tGapPct", "onchange", e => { techState.gapPct = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tExtMove", "onchange", e => { techState.extMove = e.target.value; reRender(); });
+    bind("tExtPct", "onchange", e => { techState.extPct = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tCompMax", "onchange", e => { techState.compMax = e.target.value; reRender(); });
+    bind("tFlatSma", "onchange", e => { techState.flatSma = e.target.value; reRender(); });
+    bind("tFlatDays", "onchange", e => { techState.flatDays = e.target.value; reRender(); });
+    bind("tFlatMax", "onchange", e => { techState.flatMax = e.target.value; reRender(); });
+    bind("tBbSqMax", "onchange", e => { techState.bbSqMax = e.target.value; reRender(); });
+    bind("tSqzMode", "onchange", e => { techState.sqzMode = e.target.value; reRender(); });
+    bind("tSqzMinBars", "onchange", e => { techState.sqzMinBars = e.target.value; reRender(); });
+    bind("tBbwMax", "onchange", e => { techState.bbwMax = e.target.value; reRender(); });
+    bind("tBbPeriod", "onchange", e => { techState.bbPeriod = e.target.value; reRender(); });
+    wireMultiCombo("tBbPos", _bbPosArr(), reRender);   // multi-select Bollinger band position
+    bind("tSwSide", "onchange", e => { techState.swSide = e.target.value; reRender(); });
+    bind("tSwPct", "onchange", e => { techState.swPct = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tSwK", "onchange", e => { techState.swK = e.target.value; reRender(); });
+    bind("tPivPct", "onchange", e => { techState.pivPct = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tPivK", "onchange", e => { techState.pivK = e.target.value; reRender(); });
+    bind("tTrendMode", "onchange", e => { techState.trendMode = e.target.value; reRender(); });
+    bind("tTrendPct", "onchange", e => { techState.trendPct = parseFloat(e.target.value) || 0; reRender(); });
+    bind("tFibLevel", "onchange", e => { techState.fibLevel = e.target.value; reRender(); });
+    bind("tFibDir", "onchange", e => { techState.fibDir = e.target.value; reRender(); });
+    bind("tFibTol", "onchange", e => { techState.fibTol = parseFloat(e.target.value) || 0; reRender(); });
+    document.querySelectorAll("[data-col]").forEach(b => b.onclick = () => {
+      const col = b.dataset.col, isBase = BASE_COLS.some(x => x[0] === col);
+      const shown = isBase ? (colState[col] !== false) : !!colState[col];   // base cols default ON
+      colState[col] = !shown;   // store the new visibility explicitly
+      saveCols(); reRender();
+    });
+    const grid = $("#scanGrid");
+    if (grid) grid.onclick = () => openScannerGrid();
+    const copy = $("#scanCopy");
+    if (copy) copy.onclick = () => {
+      const rows = sortRows(filterRows(scanRowsView()));   // copy in DISPLAYED order + respect the live/yesterday view
+      const syms = rows.map(t => t.sym).join(", ");
+      const orig = copy.textContent;
+      copyToClipboard(syms, () => { copy.textContent = "✓ הועתקו " + rows.length; setTimeout(() => copy.textContent = orig, 1600); });
+    };
+    markActiveFilters();
+    enhanceFilterBar();   // collapse the main filters panel into a compact bar of dropdown chips
+  }
+
+  // Green halo around every control whose value is non-neutral (i.e. actually filtering).
+  // Runs after each render; reuses the same active-conditions the "N פעילים" badges use.
+  function markActiveFilters() {
+    const g = (el, on) => { if (el) el.classList.toggle("filter-on", !!on); };
+    const gid = (id, on) => g(document.getElementById(id), on);
+    // ---- top Strat filters ----
+    const tfDefault = scanState.tfs.length === 1 && scanState.tfs[0] === "D" && scanState.tfsExtra.length === 0;
+    document.querySelectorAll("[data-tff]").forEach(b => g(b, !tfDefault && scanState.tfs.indexOf(b.dataset.tff) >= 0));
+    document.querySelectorAll("[data-pat]").forEach(b => g(b, scanState.patterns.indexOf(b.dataset.pat) >= 0));
+    document.querySelectorAll("[data-dir]").forEach(b => g(b, scanState.dir !== "all" && b.dataset.dir === scanState.dir));
+    document.querySelectorAll("[data-scanuni]").forEach(b => g(b, scanState.universe !== "all" && b.dataset.scanuni === scanState.universe));
+    document.querySelectorAll("[data-inforce]").forEach(b => g(b, scanState.inforce !== "off" && b.dataset.inforce === scanState.inforce));
+    gid("scanBroad", scanState.broad !== "off");
+    gid("scanSector", scanState.sector.length > 0);
+    gid("scanSubsec", scanState.subsec.length > 0);
+    gid("scanSym", scanState.sym !== "");
+    gid("scanPmin", scanState.priceMin !== "");
+    gid("scanPmax", scanState.priceMax !== "");
+    gid("scanCapMin", scanState.capMin !== "");
+    gid("scanCapMax", scanState.capMax !== "");
+    gid("scanFtfc", !!scanState.ftfc);
+    // ---- MTF selects ----
+    document.querySelectorAll("[data-mtfc]").forEach(s => g(s, !!s.value));
+    // ---- technical panel ----
+    gid("tMaRel", techState.maRel !== "off");
+    gid("tMaPct", techState.maRel !== "off" && _maPctShown());
+    gid("tRsiMin", techState.rsiMin > 0);
+    gid("tRsiMax", techState.rsiMax < 100);
+    gid("tMfiMin", techState.mfiMin > 0);
+    gid("tMfiMax", techState.mfiMax < 100);
+    gid("tRvolMin", _rv() > 0);
+    gid("tVolMin", techState.volMin > 0);
+    gid("tVolTrendDir", _volTrendActive());
+    gid("tVolAvgDir", _volAvgActive());
+    gid("tMfiTrendDir", _mfiTrendActive());
+    gid("tMfiTurn", _mfiTurnActive());
+    gid("tEarnMin", techState.earnMin !== "");
+    gid("tAvgVolMin", techState.avgVolMin > 0);
+    gid("tExt52", techState.ext52 !== "off");
+    gid("tPopenTest", _popenActive());
+    gid("tPextTest", _pextActive());
+    gid("tAtrpMin", techState.atrpMin !== "");
+    gid("tAtrpMax", techState.atrpMax !== "");
+    gid("tChgTf", _chgActive() && techState.chgTf !== "1d");
+    gid("tChgMin", techState.chgMin !== "");
+    gid("tChgMax", techState.chgMax !== "");
+    gid("tGapDir", techState.gapDir !== "off");
+    gid("tExtMove", _extActive());
+    // ---- indicator panel ----
+    gid("tCompMax", _compActive());
+    gid("tFlatMax", _flatActive());
+    gid("tBbSqMax", _bbActive());
+    gid("tSqzMode", _sqzActive());
+    gid("tSqzMinBars", _sqzActive() && techState.sqzMinBars !== "");
+    gid("tBbwMax", _bbwActive());
+    gid("tSwSide", _swActive());
+    gid("tSwK", _swActive() && techState.swK !== "5");
+    gid("tPivK", _pivActive() && techState.pivK !== "5");
+    gid("tTrendMode", _trendActive());
+    gid("tFibLevel", _fibActive());
+  }
+
+  // ========== technical filter state (used by the unified scanner above) ==========
+  // Technical filters are NEUTRAL by default — no on/off toggles. A filter becomes
+  // active automatically when its value differs from neutral (maRel≠off / RSI≠0-100 /
+  // MFI≠0-100 / RVOL>0 / volume>0 / avg-vol>0 / 52w≠off).
+  const techState = {
+    techOpen: false,
+    techTf: "D",                 // timeframe for RSI/MFI/RVOL/ATR indicators (D/W/M/Q/Y)
+    maType: "SMA", maPeriod: "50", maRel: "off", maPct: 2,
+    maExtra: [],                 // extra MA conditions stacked with AND: [{type,period,rel,pct}]
+    rsiMin: 0, rsiMax: 100,
+    mfiMin: 0, mfiMax: 100,
+    rvolMin: "",
+    volMin: 0,
+    volTrendDir: "off",          // volume trend direction: off / up (rising) / down (falling)
+    volTrendDays: 3,             // min consecutive days in the streak (1–20)
+    volAvgDir: "off",            // volume vs 20d avg: off / above / below (consecutive days)
+    volAvgDays: 3,               // min consecutive days above/below the avg (1–20)
+    mfiTrendDir: "off",          // MFI trend direction: off / up (rising) / down (falling)
+    mfiTrendDays: 3,             // min consecutive MFI days in the streak (1–20)
+    mfiTurn: "off",              // MFI reversal at extremes: off / up (<20 turning up) / down (>80 turning down) / any
+    earnMin: "",                 // earnings filter threshold in days (empty = off)
+    earnDir: "far",              // "far" = report ≥N days away (safe) · "near" = report within N days (lead-up)
+    avgVolPeriod: "30", avgVolMin: 0,
+    ext52: "off", ext52From: "", ext52To: 3,   // 52w distance-from-high/low RANGE (% מ-עד); to="" = ללא גבול עליון
+    atrpMin: "", atrpMax: "",     // ATR as % of price — from/to range (from alone = X%+, to alone = ≤Y%, both = range)
+    chgMin: "", chgMax: "", chgTf: "1d",   // % move, from–to (signed), over chgTf (1d/1w/1m/1q/1y → chg/c5/c20/c63/c252)
+    gapDir: "off", gapPct: 3,    // gap: open vs prior close — up/down by ≥ %
+    extMove: "off", extPct: 3,   // extended-hours (pre/post market) move ≥ % — reads LIVE.ext (fresh during off-hours)
+    compMax: "",                 // SMA-compression: spread across COMP_MAS ≤ %
+    flatSma: "20", flatDays: "40", flatMax: "",   // flat-SMA / compression: chosen SMA moved ≤ flatMax% over flatDays (5..50) days
+
+    bbSqMax: "",                 // Bollinger squeeze percentile ≤ (relative to the stock's own history)
+    sqzMode: "off", sqzMinBars: "",   // TTM Squeeze: off / on (BB inside Keltner now) / fired (just released); min consecutive days for "on"
+    bbwMax: "",                  // Bollinger bandwidth % ≤ (absolute — objectively narrow bands)
+    bbPeriod: "20",              // Bollinger MA period: "20" (classic) or "50"
+    bbPos: [],                   // Bollinger %B position (multi-select): below/above/upperZone/lowerZone/rev
+    swSide: "off", swPct: 2, swK: "5",   // Swing proximity/retest: within ±% of last pivot high/low · swK = pivot sensitivity 3/5/10
+    pivRev: "off", pivPct: 2, pivK: "5",  // 🎯 pivot reversal (in the היפוך section): bull/bear + tolerance% + sensitivity
+    trendMode: "off", trendPct: 1.5,   // Diagonal trend-lines: touch sup/res | break up/down, within ±%
+    fibLevel: "off", fibDir: "any", fibTol: 5,   // Fib retracement: level (or gp) + direction + ± retracement %
+    popenTest: "off", popenMult: 0.5, popenTfs: ["Y", "Q", "M"], popenTouch: "price",   // period-open test: price within N×ATR of the Yearly/Quarterly/Monthly open (support/resistance). popenTouch: "price"=close in-range | "wick"=today's wick tagged the level and closed away (rejection)
+    pextTest: "off", pextPct: 5, pextTfs: ["Y", "Q", "M"], pextRange: "prior",   // near period HIGH/LOW: price within pextPct% of the Yearly/Quarterly/Monthly high (near a top) or low (near a bottom → reversal watch). pextRange: "prior"=the PRIOR completed period's extremes (Strat trigger, e.g. July for a monthly scan) | "current"=the still-forming period
+  };
+  const MA_PERIODS = ["5", "10", "20", "30", "50", "60", "100", "150", "200"];
+  function _dmapKey(type) { return type === "EMA" ? "dema" : type === "WMA" ? "dwma" : "dsma"; }
+  const COMP_MAS = ["20", "50", "100", "200"];
+  // RSI/MFI/RVOL/ATR value on the SELECTED indicator timeframe (D uses the daily tech block;
+  // W/M/Q/Y read the per-timeframe block the server attaches as tech.tf). null if unavailable there.
+  function _techVal(k, field) {
+    if (!k) return null;
+    if (techState.techTf && techState.techTf !== "D") {
+      const t = k.tf && k.tf[techState.techTf];
+      return t && t[field] != null ? t[field] : null;
+    }
+    return k[field];
+  }
+  const TF_HE_SHORT = { D: "יומי", W: "שבועי", M: "חודשי", Q: "רבעוני", Y: "שנתי" };
+  function _tfSuf() { return techState.techTf && techState.techTf !== "D" ? "·" + techState.techTf : ""; }
+  function _tfTip() { return techState.techTf && techState.techTf !== "D" ? " (מסגרת זמן: " + (TF_HE_SHORT[techState.techTf] || techState.techTf) + ")" : ""; }
+  function _compSpread(k) {
+    if (!k || !k.dsma) return null;
+    const vals = COMP_MAS.map(p => k.dsma[p]).filter(v => v != null);
+    if (vals.length < 2) return null;
+    return Math.max.apply(null, vals) - Math.min.apply(null, vals);
+  }
+  function _compActive() { return techState.compMax !== "" && !isNaN(parseFloat(techState.compMax)); }
+  // flat-SMA / compression filter: the chosen SMA's |%move| over flatDays(5..50) ≤ flatMax
+  function _flatActive() { return techState.flatMax !== "" && !isNaN(parseFloat(techState.flatMax)); }
+  function _flatVal(k) {
+    if (!k || !k.flat) return null;
+    const arr = k.flat[techState.flatSma]; if (!arr || !arr.length) return null;
+    const idx = Math.round((parseInt(techState.flatDays, 10) || 40) / 5) - 1;
+    const v = arr[Math.max(0, Math.min(arr.length - 1, idx))];
+    return v == null ? null : v;
+  }
+  function _bbActive() { return techState.bbSqMax !== "" && !isNaN(parseFloat(techState.bbSqMax)); }
+  function _sqzActive() { return techState.sqzMode === "on" || techState.sqzMode === "fired"; }
+  function _bbwActive() { return techState.bbwMax !== "" && !isNaN(parseFloat(techState.bbwMax)); }
+  // Bollinger period selector (20 classic / 50 longer) — picks which precomputed field to read
+  function _bbP() { return techState.bbPeriod === "50" ? "50" : ""; }
+  function _bbVal(k, base) { return k ? k[base + _bbP()] : null; }
+  // normalize bbPos to an array (multi-select). Migrates old string presets ("off"/"below"/…) in place.
+  function _bbPosArr() { if (!Array.isArray(techState.bbPos)) techState.bbPos = (techState.bbPos && techState.bbPos !== "off") ? [techState.bbPos] : []; return techState.bbPos; }
+  function _bbPosActive() { return _bbPosArr().length > 0; }
+  function _swActive() { return !!techState.swSide && techState.swSide !== "off"; }
+  // pivot sensitivity: "3" (more/tighter pivots) · "5" (default) · "10" (major swings only).
+  // Reads the matching precomputed field, falling back to k=5 when the tighter/major
+  // field is missing (e.g. data from before the server started sending swlo3/swlo10).
+  function _swKSuf(kv) { return kv === "3" ? "3" : kv === "10" ? "10" : ""; }
+  function _swHiDk(k, kv) { if (!k) return null; const s = _swKSuf(kv); const v = k["swhi" + s + "_d"]; return (v == null && s) ? k.swhi_d : v; }
+  function _swLoDk(k, kv) { if (!k) return null; const s = _swKSuf(kv); const v = k["swlo" + s + "_d"]; return (v == null && s) ? k.swlo_d : v; }
+  function _swHiD(k) { return _swHiDk(k, techState.swK); }
+  function _swLoD(k) { return _swLoDk(k, techState.swK); }
+  // 🎯 pivot reversal (its own filter, lives in the היפוך section): bull = came down to the last pivot LOW
+  // and holds above it (0 ≤ dist ≤ pivPct) · bear = rallied to the last pivot HIGH and is rejected below it.
+  // Uses its own tolerance (pivPct) + sensitivity (pivK).
+  function _pivActive() { return techState.pivRev === "bull" || techState.pivRev === "bear"; }
+  function _pivHiD(k) { return _swHiDk(k, techState.pivK); }
+  function _pivLoD(k) { return _swLoDk(k, techState.pivK); }
+  function _trendActive() { return ["touchsup", "touchres", "breakup", "breakdn"].indexOf(techState.trendMode) >= 0; }
+  function _trendThr() { const v = parseFloat(techState.trendPct); return isNaN(v) ? 1.5 : v; }
+  function _trendVal(k) {   // the line-distance relevant to the active mode (support vs resistance side)
+    if (!k) return null;
+    if (techState.trendMode === "touchsup" || techState.trendMode === "breakdn") return k.tsup == null ? null : k.tsup;
+    if (techState.trendMode === "touchres" || techState.trendMode === "breakup") return k.tres == null ? null : k.tres;
+    return null;
+  }
+  function _trendTouches(k) {
+    if (!k) return 0;
+    if (techState.trendMode === "touchsup" || techState.trendMode === "breakdn") return k.tsupn || 0;
+    if (techState.trendMode === "touchres" || techState.trendMode === "breakup") return k.tresn || 0;
+    return 0;
+  }
+  function _trendPass(k) {
+    if (!k) return false;
+    const p = _trendThr();
+    switch (techState.trendMode) {
+      case "touchsup": return k.tsup != null && Math.abs(k.tsup) <= p;
+      case "touchres": return k.tres != null && Math.abs(k.tres) <= p;
+      case "breakup":  return k.tresbrk === 1;   // FRESH up-cross of resistance in last 3 sessions
+      case "breakdn":  return k.tsupbrk === 1;   // FRESH down-cross of support in last 3 sessions
+      default: return true;
+    }
+  }
+  function _fibActive() { return techState.fibLevel && techState.fibLevel !== "off"; }
+  function _fibTol() { const v = parseFloat(techState.fibTol); return isNaN(v) ? 5 : v; }
+  function _fibBand() { return techState.fibLevel === "gp" ? [61.8, 65] : [parseFloat(techState.fibLevel), parseFloat(techState.fibLevel)]; }
+  function _fibPass(k) {
+    if (!_fibActive()) return true;
+    if (!k || k.fibr == null) return false;
+    const band = _fibBand(); const lo = band[0], hi = band[1], tol = _fibTol();
+    if (isNaN(lo)) return false;
+    const inBand = v => v != null && v >= lo - tol && v <= hi + tol;   // within the level/zone ± tol
+    // a level is only a valid SUPPORT/RESISTANCE if price reached it and HELD — not if price blew
+    // through it toward ~100% and later came back. fibext = the extreme reach of the move.
+    const BRK = 15;
+    const heldUp   = k.fibext == null || k.fibext <= hi + BRK;   // up: deepest pullback didn't break far BELOW the level
+    const heldDown = k.fibext == null || k.fibext >= lo - BRK;   // down: highest bounce didn't break far ABOVE the level
+    switch (techState.fibDir) {
+      // 🎯 touch-from-above: an up-leg pullback whose LOW reached the level (support) while the CLOSE held ABOVE it, and
+      // the move didn't blow through (hammer/reversal AT the level). fibr=% DOWN from high → close above = fibr < level.
+      case "touchAbove": return k.fibdir === "up" && k.fibr < lo && k.fibrlo != null && k.fibrlo >= lo - tol && heldUp;
+      // 🎯 touch-from-below: a down-leg bounce whose HIGH reached the level (resistance) while the CLOSE stayed BELOW it.
+      case "touchBelow": return k.fibdir === "down" && k.fibr > hi && k.fibrhi != null && k.fibrhi <= hi + tol && heldDown;
+      case "up":   return k.fibdir === "up"   && inBand(k.fibr) && heldUp;    // close sitting AT the level, held
+      case "down": return k.fibdir === "down" && inBand(k.fibr) && heldDown;
+      default:     return inBand(k.fibr);   // "any" — close near the level, either direction
+    }
+  }
+  function indActiveCount() { return (_compActive() ? 1 : 0) + (_flatActive() ? 1 : 0) + (_bbActive() ? 1 : 0) + (_sqzActive() ? 1 : 0) + (_bbwActive() ? 1 : 0) + (_bbPosActive() ? 1 : 0) + (_swActive() ? 1 : 0) + (_trendActive() ? 1 : 0) + (_fibActive() ? 1 : 0); }
+  function _rv() { const v = parseFloat(techState.rvolMin); return isNaN(v) ? 0 : v; }
+  function _atrp() { const v = parseFloat(techState.atrpMin); return isNaN(v) ? 0 : v; }
+  function _atrpMax() { const v = parseFloat(techState.atrpMax); return isNaN(v) ? null : v; }
+  function _atrpActive() { return techState.atrpMin !== "" || techState.atrpMax !== ""; }
+  // period-open test: is the price within N×ATR of a Yearly/Quarterly/Monthly OPEN?
+  // side = "support" (price at/above the open → potential long) | "resistance" (price at/below → potential short).
+  function _popenActive() { return techState.popenTest && techState.popenTest !== "off" && (techState.popenTfs || []).length > 0; }
+  function _popenTest(t) {
+    const price = +(t.price != null ? t.price : t.p), atr = t.tech && t.tech.atr;   // mapped scan rows use .price (raw feed uses .p)
+    if (!price || !atr) return null;
+    const tol = atr * (parseFloat(techState.popenMult) || 0.5);
+    const tfs = (techState.popenTfs && techState.popenTfs.length) ? techState.popenTfs : ["Y", "Q", "M"];
+    const mode = techState.popenTest;                       // support / resistance / any
+    const wick = techState.popenTouch === "wick";           // require today's wick to tag the level + close away (rejection)
+    const lo = wick && t.D ? t.D.lo : null, hi = wick && t.D ? t.D.hi : null;
+    let best = null;
+    for (let i = 0; i < tfs.length; i++) {
+      const cell = t[tfs[i]], lvl = cell && cell.o;
+      if (lvl == null) continue;
+      let side = null, dist = null;
+      if (wick) {
+        // TRUE rejection wick: the wick actually REACHED the level (pierced it, up to tol deep) and the
+        // CLOSE recovered to the other side. Support = low dipped to/below the open, closed above.
+        if (price > lvl && lo != null && lo <= lvl && (lvl - lo) <= tol) { side = "support"; dist = lvl - lo; }        // lower wick tagged → closed above = LONG
+        else if (price < lvl && hi != null && hi >= lvl && (hi - lvl) <= tol) { side = "resistance"; dist = hi - lvl; }  // upper wick tagged → closed below = SHORT
+      } else {
+        const d = Math.abs(price - lvl);
+        if (d <= tol) { side = price >= lvl ? "support" : "resistance"; dist = d; }
+      }
+      if (side && (mode === "any" || mode === side) && (!best || dist < best.dist)) best = { tf: tfs[i], level: lvl, side: side, dist: dist };
+    }
+    return best;
+  }
+  // near the period HIGH/LOW: price within pextPct% of a Yearly/Quarterly/Monthly high (near a top) or
+  // low (near a bottom → potential reversal). Uses each cell's .h / .l (period extremes).
+  function _pextActive() { return techState.pextTest && techState.pextTest !== "off" && (techState.pextTfs || []).length > 0; }
+  function _pextTest(t) {
+    const price = +(t.price != null ? t.price : t.p);
+    if (!price) return null;
+    const pct = parseFloat(techState.pextPct) || 5;
+    const tfs = (techState.pextTfs && techState.pextTfs.length) ? techState.pextTfs : ["Y", "Q", "M"];
+    const mode = techState.pextTest;   // high / low / any
+    const usePrev = techState.pextRange !== "current";   // default = the PRIOR completed period's extremes (Strat trigger)
+    // AND across the selected timeframes — the stock must be near the extreme on EVERY chosen TF
+    // (e.g. M+Q+Y = a multi-timeframe bottom/top confluence → few results).
+    let closest = null;
+    for (let i = 0; i < tfs.length; i++) {
+      const cell = t[tfs[i]]; if (!cell) return null;
+      const hi = usePrev ? (cell.ph != null ? cell.ph : cell.h) : cell.h;   // fall back to current if prior missing (old data)
+      const lo = usePrev ? (cell.pl != null ? cell.pl : cell.l) : cell.l;
+      // "near" = within pct% of the level on EITHER side (approaching it, or just broke it) — not "anywhere beyond".
+      const dHi = (hi != null && hi > 0) ? Math.abs(price - hi) / hi * 100 : Infinity;
+      const dLo = (lo != null && lo > 0) ? Math.abs(price - lo) / lo * 100 : Infinity;
+      let side = null, dist = null;
+      if (mode === "high") { if (dHi <= pct) { side = "high"; dist = dHi; } }
+      else if (mode === "low") { if (dLo <= pct) { side = "low"; dist = dLo; } }
+      else { if (dHi <= pct && dHi <= dLo) { side = "high"; dist = dHi; } else if (dLo <= pct) { side = "low"; dist = dLo; } }   // "any": near either extreme
+      if (side == null) return null;   // this TF isn't near → the whole (AND) test fails
+      if (!closest || dist < closest.dist) closest = { tf: tfs[i], side: side, level: side === "high" ? hi : lo, dist: dist };
+    }
+    return closest;   // all selected timeframes passed
+  }
+  function _chgActive() { return techState.chgMin !== "" || techState.chgMax !== ""; }
+  function _gapActive() { return techState.gapDir === "up" || techState.gapDir === "down"; }
+  // extended-hours (pre/post market) move for a symbol — from the LIVE snapshot (fresh during off-hours), null otherwise
+  function _extOf(sym) { return (LIVE && LIVE.ext && LIVE.ext[sym] != null) ? LIVE.ext[sym] : null; }
+  function _extActive() { return techState.extMove === "up" || techState.extMove === "down" || techState.extMove === "any"; }
+  function _volTrendActive() { return techState.volTrendDir === "up" || techState.volTrendDir === "down"; }
+  function _volTrendDays() { const d = parseInt(techState.volTrendDays, 10); return isNaN(d) ? 3 : Math.max(1, Math.min(20, d)); }
+  function _volTrendPass(k) {
+    if (!_volTrendActive()) return true;
+    const v = k ? k.voltrend : null;
+    if (v == null) return false;
+    const need = _volTrendDays();
+    if (techState.volTrendDir === "up") return v >= need;
+    if (techState.volTrendDir === "down") return v <= -need;
+    return true;
+  }
+  function _volAvgActive() { return techState.volAvgDir === "above" || techState.volAvgDir === "below"; }
+  function _volAvgDays() { const d = parseInt(techState.volAvgDays, 10); return isNaN(d) ? 3 : Math.max(1, Math.min(20, d)); }
+  function _volAvgPass(k) {
+    if (!_volAvgActive()) return true;
+    const v = k ? k.volavgtrend : null;
+    if (v == null) return false;
+    const need = _volAvgDays();
+    if (techState.volAvgDir === "above") return v >= need;
+    if (techState.volAvgDir === "below") return v <= -need;
+    return true;
+  }
+  function _mfiTrendActive() { return techState.mfiTrendDir === "up" || techState.mfiTrendDir === "down"; }
+  function _mfiTrendDays() { const d = parseInt(techState.mfiTrendDays, 10); return isNaN(d) ? 3 : Math.max(1, Math.min(20, d)); }
+  function _mfiTrendPass(k) {
+    if (!_mfiTrendActive()) return true;
+    const v = k ? k.mfitrend : null;
+    if (v == null) return false;
+    const need = _mfiTrendDays();
+    if (techState.mfiTrendDir === "up") return v >= need;
+    if (techState.mfiTrendDir === "down") return v <= -need;
+    return true;
+  }
+  function _mfiTurnActive() { return techState.mfiTurn === "up" || techState.mfiTurn === "down" || techState.mfiTurn === "any"; }
+  function _mfiTurnPass(k) {
+    if (!_mfiTurnActive()) return true;
+    const v = k ? k.mfiturn : null;
+    if (techState.mfiTurn === "any") return !!v;
+    return v === techState.mfiTurn;
+  }
+  function _maExtraActive() { return (techState.maExtra || []).filter(c => c && c.rel !== "off").length; }
+  function techActive() {
+    return techState.maRel !== "off" || _maExtraActive() > 0 || techState.rsiMin > 0 || techState.rsiMax < 100 ||
+      techState.mfiMin > 0 || techState.mfiMax < 100 || _rv() > 0 ||
+      techState.volMin > 0 || _volTrendActive() || _volAvgActive() || _mfiTrendActive() || _mfiTurnActive() || techState.earnMin !== "" || techState.avgVolMin > 0 || techState.ext52 !== "off" ||
+      _atrpActive() || _chgActive() || _gapActive() || _extActive() || _popenActive() || _pextActive();
+  }
+  function techActiveCount() {
+    let n = 0;
+    if (techState.maRel !== "off") n++;
+    n += _maExtraActive();                     // each stacked (+) MA condition counts as one active filter
+    if (techState.rsiMin > 0 || techState.rsiMax < 100) n++;
+    if (techState.mfiMin > 0 || techState.mfiMax < 100) n++;
+    if (_rv() > 0) n++;
+    if (techState.volMin > 0) n++;
+    if (_volTrendActive()) n++;
+    if (_volAvgActive()) n++;
+    if (_mfiTrendActive()) n++;
+    if (_mfiTurnActive()) n++;
+    if (techState.earnMin !== "") n++;
+    if (techState.avgVolMin > 0) n++;
+    if (techState.ext52 !== "off") n++;
+    if (_atrpActive()) n++;
+    if (_chgActive()) n++;
+    if (_gapActive()) n++;
+    if (_extActive()) n++;
+    if (_popenActive()) n++;
+    if (_pextActive()) n++;
+    return n;
+  }
+  function resetTech() {
+    techState.maType = "SMA"; techState.maPeriod = "50"; techState.maRel = "off"; techState.maPct = 2; techState.maExtra = [];
+    techState.rsiMin = 0; techState.rsiMax = 100; techState.mfiMin = 0; techState.mfiMax = 100;
+    techState.rvolMin = ""; techState.volMin = 0; techState.volTrendDir = "off"; techState.volTrendDays = 3; techState.avgVolPeriod = "30"; techState.avgVolMin = 0;
+    techState.volAvgDir = "off"; techState.volAvgDays = 3;
+    techState.mfiTrendDir = "off"; techState.mfiTrendDays = 3; techState.mfiTurn = "off"; techState.earnMin = ""; techState.earnDir = "far";
+    techState.ext52 = "off"; techState.ext52From = ""; techState.ext52To = 3;
+    techState.atrpMin = ""; techState.atrpMax = ""; techState.chgMin = ""; techState.chgMax = ""; techState.chgTf = "1d"; techState.gapDir = "off"; techState.gapPct = 3; techState.extMove = "off"; techState.extPct = 3;
+    techState.compMax = ""; techState.flatSma = "20"; techState.flatDays = "40"; techState.flatMax = ""; techState.bbSqMax = ""; techState.sqzMode = "off"; techState.sqzMinBars = ""; techState.bbwMax = ""; techState.bbPeriod = "20"; techState.bbPos = []; techState.swSide = "off"; techState.swPct = 2; techState.swK = "5"; techState.pivRev = "off"; techState.pivPct = 2; techState.pivK = "5";
+    techState.trendMode = "off"; techState.trendPct = 1.5;
+    techState.fibLevel = "off"; techState.fibDir = "any"; techState.fibTol = 5;
+    techState.popenTest = "off"; techState.popenMult = 0.5; techState.popenTfs = ["Y", "Q", "M"]; techState.popenTouch = "price";
+    techState.pextTest = "off"; techState.pextPct = 5; techState.pextTfs = ["Y", "Q", "M"]; techState.pextRange = "prior";
+    techState.techTf = "D";
+  }
+  function fmtVol(n) {
+    if (n == null) return "—";
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(0) + "K";
+    return String(n);
+  }
+  function dPct(v) { return v == null ? "—" : '<span class="' + (v > 0 ? "pos" : v < 0 ? "neg" : "zero") + '">' + (v >= 0 ? "+" : "") + v.toFixed(2) + "%</span>"; }
+  function ninjaCls(v) { return v >= 80 ? "nj-hi" : v >= 65 ? "nj-mid" : v >= 50 ? "nj-lo" : "nj-min"; }
+  function ninjaCell(v, sym) {
+    if (v == null) return '<span class="muted">—</span>';
+    const cls = "ninja-badge " + ninjaCls(v) + (sym ? " nj-click" : "");
+    const attr = sym ? ' data-nj="' + escAttr(sym) + '" title="למה הניקוד הזה? לחץ"' : "";
+    return '<span class="' + cls + '"' + attr + ">" + v + "</span>";
+  }
+  // client-side explanation of a Ninja Score, mirroring the server factors (from the row's tech data)
+  function ninjaWhy(t) {
+    const k = t.tech || {}, r = [];
+    const d = (t.D || {}).c;
+    if (d === "up" || d === "down") {
+      const same = ["Y", "Q", "M", "W", "D"].filter(tf => (t[tf] || {}).c === d).length;
+      if (t.ftfc) r.push({ i: "🎯", s: "FTFC — יישור טיימפריימים מלא (" + same + "/5)", pos: true });
+      else if (same >= 3) r.push({ i: "🎯", s: "יישור טיימפריימים חלקי (" + same + "/5 באותו כיוון)", pos: true });
+      else r.push({ i: "🎯", s: "יישור טיימפריימים חלש (" + same + "/5)", pos: false });
+    }
+    if (k.rvol != null) {
+      if (k.rvol >= 2) r.push({ i: "🔊", s: "ווליום יחסי " + k.rvol.toFixed(1) + "× — גבוה", pos: true });
+      else if (k.rvol >= 1) r.push({ i: "🔊", s: "ווליום יחסי " + k.rvol.toFixed(1) + "× — ממוצע", pos: false });
+      else r.push({ i: "🔊", s: "ווליום יחסי " + k.rvol.toFixed(1) + "× — נמוך", pos: false });
+    }
+    const dt = (t.D || {}).t;
+    const patTxt = { "3": "נר יומי 3 (התרחבות) — חזק", "2U": "נר יומי 2U (פריצה מעלה)", "2D": "נר יומי 2D (שבירה מטה)", "1": "נר יומי Inside (דשדוש)" }[dt];
+    if (patTxt) r.push({ i: "📊", s: patTxt, pos: dt !== "1" });
+    if (k.mfi != null) {
+      if (k.mfi >= 50 && k.mfi <= 80) r.push({ i: "💰", s: "MFI " + k.mfi.toFixed(0) + " — תזרים כסף בריא", pos: true });
+      else if (k.mfi > 90) r.push({ i: "💰", s: "MFI " + k.mfi.toFixed(0) + " — קניית יתר", pos: false });
+      else if (k.mfi < 20) r.push({ i: "💰", s: "MFI " + k.mfi.toFixed(0) + " — מכירת יתר", pos: false });
+    }
+    const dsma = k.dsma || {};
+    const nearArr = ["20", "50"].map(p => dsma[p] != null ? Math.abs(dsma[p]) : null).filter(x => x != null);
+    if (nearArr.length) {
+      const near = Math.min.apply(null, nearArr);
+      if (near <= 2) r.push({ i: "📈", s: "צמוד לממוצע (±" + near.toFixed(1) + "% מ-SMA20/50)", pos: true });
+      else if (near <= 5) r.push({ i: "📈", s: "קרוב לממוצע (±" + near.toFixed(1) + "%)", pos: true });
+    }
+    if (k.avol30 != null) {
+      if (k.avol30 >= 1e6) r.push({ i: "💧", s: "נזילות גבוהה (" + fmtVol(k.avol30) + " ליום)", pos: true });
+      else if (k.avol30 < 3e5) r.push({ i: "💧", s: "נזילות נמוכה (" + fmtVol(k.avol30) + ")", pos: false });
+    }
+    return r;
+  }
+  function openNinjaWhy(sym) {
+    const t = scanSource().find(x => x.sym === sym);
+    if (!t || t.ninja == null) return;
+    const rs = ninjaWhy(t);
+    const body = '<div class="nj-why-top"><span class="ninja-badge ' + ninjaCls(t.ninja) + '" style="font-size:18px;padding:5px 14px">' + t.ninja + "</span><span class=\"muted\">/ 100 · " + t.sym + " · " + secHe(t.sector) + "</span></div>" +
+      '<div class="nj-why-list">' + (rs.length ? rs.map(x => '<div class="nj-why-row"><span class="nj-why-ico">' + x.i + '</span><span class="' + (x.pos ? "pos" : "muted") + '">' + x.s + "</span></div>").join("") : '<div class="muted">אין מספיק נתונים.</div>') + "</div>" +
+      '<div class="note" style="margin-top:10px;font-size:11px">💡 <b>Ninja Score</b> = איכות סטאפ: יישור טיימפריימים · ווליום · תבנית · כסף חכם · קרבה לממוצע · נזילות · חוזק סקטור · יישור לשוק. כלי מיון — לא המלצת קנייה/מכירה. תמיד אמת בגרף.</div>';
+    modal("Ninja Score · " + sym, body);
+  }
+  function wireNinja(scope) {
+    (scope || document).querySelectorAll("[data-nj]").forEach(el => el.onclick = e => { e.stopPropagation(); openNinjaWhy(el.dataset.nj); });
+  }
+  function rsiCls(v) { return v == null ? "" : (v >= 70 ? "neg" : v <= 30 ? "pos" : ""); }
+  function mfiCls(v) { return v == null ? "" : (v >= 80 ? "neg" : v <= 20 ? "pos" : ""); }
+
+  // ========== SECTORS ==========
+  // sectors-page FTFC timeframe set — Adi's default is the LONG-TERM M·Q·Y (was D·W·M), switchable
+  // REALM = "Ninja Realm": full continuity across ALL five timeframes (strictest alignment)
+  const SEC_TF_ORDER = ["D", "W", "M", "Q", "Y"];
+  const SEC_FTFC_SETS = { DWM: ["D", "W", "M"], WMQ: ["W", "M", "Q"], MQY: ["M", "Q", "Y"], REALM: ["D", "W", "M", "Q", "Y"] };   // quick-pick presets
+  let sectorFtfcTfs = ["M", "Q", "Y"];   // the SELECTED FTFC timeframes — modular (any combination of D/W/M/Q/Y)
+  function _secFtfcTfs() { const s = (sectorFtfcTfs || []).filter(Boolean); return s.length ? SEC_TF_ORDER.filter(t => s.indexOf(t) >= 0) : ["M", "Q", "Y"]; }
+  function _secFtfcLbl() { return _secFtfcTfs().join("·"); }
+  // full continuity across a set of timeframes → "up" | "down" | "" (any doji/none/mismatch breaks it)
+  function secFtfcDir(m, tfs) {
+    let dir = null;
+    for (let i = 0; i < tfs.length; i++) {
+      const c = (m[tfs[i]] || {}).c;
+      if (c !== "up" && c !== "down") return "";
+      if (dir === null) dir = c; else if (dir !== c) return "";
+    }
+    return dir || "";
+  }
+  // continuity tab: sector → its sub-sectors (pre-rendered two-bar cards), stashed by renderSectors
+  let _contSubCards = {}, _contSubCount = {};
+  // sector tile click → a side drawer (modal, page doesn't move) with that sector's sub-sectors (continuity only)
+  function openSectorSubsModal(secRaw) {
+    const cards = _contSubCards[secRaw] || "";
+    const heName = (typeof secHe === "function") ? secHe(secRaw) : secRaw;
+    if (!cards) { openSectorDrillLive(secRaw); return; }   // no sub-sectors → go straight to the stock list
+    const cnt = _contSubCount[secRaw] || 0;
+    const body =
+      '<div class="drill-bar"><button class="btn ghost" id="secAllStocks" style="font-size:12px;font-weight:600">📋 כל מניות הסקטור</button></div>' +
+      '<div class="muted" style="margin:2px 0 10px"><span class="pos">🟢 פס עליון</span> = מניות בהמשכיות עולה · <span class="neg">🔴 פס תחתון</span> = יורדת · לחץ תת-סקטור לרשימת המניות</div>' +
+      '<div class="bcell-list cont-secgrid cont-drawer-grid">' + cards + "</div>";
+    modal("🏭 " + heName + " · תתי-סקטורים · המשכיות (" + cnt + ")", body);
+    const bs = $("#secAllStocks"); if (bs) bs.onclick = () => openSectorDrillLive(secRaw);
+    document.querySelectorAll(".modal [data-subladder]").forEach(c => c.onclick = e => { if (e.target.closest(".flow-etf")) return; openSubDrillLive(decodeURIComponent(c.dataset.subladder)); });
+    document.querySelectorAll(".modal .flow-etf[data-secetf]").forEach(el => el.onclick = e => { e.stopPropagation(); openSecMenu(el); });
+    if (typeof wireCharts === "function") wireCharts(document);
+  }
+  function renderSectors() {
+    const TFS = _secFtfcTfs();
+    const TFLBL = _secFtfcLbl();
+    const _selTfs = _secFtfcTfs();
+    const _presetOn = tfs => _selTfs.length === tfs.length && tfs.every(t => _selTfs.indexOf(t) >= 0);
+    const ftfcSwitch = '<div class="sec-ftfc-switch"><span class="muted">FTFC לפי טיימפריים:</span>' +
+      '<span class="secftfc-tfs">' + SEC_TF_ORDER.map(t =>
+        '<button class="secftfc-btn secftfc-tf' + (_selTfs.indexOf(t) >= 0 ? " on" : "") + '" data-secftftf="' + t + '" title="הוסף/הסר ' + t + ' מבדיקת ההמשכיות (בחירה חופשית)">' + t + "</button>").join("") + "</span>" +
+      '<span class="secftfc-sep muted">·</span>' +
+      Object.keys(SEC_FTFC_SETS).map(k => { const tfs = SEC_FTFC_SETS[k], lbl = (k === "REALM" ? "NINJA REALM" : tfs.join("·"));
+        return '<button class="secftfc-btn secftfc-preset' + (k === "REALM" ? " secftfc-realm" : "") + (_presetOn(tfs) ? " on" : "") + '" data-secftfset="' + k + '" title="בחירה מהירה · ' + tfs.join("·") + '">' + lbl + "</button>"; }).join("") + "</div>";
+    const head = '<div class="page-head"><h1>המשכיות זמנית</h1><div class="sub">איפה נמצאת <b>מסת המניות</b> שכבר בהמשכיות זמן (<b>' + TFLBL + '</b>) — כדי לדעת לאן ללכת לצוד. בכל אריח: <span class="pos">🟢 פס עליון</span> = בהמשכיות <b>עולה</b> (לונג) · <span class="neg">🔴 פס תחתון</span> = בהמשכיות <b>יורדת</b> (שורט). <b>אורך הפס = אחוז המניות של אותו נכס בהמשכיות</b> (כל נכס לעצמו — למשל 3 מתוך 7 = חצי פס). לחץ על אריח לרשימת המניות.</div></div>' + ftfcSwitch;
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) {
+      return head + '<div class="panel"><div class="stub"><div class="big">🗂️</div><h2>טוען נתוני סקטורים…</h2><p>הנתונים נטענים מהסורק. רגע ומתעדכן.</p></div></div>';
+    }
+    const bySec = {};
+    SCAN.rows.forEach(r => { const s = r.sec || "אחר"; (bySec[s] = bySec[s] || []).push(r); });
+    const liveMap = {}; if (LIVE && LIVE.sectors) LIVE.sectors.forEach(s => liveMap[s.name] = s);
+    // daily % move per sector / sub-sector ("why money went in"): real ETF move when live, else member average
+    const secChgLive = {}, subChgLive = {};
+    if (LIVE && LIVE.sectors) LIVE.sectors.forEach(s => { secChgLive[s.name] = s.chg; });
+    if (LIVE && LIVE.subsectors) LIVE.subsectors.forEach(s => { subChgLive[s.name] = s.chg; });
+    const _avgChg = members => { let cs = 0, cn = 0; members.forEach(m => { const c = (m.c != null ? m.c : (m.tech && m.tech.chg != null ? m.tech.chg : null)); if (c != null) { cs += c; cn++; } }); return cn ? cs / cn : null; };
+    const names = Object.keys(bySec).filter(s => s !== "מדדים" && s !== "אחר").sort((a, b) => bySec[b].length - bySec[a].length);   // מדדים/אחר aren't real sectors — hide them
+    // classify each main sector by its FTFC directional bias (of its FTFC stocks, more green or red?)
+    const secInfo = names.map(name => {
+      const members = bySec[name];
+      const fg = members.filter(m => secFtfcDir(m, TFS) === "up").length;
+      const fr = members.filter(m => secFtfcDir(m, TFS) === "down").length;
+      const tot = members.length, ft = fg + fr;
+      const bucket = ft === 0 ? "mid" : (fg / ft > 0.6 ? "bull" : (fg / ft < 0.4 ? "bear" : "mid"));
+      return { name, members, bucket, fg, fr, tot, avgChg: _avgChg(members) };
+    });
+    // ── continuity tile (Adi 2026-09-30: NUMBER-FREE, SAME tile grid as money-flow) ──
+    // TWO bars per tile: TOP = FTFC-GREEN mass (🟢 stocks aligned up), BOTTOM = FTFC-RED mass (🔴 down).
+    // Both bars normalised to ONE global max so tiles are comparable → see at a glance where the most is.
+    const _hgMass = o => Math.max(o.fg || 0, o.fr || 0);
+    const _cleanNm = n => String(n || "").replace(/\s*·\s*[A-Za-z0-9].*$/, "").trim();   // drop " · English" suffix
+    const _ftfcRow = o => {
+      const fg = o.fg || 0, fr = o.fr || 0, tot = o.tot || 0;
+      const chip = '<span class="bc-etf flow-etf' + (o.etf ? "" : " bc-noetf") + '" data-secetf="' + escAttr(o.etf || "") +
+        '" data-secname="' + escAttr(o.rawname) + '" data-secsub="' + (o.isSub ? "1" : "") + '" title="אפשרויות סקטור">' + (o.etf ? o.etf + " ▾" : "▾") + "</span>";
+      // bar = % of THIS asset's OWN stocks in continuity (each asset normalised to itself, e.g. 3/7 → ~43%)
+      const gW = fg ? Math.max(4, Math.round(fg / tot * 100)) : 0;
+      const rW = fr ? Math.max(4, Math.round(fr / tot * 100)) : 0;
+      const net = o.tot ? (fg - fr) / o.tot : 0;
+      const tierCls = net > 0.05 ? "t-vg" : net < -0.05 ? "t-vr" : "t-n";
+      // dominant-direction share — flag + glowing frame when >50% of THIS asset's stocks share one FTFC direction
+      // (so Adi can spot at a glance which sector / sub-sector is worth drilling into, e.g. שבבים vs תוכנה)
+      const domN = Math.max(fg, fr), domShare = tot ? domN / tot : 0, domSide = fg >= fr ? "green" : "red";
+      const strong = domShare > 0.5;
+      const flag = strong ? '<span class="ftt-50 ftt-50-' + domSide + '">' + Math.round(domShare * 100) + "%</span>" : "";
+      const cls = "bc-card ftfc-tile bc-clickable " + tierCls + (strong ? " ftfc-strong ftfc-strong-" + domSide : "");   // composites look identical to sectors (Adi: "כמו השאר")
+      const drill = o.kind ? (' data-compdrill="' + escAttr(o.etf || "") + '" data-compname="' + escAttr(o.name) + '"')
+        : (" data-" + (o.isSub ? "subladder" : "secladder") + '="' + encodeURIComponent(o.rawname) + '"');
+      const bar = (w, side) => '<div class="ftt-row"><span class="ftt-ic ftt-ic-' + side + '"></span>' +
+        '<span class="ftt-bar ftt-' + side + '"><span style="width:' + w + '%"></span></span></div>';
+      const subHint = o.strongSub ? '<div class="ftt-substrong ftt-substrong-' + o.strongSub.side + '" title="תת-סקטור חזק בתוך הסקטור — לחץ להיכנס ולבדוק">⚡ ' + escHtml(o.strongSub.name) + " " + Math.round(o.strongSub.share * 100) + "%</div>" : "";
+      // layout (Adi 2026-10-04): ETF ticker in a FIXED dedicated top row, Hebrew sector name BELOW it (full, no
+      // truncation), then the two bars; the >50% flag is a corner badge so it never shifts the ticker's position.
+      return '<div class="' + cls + '"' + drill + ' data-bckey="' + escAttr(o.rawname) + '" title="🟢 בהמשכיות עולה: ' + fg + ' · 🔴 יורדת: ' + fr + (strong ? " · " + Math.round(domShare * 100) + "% " + (domSide === "green" ? "עולה" : "יורדת") : "") + (o.strongSub ? " · ⚡ תת-סקטור חזק: " + o.strongSub.name + " " + Math.round(o.strongSub.share * 100) + "%" : "") + '">' +
+        '<div class="bcc-top">' + chip + "</div>" +
+        '<div class="bcc-name">' + escHtml(_cleanNm(o.name)) + "</div>" +
+        '<div class="ftt-flag">' + flag + "</div>" +                                   /* self >50% flag — centered UNDER the name (Adi) */
+        '<div class="ftt-bars">' + bar(gW, "green") + bar(rW, "red") + "</div>" + subHint + "</div>";
+    };
+    // ladder = one grid; sort by NET continuity ratio (green-heavy first → red-heavy last)
+    const _ftfcLadder = arr => {
+      const key = o => o.tot ? (o.fg - o.fr) / o.tot : 0;
+      const rows = arr.slice().sort((a, c) => key(c) - key(a) || (_hgMass(c) - _hgMass(a)));
+      return rows.length ? rows.map(o => _ftfcRow(o)).join("") : '<div class="muted" style="padding:10px">—</div>';
+    };
+    // composite → its member stocks (same mapping as openCompositeDrill), so we can count FTFC green/red
+    const _compMembers = etf => {
+      const rr = SCAN.rows || [];
+      if (etf === "MAGS") return rr.filter(r => _MAGS7.indexOf(r.s) >= 0);
+      if (etf === "SPY" || etf === "RSP") return rr.filter(r => r.sp);
+      if (etf === "QQQ") return rr.filter(r => r.sp && ["Technology", "Communication", "Consumer Disc."].indexOf(r.sec) >= 0);
+      if (etf === "IBIT" || etf === "WGMI") return rr.filter(r => r.sec === "Crypto" || /קריפטו|בלוקצ|crypto/i.test(r.ind || ""));
+      if (etf === "COMT") return rr.filter(r => r.sec === "סחורות" || /סחורות|commod/i.test(r.ind || ""));
+      return [];
+    };
+    // composite as a two-bar row: fg/fr = # member stocks in FTFC up/down. If it holds no scanner stocks
+    // (IBIT bitcoin / COMT commodities), fall back to the ETF's own alignment so it still shows a direction.
+    const _ftfcSingle = (s, isSub) => {
+      const mem = _compMembers(s.etf);
+      let fg, fr, tot;
+      if (mem.length) { fg = mem.filter(m => secFtfcDir(m, TFS) === "up").length; fr = mem.filter(m => secFtfcDir(m, TFS) === "down").length; tot = mem.length; }
+      else { const d = _singleFtfc(s, TFS); fg = d === "up" ? 1 : 0; fr = d === "down" ? 1 : 0; tot = 1; }
+      return { name: s.name, rawname: s.name, etf: s.etf, tot: tot, fg: fg, fr: fr, isSub: isSub, chg: s.chg, kind: s.kind };
+    };
+    const secArr = secInfo.map(o => ({ name: secHe(o.name), rawname: o.name, etf: etfFor(o.name), fg: o.fg, fr: o.fr, tot: o.tot, isSub: false, chg: (secChgLive[o.name] != null ? secChgLive[o.name] : o.avgChg) }));
+    const secArrG = secArr.filter(o => o.etf);                       // 11 real GICS sectors only
+    const macroArr = _singlesOf("macro").filter(s => (s.etf || "").toUpperCase() !== "RSP")   // RSP = same S&P 500 stocks as SPY → drop (Adi)
+      .map(s => _ftfcSingle(s, false));   // MAGS / crypto / commodities / QQQ / SPY
+    const note = (LIVE && LIVE.sectors && LIVE.sectors.length)
+      ? liveBanner()
+      : '<div class="demo-flag" style="background:rgba(22,184,119,.1);color:#7ee2b8;border-color:rgba(22,184,119,.25)">🟢 חברי הסקטור אמיתיים · הירוק/אדום לפי הנר היומי (השוק סגור — אין "מעל פתיחה")</div>';
+
+    // ---- sub-sectors (industries): split into BULL / neutral / BEAR by FTFC direction ----
+    const byInd = {};
+    SCAN.rows.forEach(r => { const k = (r.ind || "").trim(); if (k) (byInd[k] = byInd[k] || []).push(r); });
+    const indNames = Object.keys(byInd).filter(k => byInd[k].length >= 4 && k !== "מדדים" && k !== "אחר");
+    const subInfo = indNames.map(name => {
+      const mem = byInd[name], tot = mem.length;
+      const green = mem.filter(m => (m.D || {}).c === "up").length;
+      const bull = mem.filter(m => secFtfcDir(m, TFS) === "up").length;   // FTFC aligned UP
+      const bear = mem.filter(m => secFtfcDir(m, TFS) === "down").length; // FTFC aligned DOWN
+      const bullPct = tot ? bull / tot * 100 : 0, bearPct = tot ? bear / tot * 100 : 0;
+      const bucket = bullPct > 50 ? "bull" : (bearPct >= 50 ? "bear" : "mid");
+      return { name, tot, green, bull, bear, bullPct, bearPct, bucket, parentSec: mem[0].sec || "", avgChg: _avgChg(mem) };
+    });
+    // ALL 18 SPDR sub-sectors (same assets in every tab) — FTFC counts computed from the scanner rows
+    const _subByName = {}; subInfo.forEach(o => { _subByName[o.name] = o; });
+    let subArr;
+    if (LIVE && LIVE.subsectors && LIVE.subsectors.length) {
+      subArr = LIVE.subsectors.map(ss => { const o = _subByName[ss.ind] || { bull: 0, bear: 0, tot: 0, avgChg: null };
+        return { name: ss.ind, rawname: ss.ind, etf: ss.etf, fg: o.bull || 0, fr: o.bear || 0, tot: o.tot || 0, isSub: true, chg: (subChgLive[ss.ind] != null ? subChgLive[ss.ind] : o.avgChg) }; });
+    } else {
+      subArr = subInfo.map(o => ({ name: o.name, rawname: o.name, etf: subEtfFor(o.name), fg: o.bull, fr: o.bear, tot: o.tot, isSub: true, chg: (subChgLive[o.name] != null ? subChgLive[o.name] : o.avgChg) }));
+      // safety net: never show the SAME ETF on two cards — keep the sub-sector with the most stocks per ETF.
+      { const seen = {}; subArr = subArr.filter(o => { if (!o.etf) return true; if (seen[o.etf]) { if (o.tot > seen[o.etf].tot) { seen[o.etf].drop = true; seen[o.etf] = o; return true; } return false; } seen[o.etf] = o; return true; }).filter(o => !o.drop); }
+      if (subArr.length > 18) { const ext = o => Math.abs(o.tot ? (o.fg - o.fr) / o.tot : 0); subArr = subArr.slice().sort((a, c) => ext(c) - ext(a)).slice(0, 18); }
+    }
+    const subSingles = _singlesOf("sub").map(s => _ftfcSingle(s, true));   // WGMI etc.
+    const subArrAll = subArr.concat(subSingles);
+    // nest each sub-sector under its parent GICS sector (by the majority sector of its member stocks),
+    // so a sector tile can open a side-drawer showing only its own sub-sectors (Adi 2026-10-01 redesign).
+    _contSubCards = {}; _contSubCount = {};
+    const subByParent = {};
+    subArrAll.forEach(o => {
+      const mem = byInd[o.rawname] || [];
+      let parent = "";
+      if (mem.length) { const sc = {}; mem.forEach(m => { if (m.sec) sc[m.sec] = (sc[m.sec] || 0) + 1; }); parent = Object.keys(sc).sort((a, b) => sc[b] - sc[a])[0] || ""; }
+      (subByParent[parent] = subByParent[parent] || []).push(o);
+    });
+    Object.keys(subByParent).forEach(p => { _contSubCards[p] = _ftfcLadder(subByParent[p]); _contSubCount[p] = subByParent[p].length; });
+    // EXTERNAL hint on the main sector tile: if ANY of its sub-sectors has >50% of its stocks in one FTFC
+    // direction, surface the strongest one on the sector tile (Adi: know to drill into טכנולוגיה because שבבים is hot)
+    const _subDom = o => { const t = o.tot || 0, n = Math.max(o.fg || 0, o.fr || 0); return { share: t ? n / t : 0, side: (o.fg || 0) >= (o.fr || 0) ? "green" : "red" }; };
+    const secStrongSub = {};
+    Object.keys(subByParent).forEach(p => { let best = null;
+      subByParent[p].forEach(o => { const d = _subDom(o); if (d.share > 0.5 && (!best || d.share > best.share)) best = { name: _cleanNm(o.name), share: d.share, side: d.side }; });
+      if (best) secStrongSub[p] = best; });
+    secArrG.forEach(o => { if (secStrongSub[o.rawname]) o.strongSub = secStrongSub[o.rawname]; });
+    // main grid = 11 GICS sectors only (sub-sectors live inside each sector's drawer now)
+    const secGrid = '<div class="panel td-flow"><h3 class="tdf-head"><span>🗂️ עוצמת סקטורים · המשכיות</span></h3>' +
+      '<div class="muted tdf-sub">כל אריח = סקטור · <span class="pos">🟢 פס עליון</span> = מניות בהמשכיות עולה · <span class="neg">🔴 פס תחתון</span> = יורדת (' + TFLBL + ') · <b>לחץ סקטור לתתי-הסקטורים שלו</b></div>' +
+      '<div class="bcell-list cont-secgrid" data-ftfcladder="sec">' + _ftfcLadder(secArrG) + "</div></div>";
+    const compStrip = macroArr.length
+      ? '<div class="panel td-flow cont-comp"><h3 class="tdf-head"><span>🧩 מדדים ושונות · המשכיות</span></h3>' +
+        '<div class="bcell-list cont-secgrid" data-ftfcladder="macro">' + _ftfcLadder(macroArr) + "</div></div>"
+      : "";
+    return head + note + '<div class="cont-layout">' +
+      '<div class="cont-left">' + candleMapPanelSide() + "</div>" +
+      '<div class="cont-right">' + secGrid + compStrip + "</div>" +
+      "</div>";
+  }
+  function wireSectors() {
+    // preset shortcut → set the whole timeframe set
+    document.querySelectorAll("[data-secftfset]").forEach(b => b.onclick = () => {
+      sectorFtfcTfs = (SEC_FTFC_SETS[b.dataset.secftfset] || ["M", "Q", "Y"]).slice();
+      reRender();
+    });
+    // individual timeframe chip → toggle it in/out (modular; keeps at least one)
+    document.querySelectorAll("[data-secftftf]").forEach(b => b.onclick = () => {
+      const t = b.dataset.secftftf, arr = _secFtfcTfs().slice(), i = arr.indexOf(t);
+      if (i >= 0) { if (arr.length > 1) arr.splice(i, 1); } else arr.push(t);
+      sectorFtfcTfs = arr; reRender();
+    });
+    // sector tile → side drawer with its sub-sectors (continuity). ETF chip → the sector menu (stopPropagation, below)
+    document.querySelectorAll("[data-secladder]").forEach(c => c.onclick = () => openSectorSubsModal(decodeURIComponent(c.dataset.secladder)));
+    document.querySelectorAll(".cont-right [data-subladder]").forEach(c => c.onclick = () => openSubDrillLive(decodeURIComponent(c.dataset.subladder)));
+    document.querySelectorAll(".bcell-list .flow-etf[data-secetf]").forEach(el => el.onclick = e => { e.stopPropagation(); openSecMenu(el); });
+    document.querySelectorAll(".bcell-list [data-compdrill]").forEach(el => el.onclick = e => { if (e.target.closest(".flow-etf")) return; openCompositeDrill(el.dataset.compname, el.dataset.compdrill); });
+    // "עוד N" — reveal/hide the collapsed cards inside each column
+    document.querySelectorAll("[data-sssection]").forEach(b => b.onclick = e => {
+      e.stopPropagation();
+      const col = b.closest(".ss-col"); if (!col) return;
+      const open = col.classList.toggle("expanded");
+      b.textContent = open ? "פחות ↑" : ("עוד " + col.querySelectorAll(".ss-extra").length + " ↓");
+    });
+    document.querySelectorAll(".cmap-side [data-cmb], .cmap-wide [data-cmb]").forEach(el => el.onclick = () => openCandleMapDrill(el.dataset.cmb, el.dataset.cmtf));   // candle-map pills → drill
+    wireCharts(document); // ETF chips on sector + sub-sector cards
+  }
+  let secSort = { col: null, dir: -1 };
+  function secSortVal(r, col) {
+    if (col === "sym") return r.s;
+    if (col === "price") return r.p || (r.tech ? r.tech.px : 0);
+    if (col === "chg") return r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0);
+    // FTFC-green on top, then FTFC-red, then non-FTFC — computed for the SELECTED timeframe set (matches the badge)
+    if (col === "ftfc") { const dir = (typeof secFtfcDir === "function") ? secFtfcDir(r, _secFtfcTfs()) : ""; return dir === "up" ? 2 : dir === "down" ? 1 : 0; }
+    if (_isTfCol(col)) return tfRank(r[col]);
+    return null;
+  }
+  function openSectorDrillLive(secName) { secSort = { col: null, dir: -1 }; renderSecDrill(secName, null); }
+  function openSubDrillLive(subName) { secSort = { col: null, dir: -1 }; renderSecDrill(null, subName); }
+  function renderSecDrill(secName, indFilter) {
+    const isSub = !!indFilter;
+    const isMags = !isSub && secName === "MAGS";
+    const displayName = isMags ? "MAGS · מניות מעל 1T" : (isSub ? indFilter : secName);
+    const members = (SCAN && SCAN.rows) ? SCAN.rows.filter(r => isMags ? (r.mc || 0) >= 1e12 : (isSub ? r.ind === indFilter : r.sec === secName)) : [];
+    if (!members.length) { modal(displayName, '<div class="muted" style="padding:20px">נתוני הטיימפריימים עדיין נטענים או שהשוק סגור.</div>'); return; }
+    // FTFC column follows the timeframe set the user picked on the המשכיות-זמנית page (default M·Q·Y),
+    // so the badge matches the selector instead of always showing the server's fixed D·W·M flag.
+    const _drillTfs = _secFtfcTfs(), _drillTfLbl = _secFtfcLbl();
+    const rowHtml = r => {
+      const t = { sym: r.s, Y: r.Y, Q: r.Q, M: r.M, W: r.W, D: r.D };
+      const chg = r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0);
+      return "<tr><td>" + star(r.s) + '</td><td class="sym"><span class="tsym clickable" data-chart="' + r.s + '" data-tf="D">' + r.s + "</span></td><td>" + money(r.p || (r.tech ? r.tech.px : 0)) + "</td><td>" + pct(chg) + "</td>" + tfCells(t) + "<td>" + ftfcBadge(r, _drillTfs) + "</td></tr>";
+    };
+    const th = (label, col, start) => {
+      const arrow = secSort.col === col ? (secSort.dir < 0 ? " ▼" : " ▲") : "";
+      return '<th class="sortable" data-ssort="' + col + '" style="cursor:pointer;user-select:none' + (start ? ";text-align:start" : "") + '">' + label + arrow + "</th>";
+    };
+    const head = "<th></th>" + th("סימבול", "sym", true) + th("מחיר", "price") + th("%", "chg") + th("Y", "Y") + th("Q", "Q") + th("M", "M") + th("W", "W") + th("D", "D") + th("FTFC " + _drillTfLbl, "ftfc");
+    const sortMembers = () => members.slice().sort((a, b) => {
+      let va = secSortVal(a, secSort.col), vb = secSortVal(b, secSort.col);
+      const na = va == null || va === "" || (typeof va === "number" && isNaN(va)), nb = vb == null || vb === "" || (typeof vb === "number" && isNaN(vb));
+      if (na && nb) return 0; if (na) return 1; if (nb) return -1;
+      if (typeof va === "string") return secSort.dir * va.localeCompare(vb);
+      return secSort.dir * (va - vb);
+    });
+    let body, sub;
+    if (isSub) {
+      body = (secSort.col ? sortMembers() : members).map(rowHtml).join("");
+      sub = "לחץ כותרת למיון";
+    } else if (!secSort.col) {
+      const byInd = {}; members.forEach(r => { const k = r.ind || "אחר"; (byInd[k] = byInd[k] || []).push(r); });
+      const indNames = Object.keys(byInd).sort((a, b) => byInd[b].length - byInd[a].length);
+      body = indNames.map(ind => '<tr class="sub-head"><td colspan="10">🏭 ' + ind + ' <span class="muted" style="font-weight:400">(' + byInd[ind].length + ")</span></td></tr>" + byInd[ind].map(rowHtml).join("")).join("");
+      sub = indNames.length + " תתי-סקטורים · לחץ כותרת למיון";
+    } else {
+      body = sortMembers().map(rowHtml).join("");
+      sub = "ממוין · לחץ שוב להפוך · לחץ סקטור מחדש לקיבוץ תתי-סקטורים";
+    }
+    const etf = isSub ? subEtfFor(indFilter) : etfFor(secName);
+    const bar = '<div class="drill-bar"><button class="btn ghost" id="drillGrid" style="font-size:12px;font-weight:600">📊 תצוגת גרפים</button>' +
+      '<button class="btn ghost" id="drillCopy" style="font-size:12px;font-weight:600">📋 העתק ' + members.length + " טיקרים</button>" +
+      (etf ? '<span class="muted" style="font-size:12px">תעודת סל:</span>' + etfChip(etf) : "") + "</div>";
+    modal(displayName + " · " + members.length + " מניות · " + sub,
+      bar + '<div class="tablewrap"><table class="scan-table"><thead><tr>' + head + "</tr></thead><tbody>" + body + "</tbody></table></div>" + colorLegend());
+    const gbtn = $("#drillGrid");
+    if (gbtn) gbtn.onclick = () => openChartGrid(members.map(r => ({ sym: r.s, sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0), chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0) })), { title: displayName });
+    const cbtn = $("#drillCopy");
+    if (cbtn) cbtn.onclick = () => copyToClipboard(members.map(r => r.s).join(", "), () => { cbtn.textContent = "✓ הועתקו " + members.length; setTimeout(() => cbtn.textContent = "📋 העתק " + members.length + " טיקרים", 1600); });
+    document.querySelectorAll("[data-ssort]").forEach(h => h.onclick = () => {
+      const c = h.dataset.ssort;
+      if (secSort.col === c) secSort.dir *= -1; else { secSort.col = c; secSort.dir = c === "sym" ? 1 : -1; }
+      renderSecDrill(secName, indFilter);
+    });
+  }
+  // generic member-drill (used by composites/מכלולים): same rich table as the sector drill — FTFC column + sortable
+  let compSort = { col: "chg", dir: -1 };
+  function openMembersDrill(displayName, members, etf, noteTxt) {
+    if (!members || !members.length) { modal("📦 " + escHtml(displayName), '<div class="muted" style="padding:20px">אין מניות מרכיבות זמינות.</div>'); return; }
+    const _tfs = _secFtfcTfs(), _tfLbl = _secFtfcLbl();
+    const rowHtml = r => {
+      const t = { sym: r.s, Y: r.Y, Q: r.Q, M: r.M, W: r.W, D: r.D };
+      const chg = r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0);
+      return "<tr><td>" + star(r.s) + '</td><td class="sym"><span class="tsym clickable" data-chart="' + r.s + '" data-tf="D">' + r.s + "</span></td><td>" + money(r.p || (r.tech ? r.tech.px : 0)) + "</td><td>" + pct(chg) + "</td>" + tfCells(t) + "<td>" + ftfcBadge(r, _tfs) + "</td></tr>";
+    };
+    const th = (label, col, start) => {
+      const arrow = compSort.col === col ? (compSort.dir < 0 ? " ▼" : " ▲") : "";
+      return '<th class="sortable" data-csort="' + col + '" style="cursor:pointer;user-select:none' + (start ? ";text-align:start" : "") + '">' + label + arrow + "</th>";
+    };
+    const head = "<th></th>" + th("סימבול", "sym", true) + th("מחיר", "price") + th("%", "chg") + th("Y", "Y") + th("Q", "Q") + th("M", "M") + th("W", "W") + th("D", "D") + th("FTFC " + _tfLbl, "ftfc");
+    const sorted = members.slice().sort((a, b) => {
+      let va = secSortVal(a, compSort.col), vb = secSortVal(b, compSort.col);
+      const na = va == null || va === "" || (typeof va === "number" && isNaN(va)), nb = vb == null || vb === "" || (typeof vb === "number" && isNaN(vb));
+      if (na && nb) return 0; if (na) return 1; if (nb) return -1;
+      if (typeof va === "string") return compSort.dir * va.localeCompare(vb);
+      return compSort.dir * (va - vb);
+    });
+    const bar = '<div class="drill-bar"><button class="btn ghost" id="cdrillGrid" style="font-size:12px;font-weight:600">📊 תצוגת גרפים</button>' +
+      '<button class="btn ghost" id="cdrillCopy" style="font-size:12px;font-weight:600">📋 העתק ' + members.length + " טיקרים</button>" +
+      (etf ? '<span class="muted" style="font-size:12px">תעודת סל:</span>' + etfChip(etf) : "") + "</div>";
+    modal("📦 " + escHtml(displayName) + (noteTxt ? ' <span class="muted" style="font-size:12px">' + escHtml(noteTxt) + "</span>" : "") + " · " + members.length + " מניות · לחץ כותרת למיון",
+      bar + '<div class="tablewrap"><table class="scan-table"><thead><tr>' + head + "</tr></thead><tbody>" + sorted.map(rowHtml).join("") + "</tbody></table></div>" + colorLegend());
+    { const gb = $("#cdrillGrid"); if (gb) gb.onclick = () => openChartGrid(members.map(r => ({ sym: r.s, sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0), chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0) })), { title: displayName }); }
+    { const cb = $("#cdrillCopy"); if (cb) cb.onclick = () => copyToClipboard(members.map(r => r.s).join(", "), () => { cb.textContent = "✓ הועתקו " + members.length; setTimeout(() => cb.textContent = "📋 העתק " + members.length + " טיקרים", 1600); }); }
+    document.querySelectorAll("[data-csort]").forEach(h => h.onclick = () => {
+      const c = h.dataset.csort;
+      if (compSort.col === c) compSort.dir *= -1; else { compSort.col = c; compSort.dir = c === "sym" ? 1 : -1; }
+      openMembersDrill(displayName, members, etf, noteTxt);
+    });
+    wireCharts(document.getElementById("pgModal") || document);
+  }
+
+  // ========== GAPPERS ==========
+  let gapSort = { col: "gp", dir: -1 };
+  function gapVal(x, col) {
+    if (col === "sym") return x.s;
+    if (col === "price") return x.price || 0;
+    if (col === "gd") return x.gd || 0;
+    return x.gp || 0; // gp
+  }
+  function renderGappers() {
+    const g = LIVE && LIVE.gappers;
+    const head = '<div class="page-head"><h1>גאפרים</h1><div class="sub">כאן רואים מניות שפתחו בגאפ משמעותי (מעל/מתחת 3% מסגירת אתמול) — לזיהוי תנועה חריגה בתחילת היום. לחץ על כותרת למיון.</div></div>';
+    if (g && (g.up.length || g.down.length)) {
+      const gapTh = (label, col, start) => { const arrow = gapSort.col === col ? (gapSort.dir < 0 ? " ▼" : " ▲") : ""; return '<th class="sortable" data-gapsort="' + col + '" style="cursor:pointer;user-select:none' + (start ? ";text-align:start" : "") + '">' + label + arrow + "</th>"; };
+      const gapTable = (arr, cls, title) => {
+        const sorted = arr.slice().sort((a, b) => { const va = gapVal(a, gapSort.col), vb = gapVal(b, gapSort.col); if (typeof va === "string") return gapSort.dir * va.localeCompare(vb); return gapSort.dir * (va - vb); });
+        const rows = sorted.map(x =>
+          "<tr><td>" + star(x.s) + '</td><td class="sym"><span class="tsym clickable" data-chart="' + x.s + '" data-tf="D">' + x.s + '</span></td><td data-flick="gpp-' + x.s + '">' + money(x.price) + "</td><td class='" + cls + "'>" + (x.gd >= 0 ? "+" : "") + money(x.gd) + '</td><td data-flick="gpg-' + x.s + '">' + pct(x.gp) + "</td></tr>").join("");
+        return '<div class="panel"><h3>' + title + ' <span class="muted" style="font-size:12px">' + arr.length + " מניות</span> <button class=\"btn ghost\" data-gapcopy=\"" + encodeURIComponent(arr.map(x => x.s).join(", ")) + "\" style=\"font-size:12px;font-weight:600\">📋 העתק " + arr.length + "</button></h3><div class='tablewrap'><table class='scan-table'><thead><tr><th></th>" + gapTh("סימבול", "sym", true) + gapTh("מחיר", "price") + gapTh("$Gap", "gd") + gapTh("%Gap", "gp") + "</tr></thead><tbody>" + (rows || '<tr><td colspan="5" class="muted">—</td></tr>') + "</tbody></table></div></div>";
+      };
+      return head + liveBanner() +
+        '<div class="cols2">' + gapTable(g.up, "pos", "🟢 גאפ למעלה") + gapTable(g.down, "neg", "🔴 גאפ למטה") + "</div>";
+    }
+    // no gappers right now — honest empty state (market closed / nothing gapping >3%)
+    const note = (LIVE && LIVE.updated)
+      ? '<div class="demo-flag" style="background:rgba(22,184,119,.1);color:#7ee2b8;border-color:rgba(22,184,119,.25)">🟢 מחובר לנתונים חיים · אין כרגע מניות בגאפ מעל 3%</div>'
+      : DEMO;
+    return head + note +
+      '<div class="panel"><div class="stub"><div class="big">⚡</div><h2>אין גאפרים כרגע</h2><p>גאפרים מחושבים <b>בזמן אמת בשעות המסחר</b> — מניות שפותחות מעל/מתחת ל-3% מסגירת אתמול. חזור כשהשוק פתוח והרשימה תתמלא אוטומטית.</p></div></div>';
+  }
+  function wireGappers() {
+    document.querySelectorAll("[data-gapsort]").forEach(h => h.onclick = () => {
+      const c = h.dataset.gapsort;
+      if (gapSort.col === c) gapSort.dir *= -1; else { gapSort.col = c; gapSort.dir = c === "sym" ? 1 : -1; }
+      reRender();
+    });
+    document.querySelectorAll("[data-gapcopy]").forEach(b => b.onclick = () => {
+      const syms = decodeURIComponent(b.dataset.gapcopy), orig = b.textContent;
+      copyToClipboard(syms, () => { b.textContent = "✓ הועתק"; setTimeout(() => b.textContent = orig, 1500); });
+    });
+    wireCharts($("#page"));
+  }
+
+  // ========== BOLLINGER BANDS ==========
+  const bollingerState = { mode: "sq", maxSq: "" };
+  const BB_MODES = [
+    { k: "sq", t: "התכווצות (Squeeze)" },
+    { k: "up", t: "פריצת רצועה עליונה" },
+    { k: "low", t: "נגיעה ברצועה תחתונה" },
+    { k: "rev", t: "חזרה לממוצע · סכינים נופלות" },
+    { k: "all", t: "הכל" },
+  ];
+  function bbNum(v, suf) { return v == null ? "—" : v.toFixed(v >= 100 || v <= -10 ? 0 : 1) + (suf || ""); }
+  function bbPct(v) {
+    if (v == null) return "—";
+    const cls = v >= 100 ? "pos" : v <= 0 ? "neg" : "zero";
+    return '<span class="' + cls + '">' + v.toFixed(1) + "</span>";
+  }
+  function bbRows() {
+    let rows = scanSource().filter(t => t.tech && t.tech.bbw != null);
+    const m = bollingerState.mode;
+    if (m === "up") { rows = rows.filter(t => t.tech.bbp != null && t.tech.bbp >= 100); rows.sort((a, b) => b.tech.bbp - a.tech.bbp); }
+    else if (m === "low") { rows = rows.filter(t => t.tech.bbp != null && t.tech.bbp <= 0); rows.sort((a, b) => a.tech.bbp - b.tech.bbp); }
+    else if (m === "rev") { rows = rows.filter(t => t.tech.bbp != null && (t.tech.bbp <= 0 || t.tech.bbp >= 100)); rows.sort((a, b) => Math.abs(b.tech.bbp - 50) - Math.abs(a.tech.bbp - 50)); }   // both extremes, most-extreme first
+    else {
+      rows = rows.filter(t => t.tech.bbsq != null);
+      const mx = parseFloat(bollingerState.maxSq);
+      if (!isNaN(mx) && mx > 0) rows = rows.filter(t => t.tech.bbsq <= mx);
+      rows.sort((a, b) => a.tech.bbsq - b.tech.bbsq);
+    }
+    return rows;
+  }
+  function renderBollinger() {
+    const head0 = '<div class="page-head"><h1>🎈 בולינגר · Bollinger Bands</h1><div class="sub">רצועות בולינגר (20, 2σ) · דחיסה (Squeeze) לפני פריצה · מיקום המחיר ברצועות (%B) · רוחב הרצועות</div></div>';
+    const isLive = !!(SCAN && SCAN.rows && SCAN.rows.length);
+    const hasTech = scanSource().some(t => t.tech && t.tech.bbw != null);
+    const showSq = bollingerState.mode === "sq" || bollingerState.mode === "all";
+    const isRev = bollingerState.mode === "rev";
+    // trader guidance for the mean-reversion / falling-knives mode (reclaim is a manual check for now — auto-detect pending server %B history + backtest)
+    const revNote = isRev ? '<div class="note" style="margin-top:8px;border-inline-start:3px solid #F2C94C;background:rgba(242,201,76,.07)">🎯 <b>חזרה לממוצע:</b> מתחת לרצועה התחתונה = מועמד <b class="pos">▲ LONG</b> (oversold) · מעל העליונה = <b class="neg">▼ SHORT</b> (overbought), בציפייה לחזרה לאמצע.<br>⚠ <b>שים לב — מתחת/מעל הרצועה לבד זה לרוב "סכין נופל"</b>: בשוק טרנד המחיר יכול להמשיך לאורך הרצועה. <b>מומלץ להמתין ל-reclaim</b> (המחיר חוזר לתוך הרצועה) לפני כניסה — סינון reclaim אוטומטי ייווסף אחרי בדיקות backtest.</div>' : "";
+    const controls = '<div class="panel filters"><h3>מצב סינון</h3><div class="frow"><div class="fgrp"><label>מצב</label><select id="bbMode">' +
+      BB_MODES.map(o => '<option value="' + o.k + '"' + (bollingerState.mode === o.k ? " selected" : "") + ">" + o.t + "</option>").join("") + "</select></div>" +
+      (showSq ? '<div class="fgrp"><label>דחיסה עד (%)</label><input id="bbMaxSq" type="number" step="5" min="0" max="100" placeholder="הכל" style="width:80px" value="' + bollingerState.maxSq + '"></div>' : "") + "</div>" +
+      '<div class="note" style="margin-top:6px">🎈 <b>%B</b> = מיקום המחיר ברצועות: 0 = רצועה תחתונה, 100 = עליונה, מעל 100 = פרץ מעל. <b>רוחב</b> = מרחק הרצועות כאחוז מהמחיר. <b>דחיסה</b> = אחוז הימים ב-6 החודשים האחרונים שבהם הרצועות היו צרות יותר — נמוך = הרצועות הכי צמודות עכשיו (התכווצות לפני תנועה).</div></div>';
+    if (!hasTech) return head0 + controls + '<div class="panel"><div class="note" style="margin:6px 0">⏳ נתוני בולינגר ייטענו מהסורק. רגע ומתעדכן.</div></div>';
+    const rows = bbRows();
+    const CAP = 300, shown = rows.slice(0, CAP);
+    const dirTd = t => isRev ? (t.tech.bbp <= 0 ? '<td><b class="pos">▲ LONG</b></td>' : '<td><b class="neg">▼ SHORT</b></td>') : "";
+    const body = shown.map(t => {
+      const k = t.tech;
+      return "<tr><td>" + star(t.sym) + "</td>" +
+        '<td class="sym"><span class="tsym clickable" data-chart="' + t.sym + '" data-tf="D">' + t.sym + "</span></td>" +
+        dirTd(t) +
+        '<td class="tname" style="text-align:start">' + t.sector + "</td><td>" + money(t.price) + "</td>" +
+        "<td>" + bbPct(k.bbp) + "</td>" +
+        "<td>" + bbNum(k.bbw, "%") + "</td>" +
+        '<td class="sma-spread"><b>' + bbNum(k.bbsq) + "</b></td>" +
+        "<td>" + ftfcBadge(t) + "</td>" +
+        '<td><a class="tvlink" href="https://www.tradingview.com/chart/?symbol=' + t.sym + '" target="_blank" rel="noopener">📈</a></td></tr>';
+    }).join("");
+    const sortHint = bollingerState.mode === "up" ? "%B ▼" : bollingerState.mode === "low" ? "%B ▲" : isRev ? "קיצוניות ▼" : "דחיסה ▲";
+    const head = "<th></th><th style='text-align:start'>סימבול</th>" + (isRev ? "<th title='כיוון חזרה לממוצע'>כיוון</th>" : "") + "<th style='text-align:start'>סקטור</th><th>מחיר</th><th title='מיקום ברצועות 0-100'>%B</th><th title='רוחב הרצועות כאחוז מהמחיר'>רוחב</th><th title='אחוז ימים עם רצועות צרות יותר — נמוך=דחוס'>דחיסה</th><th>FTFC</th><th></th>";
+    const nCols = isRev ? 10 : 9;
+    const results = '<div class="panel scan-results"><h3><span>תוצאות <span class="muted" style="font-size:12px">' + rows.length + " · " + sortHint + "</span></span>" + (rows.length ? '<button class="btn ghost" id="bbCopy" style="font-size:12px;font-weight:600">📋 העתק ' + Math.min(rows.length, CAP) + " טיקרים</button>" : "") + "</h3>" +
+      '<div class="tablewrap"><table class="scan-table"><thead><tr>' + head + "</tr></thead><tbody>" + (shown.length ? body : '<tr><td colspan="' + nCols + '" class="muted" style="text-align:center;padding:30px">אין תוצאות במצב הזה</td></tr>') + "</tbody></table></div></div>";
+    return head0 + (isLive ? liveBanner() : DEMO) + controls + revNote + results;
+  }
+  function wireBollinger() {
+    const md = $("#bbMode"); if (md) md.onchange = () => { bollingerState.mode = md.value; reRender(); };
+    const msq = $("#bbMaxSq"); if (msq) msq.onchange = () => { bollingerState.maxSq = msq.value; reRender(); };
+    wireCharts($("#page")); wireStars($("#page"));
+    const cp = $("#bbCopy");
+    if (cp) cp.onclick = () => { const syms = bbRows().slice(0, 300).map(t => t.sym).join(", "); copyToClipboard(syms, () => { const o = cp.textContent; cp.textContent = "✓ הועתקו"; setTimeout(() => cp.textContent = o, 1500); }); };
+  }
+
+  // ========== WHAT TO CHECK NOW (daily briefing) ==========
+  function todayMarketState() {
+    if (!LIVE || !LIVE.indices || !LIVE.indices.length) return null;
+    const idx = LIVE.indices;
+    const green = idx.filter(i => (i.chg || 0) > 0).length;
+    const red = idx.filter(i => (i.chg || 0) < 0).length;
+    const br = LIVE.breadth || {};
+    const brGreen = (br.above != null && br.total) ? br.above / br.total : null;
+    let mode, emoji, cls;
+    if (green > red && (brGreen == null || brGreen >= 0.5)) { mode = "שוק חיובי · Risk-On"; emoji = "🟢"; cls = "pos"; }
+    else if (red > green && (brGreen == null || brGreen < 0.5)) { mode = "שוק שלילי · Risk-Off"; emoji = "🔴"; cls = "neg"; }
+    else { mode = "שוק מעורב · זהירות"; emoji = "🟡"; cls = "zero"; }
+    // plain-language "why" — explains the read, and especially the conflict behind "מעורב"
+    const brPct = (brGreen == null) ? null : Math.round(brGreen * 100);
+    const brTxt = (brPct == null) ? "" : brPct + "% מהמניות מעל הפתיחה";
+    let why;
+    if (cls === "pos") why = "רוב המדדים ירוקים" + (brPct != null ? " והרוחב מחזיק — " + brTxt : "");
+    else if (cls === "neg") why = "רוב המדדים אדומים" + (brPct != null ? " והרוחב חלש — רק " + brTxt : "");
+    else if (green === red) why = "המדדים חצויים — אין כיוון ברור" + (brPct != null ? " (" + brTxt + ")" : "");
+    else if (red > green && brPct != null) why = "המדדים אדומים בגלל הענקיות, אבל " + brTxt + " — הרוחב מחזיק";
+    else if (green > red && brPct != null) why = "המדדים ירוקים אבל רק " + brTxt + " — העלייה מרוכזת בענקיות";
+    else why = "המדדים והרוחב לא מסכימים";
+    return { mode, emoji, cls, why, idx, vix: LIVE.vix, br };
+  }
+  let flowTf = "1d";        // money-flow timeframe (BOTH panels) — one global control: 1d / 5d / 20d
+  let flowSecMode = "etf";  // money-flow metric (BOTH panels): etf (real ETF move, cap-weighted) | avg (equal-weight stock average = breadth)
+  // money-flow timeframes: [key, short button label, Hebrew label, per-stock tech field to average (1d uses t.chg)]
+  const FLOW_TF_DEF = [
+    ["1d", "1D", "היום", null],
+    ["5d", "1W", "שבוע", "c5"],
+    ["wtd", "WTD", "מתחילת השבוע", "cwtd"],
+    ["20d", "1M", "חודש", "c20"],
+    ["mtd", "MTD", "מתחילת החודש", "cmtd"],
+    ["63", "1Q", "רבעון", "c63"],
+    ["qtd", "QTD", "מתחילת הרבעון", "cqtd"],
+    ["252", "1Y", "שנה", "c252"],
+    ["ytd", "YTD", "מתחילת השנה", "cytd"],
+  ];
+  const FLOW_TF_SHORT = {}, FLOW_TF_LBL = {}, FLOW_TF_TECH = {};
+  FLOW_TF_DEF.forEach(function (d) { FLOW_TF_SHORT[d[0]] = d[1]; FLOW_TF_LBL[d[0]] = d[2]; if (d[3]) FLOW_TF_TECH[d[0]] = d[3]; });
+  // accumulate one ticker's returns (all TFs) into an accumulator, and finalize to a {tf: avg%} map
+  function _accTf(acc, t) {
+    const k = t.tech || {};
+    if (t.chg != null) { acc.sum["1d"] = (acc.sum["1d"] || 0) + t.chg; acc.cnt["1d"] = (acc.cnt["1d"] || 0) + 1; }
+    FLOW_TF_DEF.forEach(function (d) { if (d[3] && k[d[3]] != null) { acc.sum[d[0]] = (acc.sum[d[0]] || 0) + k[d[3]]; acc.cnt[d[0]] = (acc.cnt[d[0]] || 0) + 1; } });
+  }
+  function _aggTfv(acc) { const o = {}; FLOW_TF_DEF.forEach(function (d) { o[d[0]] = acc.cnt[d[0]] ? acc.sum[d[0]] / acc.cnt[d[0]] : null; }); return o; }
+  function todaySectors(rows) {
+    const liveChg = {}, live5d = {}, live20d = {}, livePx = {};
+    if (LIVE && LIVE.sectors) LIVE.sectors.forEach(s => { liveChg[s.name] = s.chg; live5d[s.name] = s.chg5d; live20d[s.name] = s.chg20d; livePx[s.name] = s.px; });
+    const m = {};
+    rows.forEach(t => {
+      const s = t.sector || "—";
+      if (!m[s]) m[s] = { n: 0, green: 0, top: null, sum: {}, cnt: {} };
+      m[s].n++;
+      if ((t.D || {}).c === "up") m[s].green++;
+      const k = t.tech || {};
+      _accTf(m[s], t);   // accumulate ALL timeframes (1d/1w/wtd/1m/mtd/1q/qtd/1y/ytd) for the equal-weight average
+      if (t.mc && (!m[s].top || t.mc > m[s].top.mc)) m[s].top = { sym: t.sym, mc: t.mc, chg: t.chg, chg5d: k.c5, chg20d: k.c20 };   // largest holding
+    });
+    // two lenses (toggle): "etf" = the sector's official ETF move (LIVE.sectors, cap-weighted; falls back to
+    // the stock average when live data isn't loaded) · "avg" = equal-weight average of its stocks (breadth).
+    return Object.keys(m).filter(s => m[s].n >= 3 && s !== "מדדים" && s !== "אחר").map(s => {   // מדדים shown in the top strip, not as a sector row
+      const d = m[s], base = { name: s, n: d.n, greenPct: d.green / d.n * 100, top: d.top };
+      const tfv = _aggTfv(d);   // {tf: equal-weight avg %}
+      if (flowSecMode !== "avg") {
+        // ETF move (cap-weighted) for 1D/1W/1M when live data is loaded; extended TFs stay stock-average.
+        if (liveChg[s] != null) tfv["1d"] = liveChg[s];
+        if (live5d[s] != null) tfv["5d"] = live5d[s];
+        if (live20d[s] != null) tfv["20d"] = live20d[s];
+        base.px = livePx[s] != null ? livePx[s] : null;
+      }
+      return Object.assign(base, { chg: tfv["1d"], chg5d: tfv["5d"], chg20d: tfv["20d"], tfv: tfv });
+    });
+  }
+  // sub-sector money flow. Two lenses (toggle):
+  //  • "etf" (default) — each sub-sector's REAL ETF move (server LIVE.subsectors, cap-weighted) → matches the click.
+  //  • "avg"          — equal-weight average of the group's stocks (breadth; uses server tech.c5 / tech.c20).
+  function todaySubsectors(rows) {
+    // per-industry stock aggregation (all TFs) — used for the "avg" lens, and for the EXTENDED TFs under "etf"
+    const agg = {};
+    rows.forEach(t => {
+      const s = t.ind; if (!s) return;
+      if (!agg[s]) agg[s] = { n: 0, top: null, sum: {}, cnt: {} };
+      agg[s].n++;
+      const k = t.tech || {};
+      _accTf(agg[s], t);
+      if (t.mc && (!agg[s].top || t.mc > agg[s].top.mc)) agg[s].top = { sym: t.sym, mc: t.mc, chg: t.chg, chg5d: k.c5, chg20d: k.c20 };
+    });
+    if (flowSecMode === "avg") {
+      return Object.keys(agg).filter(s => agg[s].n >= 3 && s !== "מדדים" && s !== "אחר").map(s => {
+        const tfv = _aggTfv(agg[s]);
+        return { name: s, etf: subEtfFor(s) || "", top: agg[s].top, chg: tfv["1d"], chg5d: tfv["5d"], chg20d: tfv["20d"], tfv: tfv };
+      });
+    }
+    const subs = (LIVE && LIVE.subsectors) ? LIVE.subsectors : [];
+    if (!subs.length) return [];
+    return subs.map(s => {
+      const tfv = agg[s.ind] ? _aggTfv(agg[s.ind]) : {};   // extended TFs = equal-weight stock average
+      if (s.chg != null) tfv["1d"] = s.chg;                // ETF cap-weighted move for 1D/1W/1M when available
+      if (s.chg5d != null) tfv["5d"] = s.chg5d;
+      if (s.chg20d != null) tfv["20d"] = s.chg20d;
+      return { name: s.ind, etf: s.etf, top: (agg[s.ind] ? agg[s.ind].top : null), chg: tfv["1d"], chg5d: tfv["5d"], chg20d: tfv["20d"], tfv: tfv, px: s.px != null ? s.px : null };
+    });
+  }
+  // ---- battery-cell money-flow panel (ranked list, biggest gainer on top) ----
+  const _bcellVal = (s, tf) => {
+    if (s.tfv && s.tfv[tf] !== undefined) return s.tfv[tf];           // full timeframe map (sectors / sub-sectors)
+    if (tf === "5d") return s.chg5d; if (tf === "20d") return s.chg20d; if (tf === "1d") return s.chg;
+    return null;   // extended TF with no data (e.g. composites with only 1D/1W/1M) → "—"
+  };
+  // 5 discrete buckets: >+0.5% vivid green · +0.1..0.5 muted green · ±0.1 slate · -0.1..-0.5 muted red · <-0.5 vivid red
+  function _bcellColor(v) {
+    if (v == null) return "#565d69";
+    if (v >= 0.5) return "#10b981";
+    if (v >= 0.1) return "#2e6f4e";
+    if (v > -0.1) return "#565d69";
+    if (v > -0.5) return "#8f3b42";
+    return "#e5384a";
+  }
+  // 5 tiers → a class that colors the card's % text + progress bar (dark card bg, not a red/green wall)
+  function _bcellTier(v) {
+    if (v == null) return "t-n";
+    if (v >= 0.5) return "t-vg";
+    if (v >= 0.1) return "t-mg";
+    if (v > -0.1) return "t-n";
+    if (v > -0.5) return "t-mr";
+    return "t-vr";
+  }
+  // sector-strength "card" (dashboard grid): ETF+name on top, big % (colored by tier), a progress bar, $ move.
+  function _bcellRowHtml(s, tf, isSub) {
+    const v = _bcellVal(s, tf);
+    const etf = s.etf || (isSub ? subEtfFor(s.name) : etfFor(s.name));   // single-ETF composites carry their own etf
+    const name = isSub ? s.name : (s.kind ? s.name : secHe(s.name));
+    // $ move of the sector ETF for this timeframe, derived from its current price: px - px/(1+v/100)
+    const usd = (s.px != null && v != null) ? s.px * v / (100 + v) : null;
+    const tier = _bcellTier(v);
+    // ETF ticker → menu. Sectors without an ETF (אחר/קריפטו) still get a bare ▾ with the same menu.
+    const chip = '<span class="bc-etf flow-etf' + (etf ? "" : " bc-noetf") + '" data-secetf="' + escAttr(etf || "") +
+      '" data-secname="' + escAttr(s.name) + '" data-secsub="' + (isSub ? "1" : "") + '" title="אפשרויות סקטור">' + (etf ? etf + " ▾" : "▾") + "</span>";
+    const pctTxt = v == null ? "—" : (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2) + "%";
+    const usdTxt = usd == null ? "" : '<span class="bcc-usd">' + (usd >= 0 ? "+" : "−") + "$" + Math.abs(usd).toFixed(2) + "</span>";
+    const w = v == null ? 0 : Math.max(6, Math.min(100, Math.abs(v) / 2.5 * 100));   // bar width ∝ |move| (cap 2.5%)
+    return '<div class="bc-card ' + tier + (s.kind ? " single-card bc-clickable" : "") + '" data-bckey="' + escAttr(s.name) + '"' + (s.kind ? ' data-compdrill="' + escAttr(s.etf || "") + '" data-compname="' + escAttr(s.name) + '"' : "") + ">" +
+      '<div class="bcc-head">' + chip + '<span class="bcc-name">' + name + "</span></div>" +
+      '<div class="bcc-mid"><span class="bcc-pct">' + pctTxt + "</span>" + usdTxt + "</div>" +
+      '<div class="bcc-bar"><span class="bcc-fill" style="width:' + w.toFixed(0) + '%"></span></div></div>';
+  }
+  function _bcellSorted(data, tf, limit) {
+    const v = s => _bcellVal(s, tf), byV = (a, b) => (v(b) == null ? -Infinity : v(b)) - (v(a) == null ? -Infinity : v(a));
+    let flow = data.slice().sort(byV);
+    if (limit && flow.length > limit) flow = flow.slice().sort((a, b) => Math.abs(v(b) || 0) - Math.abs(v(a) || 0)).slice(0, limit).sort(byV);
+    return flow;
+  }
+  function _bcellListHtml(data, tf, isSub, limit, augment) {
+    const flow = _bcellSorted(data, tf, limit);
+    let html = flow.length ? flow.map(s => _bcellRowHtml(s, tf, isSub)).join("") : '<div class="muted" style="padding:10px">—</div>';
+    if (augment && !isSub) {   // 11 GICS → divider → broad-market composites (MAGS/crypto/commodities/RSP/QQQ/SPY)
+      const macro = _bcellSorted(_singlesOf("macro"), tf);
+      if (macro.length) html += _bcellDivider("מדדים ושונות") + macro.map(s => _bcellRowHtml(s, tf, false)).join("");
+    }
+    return html;
+  }
+  // FLIP: re-render a battery list in place with a slide animation when the timeframe changes
+  function _bcellFlip(listEl, data, tf, isSub, limit) {
+    const augment = listEl.dataset.augment === "1";
+    const olds = {};
+    listEl.querySelectorAll(".bc-card").forEach(el => olds[el.dataset.bckey] = el.getBoundingClientRect());
+    listEl.setAttribute("data-tf", tf);
+    listEl.innerHTML = _bcellListHtml(data, tf, isSub, limit, augment);
+    requestAnimationFrame(() => {
+      listEl.querySelectorAll(".bc-card").forEach(el => {
+        const o = olds[el.dataset.bckey]; if (!o) return;
+        const n = el.getBoundingClientRect(), dy = o.top - n.top;
+        if (dy) {
+          el.style.transition = "none"; el.style.transform = "translateY(" + dy + "px)";
+          requestAnimationFrame(() => { el.style.transition = "transform .5s cubic-bezier(.4,0,.2,1)"; el.style.transform = ""; });
+        }
+      });
+    });
+    listEl.querySelectorAll(".flow-etf[data-secetf]").forEach(el => el.onclick = e => { e.stopPropagation(); openSecMenu(el); });
+    listEl.querySelectorAll("[data-compdrill]").forEach(el => el.onclick = e => { if (e.target.closest(".flow-etf")) return; openCompositeDrill(el.dataset.compname, el.dataset.compdrill); });
+  }
+  function _flowPanelHtml(o) {
+    const tfSwitch = o.tfAttr ? '<span class="flow-tf">' + ["1d", "5d", "20d"].map(k =>
+      '<button class="flow-tf-btn' + (k === o.tf ? " on" : "") + '" data-' + o.tfAttr + '="' + k + '">' + k.toUpperCase() + "</button>").join("") + "</span>" : "";
+    // metric toggle (both panels): cap-weighted ETF move vs equal-weight breadth (stock average)
+    const modeSwitch = o.modeAttr ? '<span class="flow-tf flow-mode">' +
+      [["etf", "תעודת סל", "תנועת תעודת הסל (משוקלל שווי-שוק) — תואם לגרף שנפתח בלחיצה"],
+       ["avg", "ממוצע ענף", "ממוצע תנועת המניות (משקל שווה = רוחב) — כמה מהמניות באמת השתתפו"]].map(x =>
+        '<button class="flow-tf-btn' + (x[0] === o.mode ? " on" : "") + '" data-' + o.modeAttr + '="' + x[0] + '" title="' + escAttr(x[2]) + '">' + x[1] + "</button>").join("") + "</span>" : "";
+    const modeLbl = o.mode ? (o.mode === "avg" ? "ממוצע ענף" : "תעודת סל") : "";
+    const subLbl = (o.isSub ? "תתי-סקטורים" : "כל הסקטורים") + (modeLbl ? " (" + modeLbl + ")" : "");
+    return '<div class="panel td-flow"><h3 class="tdf-head"><span>' + o.title + '</span><span class="tdf-switches">' + modeSwitch + tfSwitch + "</span></h3>" +
+      '<div class="muted tdf-sub">' + subLbl + " · מדורג לפי התנועה ב" + FLOW_TF_LBL[o.tf] + ' · 🟢 כסף נכנס · 🔴 כסף יוצא</div>' +
+      '<div class="bcell-list" data-issub="' + (o.isSub ? "1" : "0") + '" data-tf="' + o.tf + '" data-limit="' + (o.limit || "") + '" data-augment="' + (o.augment ? "1" : "") + '">' +
+      _bcellListHtml(o.data, o.tf, o.isSub, o.limit, o.augment) + "</div></div>";
+  }
+  function todayStockRow(t) {
+    return "<tr><td>" + ninjaCell(t.ninja, t.sym) + "</td>" +
+      '<td>' + star(t.sym) + '</td>' +
+      '<td class="sym"><span class="tsym clickable" data-chart="' + t.sym + '" data-tf="D">' + t.sym + "</span></td>" +
+      '<td class="tname" style="text-align:start">' + secHe(t.sector) + '</td><td data-flick="tdp-' + t.sym + '">' + money(t.price) + '</td><td data-flick="tdc-' + t.sym + '">' + pct(t.chg) + "</td>" +
+      "<td>" + ftfcBadge(t) + "</td>" +
+      '<td><a class="tvlink" href="https://www.tradingview.com/chart/?symbol=' + t.sym + '" target="_blank" rel="noopener">📈</a></td></tr>';
+  }
+  // index % for the selected timeframe: 1d from the live quote (i.chg), 5d/20d from the daily OHLC closes
+  function _indexTfChg(i, tf) {
+    if (tf === "1d") return i.chg;
+    const back = { "5d": 6, "20d": 21, "63": 64, "252": 253 }[tf];   // trading-day lookbacks from ohlc
+    if (!back) return null;   // calendar TFs (WTD/MTD/QTD/YTD) aren't computable for indices client-side → "—"
+    const oh = i.ohlc || [], n = oh.length;
+    if (n < back + 1) return null;
+    const last = oh[n - 1][3], prev = oh[n - back][3];
+    return prev ? (last - prev) / prev * 100 : null;
+  }
+  function _indicesInner(ms, tf) {
+    const lbl = FLOW_TF_LBL[tf] || "היום";
+    const ixCard = i => { const v = _indexTfChg(i, tf), up = (v || 0) >= 0, z = (v == null || v === 0);
+      return '<div class="td-ixc ' + (z ? "flat" : up ? "pos" : "neg") + '"><span class="td-ixc-sym">' + i.sym + '</span><span class="td-ixc-chg">' + (z ? "" : up ? "▲ " : "▼ ") + (v == null ? "—" : (v >= 0 ? "+" : "") + v.toFixed(2) + "%") + "</span></div>"; };
+    const vixCard = ms.vix ? '<div class="td-ixc vix"><span class="td-ixc-sym">VIX</span><span class="td-ixc-chg">' + ms.vix.level.toFixed(1) + "</span></div>" : "";
+    return '<h3 class="td-ix-h">📈 מדדים ראשיים <span class="muted" style="font-size:12px">· ' + lbl + '</span></h3><div class="td-ixc-row">' + ms.idx.map(ixCard).join("") + vixCard + "</div>";
+  }
+  function renderToday() {
+    const head = '<div class="page-head"><h1>תזרים סקטוריאלי · לאן הכסף זורם</h1><div class="sub">התנועה היומית בפועל של כל נכס (תעודת הסל) — <b>לאן הכסף נכנס והיכן הוא יוצא</b>, עם ניתוח AI.</div></div>';
+    const isLive = !!(SCAN && SCAN.rows && SCAN.rows.length);
+    const rows = scanSource().filter(t => t.ninja != null);
+    if (!rows.length) return head + '<div class="panel"><div class="note" style="margin:6px 0">⏳ הנתונים ייטענו מהסורק. רגע ומתעדכן.</div></div>';
+
+    const ms = todayMarketState();
+    // ── indices strip (top): reflects the SAME timeframe as the global control (1D/5D/20D) ──
+    const indicesPanel = (ms && ms.idx && ms.idx.length) ? '<div class="panel td-indices" id="tdIndices">' + _indicesInner(ms, flowTf) + "</div>" : "";
+    let marketPanel;
+    if (ms) {
+      let brBar = "";
+      if (ms.br && ms.br.total) {
+        const ap = (ms.br.above / ms.br.total * 100);
+        brBar = '<div class="td-breadth"><span class="td-brlbl">רוחב שוק</span>' +
+          '<span class="td-brbar"><span class="td-brup" style="width:' + ap.toFixed(1) + '%"></span></span>' +
+          '<span class="td-brnum"><span class="pos">' + ms.br.above + '</span>/<span class="neg">' + ms.br.below + "</span></span></div>";
+      }
+      marketPanel = '<div class="panel td-market td-market-row ' + ms.cls + '">' +
+        '<span class="td-mk-lbl">מצב השוק</span>' +
+        '<div class="td-modewrap"><div class="td-mode ' + ms.cls + '">' + ms.emoji + " " + ms.mode + "</div>" +
+        (ms.why ? '<div class="td-why">' + ms.why + "</div>" : "") + "</div>" + brBar + "</div>";
+    } else {
+      marketPanel = '<div class="panel td-market td-market-row"><span class="td-mk-lbl">מצב השוק</span><span class="muted">התחבר לנתונים חיים כדי לראות מצב שוק בזמן אמת.</span></div>';
+    }
+
+    // ONE global control for both money-flow panels: metric (ETF vs sector-average) + timeframe (1D/5D/20D)
+    const modeBtns = [["etf", "📊 תעודת סל", "תנועת תעודת הסל (משוקלל שווי-שוק) — תואם לגרף שנפתח בלחיצה"], ["avg", "📈 ממוצע ענף", "ממוצע תנועת המניות (משקל שווה = רוחב)"]]
+      .map(x => '<button class="flow-tf-btn' + (x[0] === flowSecMode ? " on" : "") + '" data-flowsecmode="' + x[0] + '" title="' + escAttr(x[2]) + '">' + x[1] + "</button>").join("");
+    const tfBtns = FLOW_TF_DEF.map(d => '<button class="flow-tf-btn' + (d[0] === flowTf ? " on" : "") + '" data-flowtf="' + d[0] + '" title="' + escAttr(d[2]) + '">' + d[1] + "</button>").join("");
+    const flowControls = '<div class="panel flow-ctrl"><span class="flow-ctrl-lbl">מדד:</span><span class="flow-tf flow-mode">' + modeBtns + "</span>" +
+      '<span class="flow-ctrl-lbl">טווח:</span><span class="flow-tf">' + tfBtns + "</span></div>";
+
+    // "where the money flows" — sectors + sub-sectors ladders, both driven by the ONE control above.
+    const sectorsPanel = _flowPanelHtml({ title: "🗂️ לאן הכסף זורם — סקטורים", tf: flowTf, data: _gicsSecs(todaySectors(rows)), isSub: false, mode: flowSecMode, augment: true });
+    const subsPanel = _flowPanelHtml({ title: "🏭 לאן הכסף זורם — תתי-סקטורים", tf: flowTf, data: todaySubsectors(rows), isSub: true, mode: flowSecMode, augment: true });
+
+    return head + (isLive ? liveBanner() : DEMO) +
+      indicesPanel + marketPanel + flowControls +
+      '<div class="td-flow2">' + sectorsPanel + subsPanel + "</div>" +
+      '<div class="note" style="margin-top:6px;font-size:11px">💡 הכפתור למעלה שולט בשתי הטבלאות: <u>תעודת סל</u> = תנועת ה-ETF (משוקלל שווי) · <u>ממוצע ענף</u> = ממוצע המניות (רוחב) · והטווח (1D עד YTD). <span class="muted">בטווחים הארוכים הסקטורים לפי ממוצע המניות.</span></div>';
+  }
+  // AI narrative: where money is flowing OUT / IN and whether the reason is known (from market_snapshot id='flow')
+  function flowAnalysisPanel() {
+    const f = FLOW;
+    if (!f || (!f.out && !f.in && !f.headline)) {
+      return '<div class="panel flow-ai"><h3>🤖 ניתוח זרימת הכסף — לאן ומדוע <span class="muted" style="font-size:12px">AI</span></h3>' +
+        '<div class="muted" style="padding:12px">הניתוח מתעדכן אוטומטית כל ~30 דקות בשעות המסחר. חזור בקרוב…</div></div>';
+    }
+    const when = f.updated ? (d => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"))(new Date(f.updated)) : "";
+    return '<div class="panel flow-ai">' +
+      '<h3>🤖 ניתוח זרימת הכסף — לאן ומדוע <span class="muted" style="font-size:12px">AI' + (when ? " · עודכן " + when : "") + "</span></h3>" +
+      (f.headline ? '<div class="fa-headline">' + escHtml(f.headline) + "</div>" : "") +
+      '<div class="fa-grid">' +
+        '<div class="fa-card out"><div class="fa-lbl">🔴 מאיפה הכסף יוצא</div><div class="fa-txt">' + escHtml(f.out || "—") + "</div></div>" +
+        '<div class="fa-card inn"><div class="fa-lbl">🟢 לאן הכסף נכנס</div><div class="fa-txt">' + escHtml(f.in || "—") + "</div></div>" +
+      "</div>" +
+      (f.reason ? '<div class="fa-reason"><span class="fa-lbl">💡 הסיבה</span><span class="fa-txt">' + escHtml(f.reason) + "</span></div>" : "") +
+      "</div>";
+  }
+  function wireToday() {
+    wireCharts($("#page")); wireStars($("#page"));
+    // ETF ticker → choice menu (analyze the ETF · or open all sector charts)
+    document.querySelectorAll(".flow-etf[data-secetf]").forEach(el => el.onclick = e => { e.stopPropagation(); openSecMenu(el); });
+    document.querySelectorAll("[data-compdrill]").forEach(el => el.onclick = e => { if (e.target.closest(".flow-etf")) return; openCompositeDrill(el.dataset.compname, el.dataset.compdrill); });
+    // the ONE global timeframe control → animate BOTH ladders (sectors + sub-sectors) with a FLIP
+    document.querySelectorAll("[data-flowtf]").forEach(b => b.onclick = () => {
+      if (flowTf === b.dataset.flowtf) return;
+      flowTf = b.dataset.flowtf;
+      document.querySelectorAll("[data-flowtf]").forEach(x => x.classList.toggle("on", x.dataset.flowtf === flowTf));
+      const rows = scanSource().filter(t => t.ninja != null);
+      const secEl = document.querySelector('.bcell-list[data-issub="0"]'), subEl = document.querySelector('.bcell-list[data-issub="1"]');
+      if (secEl || subEl) {
+        if (secEl) _bcellFlip(secEl, _gicsSecs(todaySectors(rows)), flowTf, false, secEl.dataset.limit ? +secEl.dataset.limit : null);
+        if (subEl) _bcellFlip(subEl, todaySubsectors(rows), flowTf, true, subEl.dataset.limit ? +subEl.dataset.limit : null);
+        const ixEl = document.getElementById("tdIndices"), ms2 = todayMarketState();   // top indices strip follows the same timeframe
+        if (ixEl && ms2) ixEl.innerHTML = _indicesInner(ms2, flowTf);
+      } else reRender();
+    });
+    // the ONE global metric control (ETF vs sector-average) → governs both panels
+    document.querySelectorAll("[data-flowsecmode]").forEach(b => b.onclick = () => {
+      if (flowSecMode === b.dataset.flowsecmode) return;
+      flowSecMode = b.dataset.flowsecmode; reRender();
+    });
+    document.querySelectorAll(".td-copy").forEach(b => b.onclick = () => {
+      const syms = decodeURIComponent(b.dataset.syms), o = b.textContent;
+      copyToClipboard(syms, () => { b.textContent = "✓ הועתקו"; setTimeout(() => b.textContent = o, 1500); });
+    });
+    document.querySelectorAll(".td-grid").forEach(b => b.onclick = () => {
+      const syms = decodeURIComponent(b.dataset.syms).split(", ").filter(Boolean);
+      const gridRows = syms.map(sym => {
+        const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+        return r ? { sym: sym, sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0), chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0) } : { sym: sym };
+      });
+      if (gridRows.length) openChartGrid(gridRows, { title: "לאן הכסף הולך" });
+    });
+  }
+
+  // ========== FAVORITES ==========
+  // favorites' alert markings can be dismissed per-day (re-arm next trading day)
+  function _favDismissed() {
+    try { const d = JSON.parse(localStorage.getItem("sn_fav_alert_dismissed") || "{}"); return new Set(d[new Date().toISOString().slice(0, 10)] || []); } catch (e) { return new Set(); }
+  }
+  function _dismissFavAlert(sym) {
+    try { const today = new Date().toISOString().slice(0, 10); const arr = _favDismissed(); arr.add(sym); const nd = {}; nd[today] = Array.from(arr); localStorage.setItem("sn_fav_alert_dismissed", JSON.stringify(nd)); } catch (e) {}
+  }
+  function _clearFavDismissed() { try { localStorage.removeItem("sn_fav_alert_dismissed"); } catch (e) {} }
+  // {sym: [scan names]} for favorites that CURRENTLY match a saved scan — re-evaluated live against the
+  // latest scan on every render/refresh. A stock that fired earlier today but has since fallen out of the
+  // criteria is NOT counted here (it is "stale" — see favStaleAlerts); this is what makes 🔄 רענן drop it.
+  function favAlertMatches() {
+    const favs = window.Prefs ? window.Prefs.favorites() : [];
+    const presets = (window.Prefs && window.Prefs.scanPresets) ? window.Prefs.scanPresets() : [];
+    const pmatch = {};
+    const add = (sym, name) => { if (favs.indexOf(sym) < 0) return; const a = pmatch[sym] = pmatch[sym] || []; if (a.indexOf(name) < 0) a.push(name); };
+    if (SCAN && SCAN.rows && SCAN.rows.length && presets.length) presets.forEach(p => { let m = []; try { m = evalPreset(p) || []; } catch (e) {} m.forEach(s => add(s, p.name)); });
+    _favDismissed().forEach(s => delete pmatch[s]);
+    return pmatch;
+  }
+  // favorites that FIRED an alert earlier today but NO LONGER match live → historical/stale.
+  // returns {sym: {names:[…], tm}} so the row can show a faded "נורתה HH:MM · לא בטווח כעת" note
+  // instead of a misleading active signal. Pass the live match map to avoid recomputing evalPreset.
+  function favStaleAlerts(live) {
+    const favs = window.Prefs ? window.Prefs.favorites() : [];
+    const presets = (window.Prefs && window.Prefs.scanPresets) ? window.Prefs.scanPresets() : [];
+    const feed = (window.Prefs && window.Prefs.alertFeed) ? window.Prefs.alertFeed() : [];
+    if (!feed.length) return {};
+    const today = new Date().toISOString().slice(0, 10);
+    const byId = {}; presets.forEach(p => { byId[p.id] = p; });
+    const liveM = live || favAlertMatches();
+    const dismissed = _favDismissed();
+    const out = {};
+    feed.forEach(e => {
+      if (!e || e.date !== today || favs.indexOf(e.sym) < 0) return;
+      if (liveM[e.sym] || dismissed.has(e.sym)) return;   // still matching, or user cleared it
+      const p = byId[e.pid]; if (!p) return;              // preset renamed away / deleted
+      const o = out[e.sym] = out[e.sym] || { names: [], tm: e.tm || "" };
+      if (o.names.indexOf(p.name) < 0) o.names.push(p.name);
+      if (!o.tm && e.tm) o.tm = e.tm;
+    });
+    return out;
+  }
+  // Pre/post-market move guard. Alerts are computed on the last completed session; outside US RTH a
+  // stock can move sharply in pre-market before the scanner reflects it (and the scanner catches up with
+  // some lag, inconsistently per ticker). LIVE.gappers carries the live gap-from-prior-close, i.e. exactly
+  // "how much it moved since the alert baseline". So OUTSIDE RTH, if a favorite is gapping beyond the
+  // threshold, return the signed live move so the row can warn "⚠ x% בזמן אמת". null = nothing to warn.
+  const PM_WARN_MIN = 5;   // |live move %| before we warn
+  function _inUsRth() {   // RTH mirror in IL local time ≈ 16:30–23:00 (same convention as the gappers windows)
+    const d = new Date(); const m = d.getHours() * 60 + d.getMinutes();
+    return m >= 16 * 60 + 30 && m < 23 * 60;
+  }
+  function _pmMove(sym) {
+    try {
+      if (_inUsRth()) return null;   // during RTH the scanner is authoritative — no divergence to warn about
+      const g = (typeof LIVE !== "undefined" && LIVE && LIVE.gappers) ? LIVE.gappers : null;
+      if (!g) return null;
+      const row = (g.up || []).concat(g.down || []).find(x => x && x.s === sym);
+      if (!row || row.gp == null || Math.abs(row.gp) < PM_WARN_MIN) return null;
+      return row.gp;   // signed live move from prior close (the alert's baseline)
+    } catch (e) { return null; }
+  }
+  // symbols with an ACTIVE (open) position in the local trade journal — not merely any past trade:
+  // leftover FIFO open lots from CSV fills + manual trades with no exit price.
+  function _openPositionSymbols() {
+    try {
+      if (!window.Store || !window.Engine) return new Set();
+      const s = new Set();
+      const res = window.Engine.computeTrades(window.Store.getFills() || []);
+      ((res && res.openPositions) || []).forEach(p => { if (p.symbol && Math.abs(p.qty || 0) > 1e-9) s.add(String(p.symbol).toUpperCase()); });
+      (window.Store.getManual() || []).forEach(m => { const t = window.Engine.manualToTrade(m); if (t && t.open && t.symbol) s.add(String(t.symbol).toUpperCase()); });
+      return s;
+    } catch (e) { return new Set(); }
+  }
+  // ---- favorites table sorting (self-contained; null col = default alert-grouped order) ----
+  const favSort = { col: null, dir: -1 };
+  let favPresetFilter = [];   // active preset NAMES filtering favorites — a stock must match ALL of them (AND); [] = show all
+  let favPosOnly = false; try { favPosOnly = localStorage.getItem("sn_fav_posonly") === "1"; } catch (e) {}   // show ONLY tickers with an open journal position (incl. ones that also have an alert)
+  let favDirFilter = "all";   // click a bull/bear count in the insights panel → filter the watchlist by alert direction
+  let favLayout = "cards"; try { const _fl = localStorage.getItem("sn_fav_layout"); if (_fl === "cards" || _fl === "table") favLayout = _fl; } catch (e) {}
+  let favPresetDropOpen = false;   // keep the preset multi-select dropdown open across re-renders
+  let _favOutsideBound = false;    // bind the "click-outside closes the dropdown" listener only once
+  let favViewOrder = [];      // the favorites rows in their CURRENT displayed order → copy follows the table
+  function favSortVal(t, col) {
+    if (col === "sym") return t.sym;
+    if (col === "alert") return t._alertN || 0;
+    if (col === "atime") return t._alertTs;   // fire time (epoch); null → blanks-last, newest first by default
+    if (col === "trade") return t._hasPos ? 1 : 0;   // has an open journal position on this ticker
+    if (col === "sec") return t.sector || "";
+    if (col === "ind") return t.ind || "";
+    if (col === "price") return t.price;
+    if (col === "chg") return t.chg;
+    if (_isTfCol(col)) return tfRank(t[col]);
+    return null;
+  }
+  function favSortRows(rows) {
+    const col = favSort.col, dir = favSort.dir;
+    if (col === "alert") {
+      // "sort by the alert": alerted stocks always on top, clustered by WHICH alert (preset name), then symbol.
+      const firstAlert = t => (t._alertNames && t._alertNames.length) ? t._alertNames.slice().sort((x, y) => x.localeCompare(y, "he"))[0] : " ";
+      return rows.slice().sort((a, b) => {
+        const aa = a._alertN > 0 ? 0 : 1, ba = b._alertN > 0 ? 0 : 1;
+        if (aa !== ba) return aa - ba;                                    // alerted first (both click directions)
+        const ka = firstAlert(a), kb = firstAlert(b);
+        if (ka !== kb) return dir * ka.localeCompare(kb, "he");           // group by alert name (dir flips the order)
+        return String(a.sym).localeCompare(String(b.sym));
+      });
+    }
+    return rows.slice().sort((a, b) => {
+      let va = favSortVal(a, col), vb = favSortVal(b, col);
+      const na = va == null || va === "" || (typeof va === "number" && isNaN(va));
+      const nb = vb == null || vb === "" || (typeof vb === "number" && isNaN(vb));
+      if (na && nb) return 0; if (na) return 1; if (nb) return -1;   // blanks always last
+      if (typeof va === "string") return dir * va.localeCompare(vb);
+      return dir * (va - vb);
+    });
+  }
+  function favTh(label, col, alignStart) {
+    const active = favSort.col === col;
+    const arrow = active ? (favSort.dir < 0 ? " ▼" : " ▲") : "";
+    const st = "cursor:pointer;user-select:none" + (alignStart ? ";text-align:start" : "");
+    return "<th class='sortable' data-favsort='" + col + "' style='" + st + "' title='לחץ למיון · שוב להיפוך · שלישית לביטול'>" + label + arrow + "</th>";
+  }
+  function favSortClick(col) {
+    const def = col === "sym" ? 1 : -1;   // default direction for a fresh column
+    if (favSort.col !== col) { favSort.col = col; favSort.dir = def; }
+    else if (favSort.dir === def) { favSort.dir = -def; }   // 2nd click → reverse
+    else { favSort.col = null; }                            // 3rd click → back to grouped default
+    reRender();
+  }
+  // preset-filter bar for the favorites page: one chip per preset that ≥1 favorite matches.
+  function favPresetBar(names) {
+    if (!names.length) return "";
+    const chip = (n, on, txt) => '<button class="fav-pfilter-chip' + (on ? " on" : "") + '" data-favpreset="' + escAttr(n) + '">' + txt + "</button>";
+    return '<div class="panel fav-pfilter"><span class="fav-pfilter-lbl">🔎 סנן לפי סריקה:</span>' +
+      chip("", !favPresetFilter.length, "הכל") +
+      names.map(n => { const on = favPresetFilter.indexOf(n) >= 0; return chip(n, on, (on ? "✓ " : "🔔 ") + escHtml(n)); }).join("") +
+      (favPresetFilter.length > 1 ? '<span class="fav-pfilter-and">· ' + favPresetFilter.length + " יחד (AND)</span>" : "") + "</div>";
+  }
+  // when a preset filter is active — the OTHER stocks in that scan that aren't in the user's favorites
+  // (the "which else is related to MONTHLY REVERSAL" discovery, without opening the scanner).
+  const FAV_OTHER_CAP = 60;   // discovery list stays scannable even when a broad preset matches hundreds
+  function favOtherMatchesPanel(name, syms) {
+    // enrich + sort by biggest daily move (most actionable first)
+    const enriched = syms.map(sym => {
+      const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+      return { sym: sym, r: r, price: r ? (r.p || (r.tech ? r.tech.px : 0)) : 0, chg: r ? (r.c != null ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : 0)) : 0, sec: r ? r.sec : "" };
+    }).sort((a, b) => Math.abs(b.chg || 0) - Math.abs(a.chg || 0));
+    const total = enriched.length, shown = enriched.slice(0, FAV_OTHER_CAP);
+    const capNote = total > FAV_OTHER_CAP ? ' <span class="muted" style="font-size:11px">· מציג ' + FAV_OTHER_CAP + " מתוך " + total + " (צמצם את הסריקה לתוצאות ממוקדות)</span>" : "";
+    const head = '<h3 style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><span>🔍 עוד מניות בסריקה "<b>' + escHtml(name) + '</b>" <span class="muted" style="font-size:12px">(' + total + " — לא במועדפים)</span>" + capNote + "</span><span class=\"muted\" style=\"font-size:11px\">⭐ הוסף למעקב · לחץ סימבול לגרף</span></h3>";
+    if (!total) return '<div class="panel fav-other">' + head + '<div class="muted" style="padding:6px">אין מניות נוספות מעבר למועדפים שלך שתואמות לסריקה זו כרגע.</div></div>';
+    const rows = shown.map(o => {
+      return '<tr><td><span class="fav-starcell">' + star(o.sym) + "</span></td>" +
+        '<td class="sym"><span class="tsym clickable" data-chart="' + o.sym + '" data-tf="D">' + o.sym + "</span></td>" +
+        '<td class="tname" style="text-align:start">' + (o.sec ? secHe(o.sec) : "—") + "</td><td>" + money(o.price) + "</td><td>" + pct(o.chg) + "</td>" +
+        '<td><a class="tvlink" href="https://www.tradingview.com/chart/?symbol=' + o.sym + '" target="_blank" rel="noopener">📈</a></td></tr>';
+    }).join("");
+    return '<div class="panel fav-other">' + head + '<div class="tablewrap"><table class="scan-table"><thead><tr><th></th><th>סימבול</th><th>סקטור</th><th>מחיר</th><th>%</th><th></th></tr></thead><tbody>' + rows + "</tbody></table></div></div>";
+  }
+  // ===== NEW favorites UI (Adi 2026-10-05): visual cards grouped by opportunity + multi-select preset dropdown =====
+  const _FAV_TFO = ["Y", "Q", "M", "W", "D"];
+  function _favFtfcStrip(t) {
+    // colour by the candle's DIRECTION (closed up=green / down=red), matching FTFC — not the Strat bar-type
+    // (an Inside "1" bar that closed up is still "green" for FTFC; bucket-based colouring wrongly greyed it out).
+    return '<div class="fc-ftfc">' + _FAV_TFO.map(tf => {
+      const cell = t[tf] || {}, c = cell.c;
+      const cls = c === "up" ? "fcf-up" : c === "down" ? "fcf-dn" : "fcf-flat";
+      const b = candleBucket(cell);
+      return '<span class="fcf ' + cls + '" title="' + tf + ": " + escAttr(_CM_BUCKET_HE[b] || b) + '">' + tf + "</span>";
+    }).join("") + "</div>";
+  }
+  // multi-select dropdown — filter favorites by saved scan(s); AND across the selected ones
+  function favPresetDropdown(names) {
+    if (!names.length) return "";
+    const n = favPresetFilter.length;
+    const items = names.map(nm => { const on = favPresetFilter.indexOf(nm) >= 0;
+      return '<label class="fpd-item' + (on ? " on" : "") + '"><input type="checkbox" data-favpreset="' + escAttr(nm) + '"' + (on ? " checked" : "") + "><span>" + escHtml(nm) + "</span></label>"; }).join("");
+    return '<details class="fav-pdrop"' + (favPresetDropOpen ? " open" : "") + '>' +
+      '<summary class="fav-pdrop-sum' + (n ? " on" : "") + '">🔎 סנן לפי סריקה <span class="fpd-caret">▾</span></summary>' +
+      '<div class="fav-pdrop-body"><div class="fpd-list">' + items + "</div>" +
+      (n ? '<button class="btn ghost fpd-clear" id="favPresetClear">✕ נקה סינון</button>' : "") + "</div></details>";
+  }
+  // the currently-selected presets as removable chips (shown beside the dropdown so the selection is always visible)
+  function favSelectedChips() {
+    if (!favPresetFilter.length) return "";
+    return '<span class="fav-selchips">' + (favPresetFilter.length > 1 ? '<span class="fav-seland">AND</span>' : "") +
+      favPresetFilter.map(nm => '<span class="fav-selchip" title="' + escAttr(nm) + '">' + escHtml(nm) +
+        '<button class="fav-selx" data-favpreset="' + escAttr(nm) + '" title="הסר סינון">✕</button></span>').join("") + "</span>";
+  }
+  // 🧨 TTM-Squeeze badge for a favorite — 🧨 = in a squeeze (coiled), 💥 = just released. "" if neither.
+  function _favSqzBadge(t) {
+    const s = t.tech && t.tech.sqz;
+    if (!s || !s.length) return "";
+    if (s[0] === 1) return ' <span class="fav-sqz-badge" title="בדחיסה ' + (s[1] || 0) + ' ימים — TTM Squeeze (קפיץ דרוך)">🧨</span>';
+    if (s[0] === 2) return ' <span class="fav-sqz-badge fired" title="שחרור דחיסה — TTM Squeeze (קפיץ שהשתחרר)">💥</span>';
+    return "";
+  }
+  function favCardHtml(t, pmatch, staleMatch, jsyms) {
+    const pm = pmatch[t.sym] || [], stale = staleMatch[t.sym];
+    const hasTrade = jsyms.has(String(t.sym).toUpperCase());
+    const chgCls = t.chg > 0 ? "pos" : t.chg < 0 ? "neg" : "zero";
+    const cls = ["fav-card"]; if (pm.length) cls.push("fc-on"); else if (stale) cls.push("fc-stale"); if (hasTrade) cls.push("fc-pos");
+    const alertLine = pm.length
+      ? '<div class="fc-aline">' + (pm.length === 1
+          ? '<span class="fc-achip" title="' + escAttr(pm[0]) + '">🔔 ' + escHtml(pm[0]) + "</span>"
+          : '<span class="fc-achip fc-amulti" title="' + escAttr(pm.join(" · ")) + '">🔔 ' + pm.length + " התראות</span>") +
+        '<span class="fc-aacts"><button class="fac-share fc-sbtn" data-shalert="' + escAttr(t.sym) + '" title="שתף כרטיס התראה">📤</button>' +
+        '<span class="fav-alert-x fc-dismiss" data-favdismiss="' + escAttr(t.sym) + '" title="הסר סימון">✕</span></span></div>'
+      : stale
+      ? '<div class="fc-aline"><span class="fc-achip fc-astale" title="' + escAttr(stale.names.join(" · ")) + '">🔕 נורתה' + (stale.tm ? " " + escHtml(stale.tm) : "") + "</span>" +
+        '<span class="fav-alert-x fc-dismiss" data-favdismiss="' + escAttr(t.sym) + '" title="הסר">✕</span></div>'
+      : "";
+    return '<div class="' + cls.join(" ") + '">' +
+      '<span class="fc-star">' + star(t.sym) + "</span>" +
+      '<div class="fc-head"><span class="fc-sym tsym clickable" data-chart="' + t.sym + '" data-tf="D">' + t.sym + "</span>" +
+        (hasTrade ? '<span class="fc-jtag" title="פוזיציה פעילה ביומן">💼</span>' : "") + _favSqzBadge(t) +
+        '<a class="tvlink fc-tv" href="https://www.tradingview.com/chart/?symbol=' + t.sym + '" target="_blank" rel="noopener" title="TradingView">📈</a></div>' +
+      '<div class="fc-pricerow"><span class="fc-price">' + money(t.price) + '</span><span class="fc-chg ' + chgCls + '">' + pct(t.chg) + "</span></div>" +
+      _favFtfcStrip(t) +
+      '<div class="fc-sector">' + (t.sector ? secHe(t.sector) : "—") + (t.ind ? ' <span class="muted">· ' + escHtml(t.ind) + "</span>" : "") + "</div>" +
+      alertLine + "</div>";
+  }
+  function favCardsBody(viewList, pmatch, staleMatch, jsyms) {
+    const groups = [[], [], []];
+    viewList.forEach(t => groups[t._alertN > 0 ? 0 : t._hasPos ? 1 : 2].push(t));
+    const GHDR = ["🔔 איתות עכשיו", "💼 בפוזיציה", "👀 במעקב"];
+    let html = "";
+    groups.forEach((g, i) => { if (!g.length) return;
+      html += '<div class="fav-section fav-section-' + i + '"><h3 class="fav-sec-hdr">' + GHDR[i] + ' <span class="muted">(' + g.length + ")</span></h3>" +
+        '<div class="fav-cardgrid">' + g.map(t => favCardHtml(t, pmatch, staleMatch, jsyms)).join("") + "</div></div>"; });
+    return html || '<div class="panel"><div class="muted" style="padding:14px">אין מניות שתואמות לסינון הנבחר.</div></div>';
+  }
+  // 🧠 insights on the watchlist — computed facts (like the scanner's), + favorites-specific:
+  // active alerts (with bull/bear split via _alertDir), positions held, squeeze count. rows = viewList.
+  function favInsights(rows) {
+    const n = rows.length; if (!n) return [];
+    const f = [], pctOf = k => Math.round(k / n * 100);
+    const alerted = rows.filter(r => (r._alertN || 0) > 0);
+    if (alerted.length) {
+      let bu = 0, be = 0;   // count FAVORITES per direction (a stock with ≥1 bull alert counts as bull), so the number matches the filtered list
+      alerted.forEach(r => { const dirs = (r._alertNames || []).map(_alertDir); if (dirs.indexOf("bull") >= 0) bu++; if (dirs.indexOf("bear") >= 0) be++; });
+      const _dchip = (dir, emo, cnt, lbl, col) => '<span data-favdir="' + dir + '" class="fav-ins-dir' + (favDirFilter === dir ? " on" : "") + '" style="white-space:nowrap;cursor:pointer;padding:2px 7px;border-radius:7px;border:1px solid ' + col + (favDirFilter === dir ? ";background:" + col + "22;color:#fff" : "55") + '" title="לחץ לסינון המעקב ל' + lbl + ' · לחיצה שוב = ביטול">' + emo + " <b>" + cnt + "</b> " + lbl + "</span>";
+      f.push({ i: "🔔", t: "<b>" + alerted.length + "</b> מהמעקב בהתראה פעילה כרגע" + (bu || be ? '<div style="margin-top:5px;display:flex;gap:7px;flex-wrap:wrap">' + _dchip("bull", "🟢", bu, "בוליש", "#16b877") + _dchip("bear", "🔴", be, "בריש", "#e0524f") + "</div>" : "") });
+    }
+    const pos = rows.filter(r => r._hasPos).length;
+    if (pos) f.push({ i: "💼", t: "אתה בפוזיציה על <b>" + pos + "</b> מהמעקב (" + pctOf(pos) + "%)" });
+    const sec = {}; rows.forEach(r => { if (r.sector) sec[r.sector] = (sec[r.sector] || 0) + 1; });
+    const topSec = Object.keys(sec).map(k => [k, sec[k]]).sort((a, b) => b[1] - a[1])[0];
+    if (topSec && topSec[1] >= 2) f.push({ i: "🗂️", t: pctOf(topSec[1]) + "% מהמעקב בסקטור <b>" + secHe(topSec[0]) + "</b> (" + topSec[1] + ")" });
+    const green = rows.filter(r => (r.D || {}).c === "up").length, red = rows.filter(r => (r.D || {}).c === "down").length;
+    if (green || red) f.push({ i: green >= red ? "🟢" : "🔴", t: pctOf(green >= red ? green : red) + "% מהנרות היומיים " + (green > red ? "ירוקים (הטיה שורית)" : red > green ? "אדומים (הטיה דובית)" : "מאוזנים") });
+    const ftfc = rows.filter(r => r.ftfc).length;
+    if (ftfc) f.push({ i: "🎯", t: pctOf(ftfc) + "% ב-<b>FTFC</b> מלא (יישור טיימפריימים)" });
+    // clickable filter chip (reuses the [data-favdir] toggle handler)
+    const _fchip = (dir, inner, col, hint) => '<span data-favdir="' + dir + '" class="fav-ins-dir' + (favDirFilter === dir ? " on" : "") + '" style="cursor:pointer;padding:2px 7px;border-radius:7px;border:1px solid ' + col + (favDirFilter === dir ? "22;background:" + col + "22;color:#fff" : "55") + '" title="' + hint + '">' + inner + "</span>";
+    const sqz = rows.filter(r => r.tech && r.tech.sqz && r.tech.sqz[0] === 1).length;
+    if (sqz) f.push({ i: "🧨", t: _fchip("sqz", "<b>" + sqz + "</b> בדחיסה 🧨", "#d9a441", "לחץ לסינון: רק מניות בדחיסת TTM Squeeze · שוב = ביטול") + ' <span class="muted" style="font-size:11px">קפיץ דרוך</span>' });
+    const brk = rows.filter(r => r.tech && r.tech.bbp != null && r.tech.bbp >= 100).length;
+    if (brk) f.push({ i: "🚀", t: _fchip("breakout", "<b>" + brk + "</b> בפריצה 🚀", "#8878ff", "לחץ לסינון: רק מניות שסגרו מעל רצועת בולינגר העליונה · שוב = ביטול") + ' <span class="muted" style="font-size:11px">סגרו מעל הבולינגר</span>' });
+    const pat = {}; rows.forEach(r => { const t = (r.D || {}).t; if (t) pat[t] = (pat[t] || 0) + 1; });
+    const topPat = Object.keys(pat).map(k => [k, pat[k]]).sort((a, b) => b[1] - a[1])[0];
+    if (topPat && topPat[1] >= 2) f.push({ i: "📊", t: "התבנית היומית הנפוצה: <b>" + topPat[0] + "</b> (" + pctOf(topPat[1]) + "%)" });
+    const conflict = rows.filter(r => { const d = r.D || {}; return (d.t === "2U" && d.c === "down") || (d.t === "2D" && d.c === "up"); }).length;
+    if (conflict) f.push({ i: "⚔️", t: "<b>" + conflict + "</b> נרות בקונפליקט (2U אדום / 2D ירוק) — היפוך אפשרי" });
+    return f;
+  }
+  function renderFavorites() {
+    const favs = window.Prefs ? window.Prefs.favorites() : [];
+    const list = favs.map(sym => {
+      const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;    // prefer LIVE scan data (sector/sub-sector)
+      if (r) return { sym: sym, name: "", sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0), chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0), Y: r.Y, Q: r.Q, M: r.M, W: r.W, D: r.D, ftfc: r.ftfc, tech: r.tech };
+      return TICKERS.find(t => t.sym === sym) || { sym: sym, name: "", sector: "", ind: "", price: 0, chg: 0, Y: cell("1", "doji"), Q: cell("1", "doji"), M: cell("1", "doji"), W: cell("1", "doji"), D: cell("1", "doji") };
+    });
+    let body;
+    if (!favs.length) {
+      body = '<div class="panel"><div class="stub"><div class="big">⭐</div><h2>אין עדיין מועדפים</h2><p>לחץ על הכוכב ⭐ ליד מניות בסורק, בסקטורים או בגאפרים כדי להוסיף אותן לכאן.</p><button class="btn primary" id="goScanner">לסורק העסקאות</button></div></div>';
+    } else {
+      // which favorites CURRENTLY match a saved scan (live), and which merely fired earlier today (stale)
+      const pmatch = favAlertMatches();
+      const staleMatch = favStaleAlerts(pmatch);
+      // WHEN each favorite's alert fired today (from the alert feed) → drives the sortable "🕐 זמן" column.
+      // ts = precise epoch for sorting · tm = "HH:MM" IL for display. Keep the LATEST fire per symbol.
+      const _favFireMap = {};
+      try {
+        const _today = new Date().toISOString().slice(0, 10);
+        const _feed = (window.Prefs && Prefs.alertFeed) ? Prefs.alertFeed() : [];
+        _feed.forEach(e => { if (!e || e.date !== _today || !e.ts) return; const c = _favFireMap[e.sym]; if (!c || e.ts > c.ts) _favFireMap[e.sym] = { ts: e.ts, tm: e.tm || "" }; });
+      } catch (e) {}
+      const jsyms = _openPositionSymbols();   // favorites with an ACTIVE (open) position in the journal → violet glow
+      // preset-filter chips: every preset name that ≥1 favorite currently matches
+      const presetNames = [];
+      Object.keys(pmatch).forEach(sym => (pmatch[sym] || []).forEach(n => { if (presetNames.indexOf(n) < 0) presetNames.push(n); }));
+      presetNames.sort((a, b) => a.localeCompare(b, "he"));
+      favPresetFilter = favPresetFilter.filter(pn => presetNames.indexOf(pn) >= 0);  // drop any selected preset no favorite matches anymore
+      const rowHtml = t => {
+        const pm = pmatch[t.sym] || [];
+        const stale = staleMatch[t.sym];
+        const hasTrade = jsyms.has(String(t.sym).toUpperCase());
+        // pre/post-market divergence: the scanner is frozen on last close outside RTH, so warn when the
+        // live move (LIVE.gappers) diverges from it — "⚠ x% בזמן אמת מאז ההתראה" (only when there IS an alert).
+        const pmw = (pm.length || stale) ? _pmMove(t.sym) : null;
+        const pmChip = pmw != null
+          ? ' <span class="fav-pm-warn" title="המחיר בזמן אמת זז משמעותית מאז ההתראה (הסורק מציג את סגירת הסשן הקודם) — בדוק לפני פעולה">⚠ <span dir="ltr">' + (pmw >= 0 ? "+" : "") + pmw.toFixed(1) + "%</span> בזמן אמת</span>"
+          : "";
+        // alert info as a real COLUMN. LIVE match → active chips + share. Fired-earlier-but-out-of-range →
+        // a faded "נורתה HH:MM · לא בטווח כעת" note (honest history, not a live signal). Dismissible either way.
+        const alertCell = pm.length
+          ? '<td class="fav-alert-cell" style="text-align:start">' +
+            (pm.length === 1
+              ? '<span class="fav-alert-chip" title="' + escAttr(pm[0]) + '">🔔 ' + escHtml(pm[0]) + "</span>"
+              : '<span class="fav-alert-multi" tabindex="0" title="' + escAttr(pm.length + " התראות · " + pm.join(" · ")) + '"><span class="fav-alert-count">🔔 ' + pm.length + ' התראות</span>' +
+                '<span class="fav-alert-pop">' + pm.map(n => '<span class="fav-alert-chip" title="' + escAttr(n) + '">🔔 ' + escHtml(n) + "</span>").join("") + "</span></span>") +
+            pmChip +
+            ' <button class="fac-share" data-shalert="' + escAttr(t.sym) + '" title="שתף כרטיס התראה מעוצב (עד 3 סריקות)">📤 שתף</button>' +
+            ' <span class="fav-alert-x" data-favdismiss="' + escAttr(t.sym) + '" title="הסר את סימון ההתראה">✕</span></td>'
+          : stale
+          ? '<td class="fav-alert-cell" style="text-align:start"><span class="fav-alert-chip fav-alert-stale" title="' + escAttr(stale.names.join(" · ")) + '">🔕 נורתה' + (stale.tm ? " " + escHtml(stale.tm) : "") + ' · לא בטווח כעת</span>' + pmChip +
+            ' <span class="fav-alert-x" data-favdismiss="' + escAttr(t.sym) + '" title="הסר את הסימון">✕</span></td>'
+          : '<td class="muted" style="text-align:start">—</td>';
+        // fire-time cell (sortable via the "🕐 זמן" column) — HH:MM the alert popped today, "—" if it hasn't
+        const atimeCell = t._alertTmStr
+          ? '<td class="fav-atime muted" style="text-align:start;white-space:nowrap">🕐 ' + escHtml(t._alertTmStr) + "</td>"
+          : '<td class="muted">—</td>';
+        const jtag = hasTrade ? ' <span class="fav-jtag" title="יש לך פוזיציה פעילה על המניה הזו ביומן המסחר">💼</span>' : "";
+        const cls = [];
+        if (pm.length) cls.push("fav-inpreset");
+        else if (stale) cls.push("fav-stale");
+        if (hasTrade) cls.push("fav-journal");
+        return "<tr" + (cls.length ? ' class="' + cls.join(" ") + '"' : "") + '><td><span class="fav-starcell">' + star(t.sym) + "</span></td>" +
+          '<td class="sym"><span class="tsym clickable" data-chart="' + t.sym + '" data-tf="D">' + t.sym + "</span>" + jtag + _favSqzBadge(t) + "</td>" +
+          alertCell + atimeCell +
+          '<td class="tname" style="text-align:start">' + (t.sector ? secHe(t.sector) : "—") + "</td>" +
+          '<td class="tname" style="text-align:start">' + (t.ind ? t.ind + (subEtfFor(t.ind) ? ' <span class="muted">· ' + subEtfFor(t.ind) + "</span>" : "") : "—") + "</td>" +
+          '<td style="text-align:start">' + (hasTrade ? '<span class="fav-jtag" title="פוזיציה פעילה ביומן">💼</span>' : '<span class="muted">—</span>') + "</td>" +
+          '<td data-flick="fvp-' + t.sym + '">' + money(t.price) + '</td><td data-flick="fvc-' + t.sym + '">' + pct(t.chg) + "</td>" + tfCells(t) + '<td><a class="tvlink" href="https://www.tradingview.com/chart/?symbol=' + t.sym + '" target="_blank" rel="noopener">📈</a></td></tr>';
+      };
+      // annotate each row for sorting (alert count / names / open-position) + the default grouping
+      list.forEach(t => { t._alertNames = pmatch[t.sym] || []; t._alertN = t._alertNames.length; t._hasPos = jsyms.has(String(t.sym).toUpperCase()); const f = _favFireMap[t.sym]; t._alertTs = f ? f.ts : null; t._alertTmStr = f ? f.tm : ""; });
+      // when a preset filter is active, show only favorites matching ALL selected presets
+      let viewList = favPresetFilter.length ? list.filter(t => favPresetFilter.every(pn => (pmatch[t.sym] || []).indexOf(pn) >= 0)) : list;
+      // "בפוזיציה בלבד" — keep only tickers with an open journal position (even if they also have an alert)
+      if (favPosOnly) viewList = viewList.filter(t => t._hasPos);
+      // 🧠 insights from the preset/position-filtered list, computed BEFORE the direction filter so the
+      // bull/bear counts stay stable and clickable (click toggles the filter).
+      const _favFacts = favInsights(viewList);
+      if (favDirFilter === "bull") viewList = viewList.filter(t => (t._alertNames || []).some(n => _alertDir(n) === "bull"));
+      else if (favDirFilter === "bear") viewList = viewList.filter(t => (t._alertNames || []).some(n => _alertDir(n) === "bear"));
+      else if (favDirFilter === "sqz") viewList = viewList.filter(t => t.tech && t.tech.sqz && t.tech.sqz[0] === 1);                 // in a TTM squeeze
+      else if (favDirFilter === "breakout") viewList = viewList.filter(t => t.tech && t.tech.bbp != null && t.tech.bbp >= 100);     // closed ABOVE the upper Bollinger band
+      // grouped order (🔔 alert → 💼 position → 👀 rest) — used by the cards view + the copy buttons
+      const _grp = [[], [], []];
+      viewList.forEach(t => _grp[t._alertN > 0 ? 0 : t._hasPos ? 1 : 2].push(t));
+      const groupedOrder = _grp[0].concat(_grp[1], _grp[2]);
+      // 🧠 watchlist insights panel (left side, 300px — mirrors the scanner's `.scan-layout`)
+      const favInsightsPanel = '<div class="panel scan-insights"><h3>🧠 תובנות על המעקב</h3>' +
+        (_favFacts.length
+          ? _favFacts.map(f => '<div class="insight"><span class="ins-ico">' + f.i + '</span><span>' + f.t + "</span></div>").join("")
+          : '<div class="ins-empty">הוסף מניות למעקב (⭐) או נקה סינון — ותקבל כאן תמונת-מצב: כמה בהתראה (בוליש/בריש), פוזיציות, ריכוז סקטור, דחיסה ועוד. 🔍</div>') + "</div>";
+      // when filtering by preset(s), discover OTHER stocks matching ALL selected scans (not already favorites)
+      let otherPanel = "";
+      if (favPresetFilter.length) {
+        const allPresets = (window.Prefs && Prefs.scanPresets) ? Prefs.scanPresets() : [];
+        const favsSet = {}; favs.forEach(s => favsSet[s] = 1);
+        let inter = null;
+        favPresetFilter.forEach(pn => { const p = allPresets.find(x => x.name === pn); let m = []; try { if (p) m = evalPreset(p) || []; } catch (e) {} const set = new Set(m); inter = inter === null ? set : new Set([...inter].filter(s => set.has(s))); });
+        const others = [...(inter || new Set())].filter(s => !favsSet[s]);
+        otherPanel = favOtherMatchesPanel(favPresetFilter.join(" + "), others);
+      }
+      // shared toolbar: preset multi-select dropdown + layout toggle + actions
+      const favActions = '<span class="fav-actions">' +
+        '<button class="btn ghost" id="favCopy" title="העתק את כל המניות ברשימה">📋 העתק</button>' +
+        '<button class="btn ghost" id="favCopyAlerts" title="העתק רק מניות עם התראה פעילה">🔔 עם התראה</button>' +
+        '<button class="btn ghost" id="favRefresh" title="שלוף סריקה עדכנית ובדוק חפיפה">🔄 רענן</button>' +
+        '<button class="btn ghost" id="favGrid" title="תצוגת גרפים">📊 גרפים</button></span>';
+      const favLayoutTgl = '<span class="fav-layout-tgl">' +
+        '<button class="fav-lt-btn' + (favLayout === "cards" ? " on" : "") + '" data-favlayout="cards" title="תצוגת כרטיסים">🃏 כרטיסים</button>' +
+        '<button class="fav-lt-btn' + (favLayout === "table" ? " on" : "") + '" data-favlayout="table" title="תצוגת טבלה">📋 טבלה</button></span>';
+      const _posN = list.filter(t => t._hasPos).length;   // how many favorites you currently hold
+      const favPosTgl = '<button class="btn ghost fav-posfilter' + (favPosOnly ? " on" : "") + '" id="favPosOnly" title="הצג רק מניות שאתה בפוזיציה עליהן ביומן המסחר — גם אם יש עליהן התראה פעילה">💼 בפוזיציה' + (_posN ? ' <span class="fav-posn">' + _posN + "</span>" : "") + (favPosOnly ? " ✓" : "") + "</button>";
+      const _favFiltered = favPresetFilter.length || favPosOnly || favDirFilter !== "all";
+      const favToolbar = '<div class="panel fav-toolbar"><div class="fav-tb-left">' + favPosTgl +
+        '<span class="fav-count muted">' + favs.length + ' מניות' + (_favFiltered ? ' · ' + viewList.length + ' מסוננות' : "") + '</span></div>' +
+        '<div class="fav-tb-right">' + favLayoutTgl + favActions + favSelectedChips() + favPresetDropdown(presetNames) + "</div></div>";
+      const favEmptyNote = (favPosOnly && !viewList.length)
+        ? '<div class="panel" style="text-align:center;padding:26px;color:var(--muted)">💼 אין כרגע מניות מהמועדפים שאתה בפוזיציה עליהן.<br><span style="font-size:12px">הפוזיציות נקבעות לפי עסקאות פתוחות ביומן המסחר.</span></div>'
+        : "";
+      if (favLayout === "cards") {
+        favViewOrder = groupedOrder;   // copy buttons follow the displayed (grouped) order
+        body = favToolbar + (favEmptyNote || ('<div class="scan-layout"><div style="min-width:0">' + favCardsBody(viewList, pmatch, staleMatch, jsyms) + "</div>" + favInsightsPanel + "</div>")) + otherPanel;
+      } else {
+        // classic dense table (kept for sorting / full data)
+        let rows = "", ordered;
+        if (favSort.col) { ordered = favSortRows(viewList); rows = ordered.map(rowHtml).join(""); }
+        else {
+          ordered = groupedOrder;
+          const GHDR = ["🔔 עם התראה", "📓 פוזיציה פעילה", "⭐ שאר המניות"];
+          const nonEmpty = _grp.filter(g => g.length).length;
+          _grp.forEach((g, i) => { if (!g.length) return; if (nonEmpty > 1) rows += '<tr class="fav-grouphdr"><td colspan="20">' + GHDR[i] + ' <span class="muted">(' + g.length + ")</span></td></tr>"; rows += g.map(rowHtml).join(""); });
+        }
+        favViewOrder = ordered;
+        const _favTablePanel = '<div class="panel"' + (favEmptyNote ? ' style="display:none"' : "") + '><h3><span>רשימת המעקב שלי <span class="muted" style="font-size:12px">' + favs.length + " מניות</span></span></h3><div class='tablewrap'><table class='scan-table'><thead><tr><th></th>" + favTh("סימבול", "sym", true) + favTh("🔔 התראה", "alert", true) + favTh("🕐 זמן", "atime", true) + favTh("סקטור", "sec", true) + favTh("תת-סקטור", "ind", true) + favTh("💼 עסקה", "trade", true) + favTh("מחיר", "price") + favTh("%", "chg") + favTh("Y", "Y") + favTh("Q", "Q") + favTh("M", "M") + favTh("W", "W") + favTh("D", "D") + "<th></th></tr></thead><tbody>" + rows + "</tbody></table></div>" + colorLegend() + "</div>";
+        body = favToolbar + favEmptyNote + '<div class="scan-layout">' + _favTablePanel + favInsightsPanel + "</div>" + otherPanel;
+      }
+    }
+    return '<div class="page-head"><h1>מועדפים</h1><div class="sub">רשימת המעקב האישית שלך · נשמרת בענן</div></div>' + pushStatusBar() + body;
+  }
+  // discoverable enable-push CTA (the full alert-center lives behind the 🔔 bell in the scanner)
+  function pushStatusBar() {
+    const on = !!(window.Prefs && Prefs.pushSubs && Prefs.pushSubs().length);
+    const permOk = window.Notification && Notification.permission === "granted";
+    if (on && permOk) {
+      const schedOn = (window.Prefs && Prefs.pushSchedule) ? Prefs.pushSchedule() : true;
+      const sqzOn = (window.Prefs && Prefs.sqzAlert) ? Prefs.sqzAlert() : false;
+      return '<div class="panel fav-pushbar on"><span>✅ <b>התראות לפלאפון פעילות</b> — תקבל התראה כשמניה מהמועדפים נכנסת לסריקה עם התראה מופעלת, גם כשהאתר סגור. <span class="muted" style="font-size:11px">לא מגיעות התראות? לחץ «חדש מנוי».</span></span>' +
+        '<span style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
+          '<button class="btn ghost" id="pushRenew" title="לא מקבל התראות בפלאפון? זה מוחק את המנוי הישן ורושם מנוי חדש ובריא — הפתרון ל״השרת שולח אבל הטלפון לא מציג״" style="font-size:12px;font-weight:700">🔄 חדש מנוי</button>' +
+          '<button class="btn ghost" id="pushSchedTgl" title="תזכורות יומיות קבועות: 11:30 פרה-מרקט · 16:30 פתיחה · 17:30 + 22:00 מניות מהמועדפים · 22:50 לפני סגירה · 23:00 סגירה · לחץ להפעלה/כיבוי" style="font-size:12px;font-weight:600">⏰ תזכורות יומיות: ' + (schedOn ? '<span style="color:var(--green)">פעיל</span>' : '<span class="muted">כבוי</span>') + '</button>' +
+          '<button class="btn ghost" id="sqzAlertTgl" title="קבל דחיפה לפלאפון כשמניה מהמעקב משחררת דחיסת TTM Squeeze (קפיץ דרוך שמשתחרר) — פעם ביום לכל מניה" style="font-size:12px;font-weight:600">🧨 שחרור Squeeze: ' + (sqzOn ? '<span style="color:var(--green)">פעיל</span>' : '<span class="muted">כבוי</span>') + '</button>' +
+          '<button class="btn ghost" id="favAlertsCenter" style="font-size:12px;font-weight:600">🔔 מרכז ההתראות</button>' +
+        '</span></div>';
+    }
+    return '<div class="panel fav-pushbar"><span>📱 <b>רוצה התראות לפלאפון גם כשהאתר סגור?</b> קבל דחיפה כשמניה מהמועדפים נכנסת לסריקה מסומנת. ' +
+      '<span class="muted" style="font-size:11px">🍏 באייפון: הוסף קודם למסך הבית (שיתוף → הוסף למסך הבית), פתח משם, ואז הפעל.</span></span>' +
+      '<span style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn primary" id="favEnablePush" style="font-size:13px;font-weight:700">🔔 הפעל התראות לפלאפון</button>' +
+      '<button class="btn ghost" id="favAlertsCenter" style="font-size:12px;font-weight:600">מרכז ההתראות</button></span></div>';
+  }
+  function wireFavorites() {
+    const g = $("#goScanner"); if (g) g.onclick = () => setPage("scanner");
+    // sortable column headers (click to sort · again to reverse · third time back to grouped default)
+    document.querySelectorAll("[data-favsort]").forEach(th => th.onclick = () => favSortClick(th.dataset.favsort));
+    // preset filter — multi-select dropdown checkboxes (AND across selected); keep the dropdown open on toggle
+    document.querySelectorAll("[data-favpreset]").forEach(b => b.onclick = () => {
+      const v = b.dataset.favpreset;
+      if (!v) favPresetFilter = [];
+      else { const i = favPresetFilter.indexOf(v); if (i >= 0) favPresetFilter.splice(i, 1); else favPresetFilter.push(v); }
+      favPresetDropOpen = !!(b.closest && b.closest(".fav-pdrop"));   // keep the dropdown open only if toggled from INSIDE it (not the ✕ chip)
+      reRender();
+    });
+    { const dd = document.querySelector(".fav-pdrop"); if (dd) dd.addEventListener("toggle", () => { favPresetDropOpen = dd.open; }); }
+    // click OUTSIDE the dropdown → close it. Capture phase so e.target is intact BEFORE a checkbox click re-renders.
+    if (!_favOutsideBound) {
+      _favOutsideBound = true;
+      document.addEventListener("click", e => {
+        const open = document.querySelector(".fav-pdrop[open]"); if (!open) return;
+        if (e.target && e.target.closest && e.target.closest(".fav-pdrop") === open) return;   // inside → keep open
+        open.open = false; favPresetDropOpen = false;
+      }, true);
+    }
+    { const pc = $("#favPresetClear"); if (pc) pc.onclick = () => { favPresetFilter = []; favPresetDropOpen = true; reRender(); }; }
+    document.querySelectorAll("[data-favlayout]").forEach(b => b.onclick = () => { favLayout = b.dataset.favlayout; try { localStorage.setItem("sn_fav_layout", favLayout); } catch (e) {} reRender(); });
+    { const po = $("#favPosOnly"); if (po) po.onclick = () => { favPosOnly = !favPosOnly; try { localStorage.setItem("sn_fav_posonly", favPosOnly ? "1" : "0"); } catch (e) {} reRender(); }; }
+    { const ep = $("#favEnablePush"); if (ep) ep.onclick = async () => { await subscribeToPush(); if (state.page === "favorites") reRender(); }; }
+    { const rn = $("#pushRenew"); if (rn) rn.onclick = async () => { rn.disabled = true; rn.textContent = "🔄 מחדש…"; await renewPush(); }; }
+    { const ac = $("#favAlertsCenter"); if (ac) ac.onclick = () => openAlertsFeed("feed"); }
+    // click a bull/bear count in the insights panel → filter the watchlist by alert direction (click again = clear)
+    document.querySelectorAll("[data-favdir]").forEach(b => b.onclick = () => { const d = b.dataset.favdir; favDirFilter = (favDirFilter === d) ? "all" : d; reRender(); });
+    { const st = $("#pushSchedTgl"); if (st) st.onclick = () => { const now = (window.Prefs && Prefs.pushSchedule) ? Prefs.pushSchedule() : true; Prefs.setPushSchedule(!now); snToast(!now ? "⏰ התזכורות היומיות הופעלו" : "תזכורות מתוזמנות כובו"); reRender(); }; }
+    { const sq = $("#sqzAlertTgl"); if (sq) sq.onclick = () => { const now = (window.Prefs && Prefs.sqzAlert) ? Prefs.sqzAlert() : false; Prefs.setSqzAlert(!now); snToast(!now ? "🧨 התרעת שחרור Squeeze הופעלה — תקבל דחיפה כשמניה מהמעקב משחררת דחיסה" : "התרעת שחרור Squeeze כובתה"); reRender(); }; }
+    // click the red alert badge to remove the marking (dismissed for today; re-arms next day)
+    document.querySelectorAll("[data-favdismiss]").forEach(b => b.onclick = e => { e.stopPropagation(); _dismissFavAlert(b.dataset.favdismiss); reRender(); });
+    document.querySelectorAll("[data-shalert]").forEach(b => b.onclick = e => { e.stopPropagation(); const sym = b.dataset.shalert, names = (favAlertMatches()[sym] || []); if (names.length <= 3) shareAlertCard(sym, names); else chooseAlertPresets(sym, names); });
+    // manual refresh — pull the latest scan and re-check which favorites overlap the saved scans
+    { const rf = $("#favRefresh"); if (rf) rf.onclick = async () => { rf.disabled = true; rf.textContent = "🔄 מרענן…"; _clearFavDismissed(); try { await fetchScanner(); } catch (e) {} if (state.page === "favorites") reRender(); snToast("ההתראות עודכנו ✓"); }; }
+    { const fc = $("#favCopy"); if (fc) fc.onclick = () => { const syms = favViewOrder.map(t => t.sym); if (!syms.length) { snToast("אין מניות ברשימה"); return; } const o = fc.textContent; copyToClipboard(syms.join(", "), () => { fc.textContent = "✓ הועתקו " + syms.length; setTimeout(() => fc.textContent = o, 1600); }); }; }
+    { const fca = $("#favCopyAlerts"); if (fca) fca.onclick = () => { const syms = favViewOrder.filter(t => t._alertN > 0).map(t => t.sym); if (!syms.length) { snToast("אין מניות עם התראה פעילה כרגע"); return; } const o = fca.textContent; copyToClipboard(syms.join(", "), () => { fca.textContent = "✓ הועתקו " + syms.length; setTimeout(() => fca.textContent = o, 1600); }); }; }
+    const fg = $("#favGrid");
+    if (fg) fg.onclick = () => {
+      const favs = window.Prefs ? window.Prefs.favorites() : [];
+      const favRows = favs.map(sym => {
+        const r = (SCAN && SCAN.rows) ? SCAN.rows.find(x => x.s === sym) : null;
+        return r ? { sym: sym, sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0), chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0) } : { sym: sym };
+      });
+      if (favRows.length) openChartGrid(favRows, { title: "רשימת המעקב" });
+    };
+    wireStars(); wireCharts();
+  }
+
+  // ========== ALERTS ==========
+  function renderAlerts() {
+    const alerts = window.Prefs ? window.Prefs.alerts() : [];
+    const rows = alerts.map(a =>
+      '<tr><td class="tsym">' + a.symbol + "</td><td>" + a.tf + "</td><td>" + tf(cell(a.pattern, a.dir === "up" ? "up" : a.dir === "down" ? "down" : "doji")) + "</td><td>" + (a.channel === "discord" ? "דיסקורד" : "מייל") + '</td><td><button class="btn ghost" data-delalert="' + a.id + '">🗑</button></td></tr>').join("");
+    const form =
+      '<div class="panel"><h3>התראה חדשה</h3><div class="frow">' +
+        '<div class="fgrp"><label>סימבול</label><input id="alSym" placeholder="AAPL" style="text-transform:uppercase"></div>' +
+        '<div class="fgrp"><label>טיימפריים</label><select id="alTf"><option>D</option><option>W</option><option>M</option><option>Q</option><option>Y</option></select></div>' +
+        '<div class="fgrp"><label>תבנית</label><select id="alPat"><option>2U</option><option>2D</option><option>3</option><option>1</option></select></div>' +
+        '<div class="fgrp"><label>צבע נר</label><select id="alDir"><option value="any">הכל</option><option value="up">🟢 ירוק</option><option value="down">🔴 אדום</option></select></div>' +
+        '<div class="fgrp"><label>שליחה אל</label><select id="alCh"><option value="email">מייל</option><option value="discord">דיסקורד</option></select></div>' +
+        '<div class="fgrp" style="align-self:flex-end"><button class="btn primary" id="alAdd">הוסף התראה</button></div>' +
+      "</div><div class='note' style='margin-top:8px'>🟢 ההתראות פעילות — נשלחות לערוץ הדיסקורד בכל סריקה (עד כל ~15 דק' בשעות המסחר). כל סטאפ נשלח פעם ביום כדי לא להציף. \"מייל\" מנותב בינתיים לדיסקורד.</div></div>";
+    const table = alerts.length
+      ? "<div class='panel'><h3>ההתראות שלי <span class='muted' style='font-size:12px'>" + alerts.length + "</span></h3><div class='tablewrap'><table class='scan-table'><thead><tr><th style='text-align:start'>סימבול</th><th>TF</th><th>תבנית</th><th>ערוץ</th><th></th></tr></thead><tbody>" + rows + "</tbody></table></div></div>"
+      : "<div class='panel'><div class='stub'><div class='big'>🔔</div><h2>אין עדיין התראות</h2><p>צור התראה למעלה כדי לקבל עדכון כשתבנית מבשילה.</p></div></div>";
+    return '<div class="page-head"><h1>התראות</h1><div class="sub">התראות על מניות למייל או לדיסקורד</div></div>' + form + table;
+  }
+  function wireAlerts() {
+    const add = $("#alAdd");
+    if (add) add.onclick = () => {
+      const sym = ($("#alSym").value || "").toUpperCase().trim();
+      if (!sym) { alert("צריך סימבול"); return; }
+      window.Prefs.addAlert({ symbol: sym, tf: $("#alTf").value, pattern: $("#alPat").value, dir: $("#alDir").value, channel: $("#alCh").value });
+      reRender();
+    };
+    document.querySelectorAll("[data-delalert]").forEach(b => b.onclick = () => { window.Prefs.deleteAlert(b.dataset.delalert); reRender(); });
+  }
+
+  // ---------- modal (pages-local) ----------
+  function modal(title, bodyHtml, extraCls) {
+    closeModal();
+    const bg = document.createElement("div"); bg.className = "modal-bg"; bg.id = "pgModal";
+    const m = document.createElement("div"); m.className = "modal wide" + (extraCls ? " " + extraCls : "");
+    m.innerHTML = '<h2 style="display:flex;justify-content:space-between;align-items:center">' + title + '<button class="btn ghost" id="pgModalX">✕</button></h2>' + bodyHtml;
+    bg.appendChild(m);
+    let downOnBg = false;
+    bg.addEventListener("mousedown", e => { downOnBg = (e.target === bg); });
+    bg.onclick = e => { if (e.target === bg && downOnBg) closeModal(); };
+    document.body.appendChild(bg);
+    m.querySelector("#pgModalX").onclick = closeModal;
+    wireStars(m);
+    wireCharts(m);
+  }
+  function closeModal() { const b = $("#pgModal"); if (b) b.remove(); }
+
+  // Save a scan preset. If one is currently active, ask whether to UPDATE it or save a COPY;
+  // otherwise just prompt for a name and create a new one.
+  function openPresetSaveDialog() {
+    const presets = (window.Prefs && window.Prefs.scanPresets) ? (window.Prefs.scanPresets() || []) : [];
+    const cur = _selPreset ? presets.find(p => p.id === _selPreset) : null;
+    const saveNew = () => {
+      const name = (window.prompt("שם לסריקה החדשה:", cur ? cur.name + " (עותק)" : "") || "").trim();
+      if (!name) return;
+      const rec = window.Prefs.saveScanPreset(name, scanConfigSnapshot());
+      if (rec) _selPreset = rec.id;
+      closeModal(); reRender(); snToast("נשמרה סריקה: «" + name + "» ✓");
+    };
+    if (!cur) { saveNew(); return; }   // nothing active → straight to "new"
+    const nm = escHtml(cur.name);
+    const body =
+      '<p class="note" style="margin:2px 0 16px;font-size:13px">שינית את הפילטרים של הסריקה <b>«' + nm + '»</b>. מה לעשות עם השינויים?</p>' +
+      '<div style="display:flex;flex-direction:column;gap:10px">' +
+        '<button class="btn" id="psUpdate" style="justify-content:center">💾 עדכן את «' + nm + '» עם הפילטרים הנוכחיים</button>' +
+        '<button class="btn ghost" id="psCopy" style="justify-content:center">📑 שמור כסריקה חדשה (העתק)</button>' +
+      "</div>";
+    modal("💾 שמירת סריקה", body);
+    const u = document.getElementById("psUpdate");
+    if (u) u.onclick = () => { const rec = window.Prefs.saveScanPreset(cur.name, scanConfigSnapshot()); if (rec) _selPreset = rec.id; closeModal(); reRender(); snToast("הסריקה «" + cur.name + "» עודכנה ✓"); };
+    const c = document.getElementById("psCopy");
+    if (c) c.onclick = saveNew;
+  }
+
+  // ---------- favorites star wiring ----------
+  function wireStars(scope) {
+    (scope || document).querySelectorAll("[data-star]").forEach(b => {
+      b.onclick = e => {
+        e.stopPropagation();
+        if (_starJustDragged) return;          // a drag just handled these — don't double-toggle
+        window.Prefs.toggleFav(b.dataset.star);
+        b.classList.toggle("on");
+        b.textContent = b.classList.contains("on") ? "★" : "☆";
+        if (state.page === "favorites") reRender();
+      };
+    });
+  }
+  // ---- drag-to-select stars: press on a star and drag over more to mark/unmark them all ----
+  let _starDrag = null, _starJustDragged = false;
+  function _paintStar(btn, on) {
+    if (!btn || !window.Prefs) return;
+    const sym = btn.dataset.star;
+    if (window.Prefs.isFav(sym) !== on) window.Prefs.toggleFav(sym);
+    btn.classList.toggle("on", on);
+    btn.textContent = on ? "★" : "☆";
+  }
+  function _setupStarDrag() {
+    document.addEventListener("mousedown", e => {
+      const btn = e.target && e.target.closest && e.target.closest("[data-star]");
+      if (!btn || !window.Prefs) return;
+      e.preventDefault();                                    // no text selection while dragging
+      _starDrag = { start: btn, target: !window.Prefs.isFav(btn.dataset.star), dragged: false };
+    });
+    document.addEventListener("mouseover", e => {
+      if (!_starDrag) return;
+      const btn = e.target && e.target.closest && e.target.closest("[data-star]");
+      if (!btn) return;
+      if (btn === _starDrag.start && !_starDrag.dragged) return;       // still on the start star — not a drag yet
+      if (!_starDrag.dragged) { _starDrag.dragged = true; _paintStar(_starDrag.start, _starDrag.target); }
+      _paintStar(btn, _starDrag.target);
+    });
+    document.addEventListener("mouseup", () => {
+      if (!_starDrag) return;
+      const dragged = _starDrag.dragged;
+      _starDrag = null;
+      if (dragged) {
+        _starJustDragged = true;                             // block the trailing click's toggle (only after a real drag)
+        setTimeout(() => { _starJustDragged = false; }, 0);
+        if (state.page === "favorites") setTimeout(() => reRender(), 0);  // refresh rows/badges AFTER the click
+      }
+    });
+  }
+
+  // ========== LEARN / ACADEMY ==========
+  function _cndl(cx, wickTop, wickBot, bodyTop, bodyBot, col) {
+    return '<line x1="' + cx + '" y1="' + wickTop + '" x2="' + cx + '" y2="' + wickBot + '" stroke="' + col + '" stroke-width="2.5" stroke-linecap="round"/>' +
+      '<rect x="' + (cx - 12) + '" y="' + bodyTop + '" width="24" height="' + Math.max(4, bodyBot - bodyTop) + '" rx="3" fill="' + col + '"/>';
+  }
+  // Animated candle diagram. On hover the CURRENT candle FORMS the way it really does — a bar starts
+  // inside (1), then breaks one side (2), and a "3" only becomes a 3 AFTER it was a 2 (breaks the
+  // other side too). Uses SMIL so it can animate the actual high/low geometry through stages.
+  function _candleDiagram(type, autoplay) {
+    const hi = 28, lo = 122, cx = 140;
+    const sid = "snd" + type.replace(/[^A-Za-z0-9]/g, "");
+    const guides =
+      '<line x1="18" y1="' + hi + '" x2="196" y2="' + hi + '" stroke="#57608a" stroke-width="1" stroke-dasharray="4 4"/>' +
+      '<line x1="18" y1="' + lo + '" x2="196" y2="' + lo + '" stroke="#57608a" stroke-width="1" stroke-dasharray="4 4"/>' +
+      '<text x="18" y="' + (hi - 5) + '" fill="#8894b5" font-size="10">גבוה קודם</text>' +
+      '<text x="18" y="' + (lo + 14) + '" fill="#8894b5" font-size="10">נמוך קודם</text>';
+    const prior = _cndl(62, hi, lo, 46, 100, "#5b6690");        // static reference candle
+    // per-type keyframes: wick top(y1)/bottom(y2), body y/height, color, timing
+    const reduce = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+    const loop3 = (type === "3") && !reduce && !autoplay;   // the "3" auto-loops on hover; in the lesson (autoplay) it forms once, fast
+    let W1, W2, BY, BH, kt, dur, fill;
+    if (type === "1") { W1 = "78;52"; W2 = "78;104"; BY = "78;64"; BH = "0;28"; kt = "0;1"; dur = "0.7s"; fill = "#7b88ad"; }
+    else if (type === "2U") { W1 = "52;52;12"; W2 = "82;82;82"; BY = "44;44;20"; BH = "14;14;38"; kt = "0;0.4;1"; dur = "0.9s"; fill = "#22c55e"; }
+    else if (type === "2D") { W1 = "68;68;68"; W2 = "104;104;140"; BY = "78;78;92"; BH = "14;14;40"; kt = "0;0.4;1"; dur = "0.9s"; fill = "#ef4444"; }
+    else if (loop3) {          // inside→2U→3, then inside→2D→3, then repeat (last frame == first = seamless)
+      kt  = "0;0.07;0.18;0.26;0.38;0.46;0.5;0.57;0.68;0.76;0.88;1"; dur = "7s";
+      W1  = "52;52;12;12;12;12;52;52;52;52;12;52";
+      W2  = "104;104;104;104;140;140;104;104;140;140;140;104";
+      BY  = "64;64;30;30;30;30;64;64;64;64;30;64";
+      BH  = "28;28;62;62;80;80;28;28;56;56;90;28";
+      fill = "#7b88ad;#7b88ad;#22c55e;#22c55e;#f2b64a;#f2b64a;#7b88ad;#7b88ad;#ef4444;#ef4444;#f2b64a;#7b88ad";
+    }
+    else { W1 = "52;52;12;12"; W2 = "104;104;104;140"; BY = "64;64;30;30"; BH = "28;28;62;80"; kt = "0;0.28;0.62;1"; dur = "1.6s"; fill = "#7b88ad;#22c55e;#22c55e;#f2b64a"; }
+    if (autoplay) dur = "1s";   // the lesson wants a quick formation (~1s) before the zoom
+    const finalFill = fill.indexOf(";") >= 0 ? fill.split(";").pop() : fill;
+    const last = s => s.split(";").pop();
+    // when NOT hovering the "3" shows its static final shape; hover replays the formation loop and
+    // STOPS on mouse-leave (begin/end events). Other candles animate once on hover.
+    const bW1 = loop3 ? "12" : last(W1), bW2 = loop3 ? "140" : last(W2), bBY = loop3 ? "30" : last(BY), bBH = loop3 ? "80" : last(BH), bFill = loop3 ? "#f2b64a" : finalFill;
+    // autoplay (the lesson modal): start at t=0 — synthetic hover events aren't "trusted" so SMIL ignores them.
+    const timing = autoplay
+      ? (loop3 ? 'begin="0s" repeatCount="indefinite"' : 'begin="0s" fill="freeze"')
+      : (loop3
+        ? 'begin="' + sid + '.mouseenter" end="' + sid + '.mouseleave" repeatCount="indefinite"'
+        : 'begin="' + sid + '.mouseenter" fill="freeze" restart="always"');
+    const A = (attr, vals) => '<animate attributeName="' + attr + '" values="' + vals + '" keyTimes="' + kt + '" dur="' + dur + '" ' + timing + '/>';
+    const colorAnim = fill.indexOf(";") >= 0 ? A("stroke", fill) : "";
+    const bodyColorAnim = fill.indexOf(";") >= 0 ? A("fill", fill) : "";
+    const wick = '<line x1="' + cx + '" x2="' + cx + '" y1="' + bW1 + '" y2="' + bW2 + '" stroke="' + bFill + '" stroke-width="2.5" stroke-linecap="round">' + A("y1", W1) + A("y2", W2) + colorAnim + "</line>";
+    const body = '<rect x="' + (cx - 12) + '" width="24" y="' + bBY + '" height="' + bBH + '" rx="3" fill="' + bFill + '">' + A("y", BY) + A("height", BH) + bodyColorAnim + "</rect>";
+    return '<svg id="' + sid + '" viewBox="0 0 214 150" width="100%" style="max-width:230px" role="img" aria-label="דיאגרמת נר ' + type + '">' +
+      guides + prior + wick + body + "</svg>";
+  }
+  // ── extended-lesson diagrams (multi-bar, static) ──────────────────────────
+  const _LC = { up: "#22c55e", dn: "#ef4444", in: "#7b88ad", out: "#f2b64a", ref: "#5b6690" };
+  function _svgWrap(inner, label) {
+    return '<svg viewBox="0 0 214 150" width="100%" style="max-width:240px" role="img" aria-label="' + (label || "") + '">' + inner + "</svg>";
+  }
+  function _ftfcDia() {                       // 5 green candles (D/W/M/Q/Y) stepping up = full continuity up
+    const xs = [30, 69, 108, 147, 186], lbl = ["D", "W", "M", "Q", "Y"]; let s = "";
+    xs.forEach((cx, i) => { const base = 118 - i * 15; s += _cndl(cx, base - 26, base + 6, base - 20, base, _LC.up) +
+      '<text x="' + cx + '" y="140" fill="#8894b5" font-size="11" text-anchor="middle">' + lbl[i] + "</text>"; });
+    return _svgWrap(s, "FTFC — כל הזמנים ירוקים");
+  }
+  function _inforceDia() {                     // prior bar + a green bar whose CLOSE holds above the prior high
+    const pH = 66, pL = 118;
+    const s = '<line x1="16" y1="' + pH + '" x2="198" y2="' + pH + '" stroke="#57608a" stroke-width="1" stroke-dasharray="4 4"/>' +
+      '<text x="18" y="' + (pH - 5) + '" fill="#8894b5" font-size="10">גבוה קודם</text>' +
+      _cndl(80, pH, pL, 80, 110, _LC.ref) +
+      _cndl(150, 36, 104, 42, 90, _LC.up) +
+      '<text x="150" y="30" fill="#22c55e" font-size="10.5" text-anchor="middle">סגר מעל ✓</text>';
+    return _svgWrap(s, "IN FORCE — סגירה מעל הגבוה הקודם");
+  }
+  function _seqDia(cands, label) {             // cands = [[cx,wickTop,wickBot,bodyTop,bodyBot,col,label], …]
+    return _svgWrap(cands.map(c => _cndl(c[0], c[1], c[2], c[3], c[4], c[5]) +
+      (c[6] ? '<text x="' + c[0] + '" y="140" fill="#8894b5" font-size="11" text-anchor="middle">' + c[6] + "</text>" : "")).join(""), label || "");
+  }
+  function _revDia() {                          // red 2D down, then green 2U reclaiming above it = reversal up
+    const s = _cndl(70, 40, 118, 50, 108, _LC.dn) + _cndl(150, 24, 110, 32, 84, _LC.up) +
+      '<path d="M104 96 L128 60" stroke="#22c55e" stroke-width="2" fill="none" marker-end="url(#arU)"/>' +
+      '<defs><marker id="arU" markerWidth="7" markerHeight="7" refX="3" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="#22c55e"/></marker></defs>' +
+      '<text x="70" y="140" fill="#8894b5" font-size="11" text-anchor="middle">2D</text>' +
+      '<text x="150" y="140" fill="#8894b5" font-size="11" text-anchor="middle">2U · היפוך</text>';
+    return _svgWrap(s, "היפוך — 2D שנרקלם ל-2U");
+  }
+  function _shapeDia() {                        // hammer (long lower wick) + shooter (long upper wick)
+    const s = _cndl(66, 52, 122, 52, 68, _LC.up) +     // hammer: small body top, long lower wick
+      _cndl(150, 28, 98, 82, 98, _LC.dn) +             // shooter: small body bottom, long upper wick
+      '<text x="66" y="140" fill="#8894b5" font-size="11" text-anchor="middle">פטיש 🔨</text>' +
+      '<text x="150" y="140" fill="#8894b5" font-size="11" text-anchor="middle">כוכב ⭐</text>';
+    return _svgWrap(s, "פטיש וכוכב נופל");
+  }
+  function _mmDia() {                           // an up-leg + an equal projected leg above = measured-move target
+    const lo = 118, mid = 74, top = 30;
+    const s = '<line x1="30" y1="' + lo + '" x2="30" y2="' + mid + '" stroke="#22c55e" stroke-width="3"/>' +
+      '<line x1="30" y1="' + mid + '" x2="196" y2="' + mid + '" stroke="#57608a" stroke-width="1" stroke-dasharray="4 4"/>' +
+      '<line x1="30" y1="' + mid + '" x2="30" y2="' + top + '" stroke="#22c55e" stroke-width="3" stroke-dasharray="3 3" opacity=".65"/>' +
+      '<line x1="30" y1="' + top + '" x2="196" y2="' + top + '" stroke="#22c55e" stroke-width="1.5" stroke-dasharray="5 4"/>' +
+      _cndl(70, mid, lo, mid + 6, lo - 4, _LC.up) +
+      '<text x="196" y="' + (mid - 5) + '" fill="#8894b5" font-size="10" text-anchor="end">כניסה</text>' +
+      '<text x="196" y="' + (top - 4) + '" fill="#22c55e" font-size="10.5" text-anchor="end">🎯 יעד (×1)</text>' +
+      '<text x="48" y="' + ((lo + top) / 2) + '" fill="#8894b5" font-size="10">גובה התנועה</text>';
+    return _svgWrap(s, "Measured Move — יעד לפי גודל התנועה");
+  }
+  // "התחל כאן" nav badge — shown to everyone, but on the FIRST visit to Learn we ask if they want it gone.
+  function _newbieHidden() { try { return localStorage.getItem("sn_newbie_hide") === "1"; } catch (e) { return false; } }
+  function _hideNewbieBadge() { document.querySelectorAll(".nav-newbie").forEach(el => el.remove()); }
+  function applyNewbieBadge() { if (_newbieHidden()) _hideNewbieBadge(); }
+  function _newbiePopup() {                 // the actual dialog — can be re-opened from the Learn page any time
+    modal('👋 הסימון "התחל כאן"',
+      '<div class="note" style="margin:0 0 16px;font-size:14.5px">שמנו סימון ירוק <b>"התחל כאן"</b> ליד לשונית הלימוד כדי לעזור למתחילים למצוא אותה. רוצה להסיר אותו מהתפריט?</div>' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" id="nbRemove">✓ כן, הסר את הסימון</button><button class="btn ghost" id="nbKeep">לא, השאר אותו</button></div>');
+    { const rm = $("#nbRemove"); if (rm) rm.onclick = () => { try { localStorage.setItem("sn_newbie_hide", "1"); } catch (e) {} _hideNewbieBadge(); closeModal(); snToast("הסימון הוסר ✓"); if (state.page === "learn") reRender(); }; }
+    { const kp = $("#nbKeep"); if (kp) kp.onclick = () => closeModal(); }
+  }
+  function _maybeAskNewbie() {
+    try {
+      if (localStorage.getItem("sn_newbie_hide") === "1") return;      // already removed
+      if (localStorage.getItem("sn_newbie_asked") === "1") return;     // already asked once
+      localStorage.setItem("sn_newbie_asked", "1");
+    } catch (e) { return; }
+    _newbiePopup();
+  }
+  // find, per lesson, the most notable ticker (biggest market-cap) that matches its Strat concept on the
+  // DAILY timeframe right now, and render a clickable "📍 עכשיו: SYM +x%" chip that opens its chart.
+  function _fillLearnExamples() {
+    let rows = [];
+    try { rows = scanRowsView() || []; } catch (e) { return; }
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) return;    // only real live data, never the demo set
+    const defs = [
+      ["lrnExFtfc", r => r.ftfc === true],
+      ["lrnExInforce", r => r.D && r.D.ifc === "up"],
+      ["lrnExRev", r => r.D && r.D.br === "up"],
+      ["lrnExHammer", r => r.D && r.D.sh === "hammer"],
+      ["lrnExSeq212", r => r.D && r.D.seq3d === "2D-1-2U"],
+      ["lrnExSeq122", r => r.D && r.D.seq3d === "1-2D-2U"],
+      ["lrnExSeq312", r => r.D && r.D.seq3d === "3-1-2U"],
+    ];
+    defs.forEach(d => {
+      const el = document.getElementById(d[0]); if (!el) return;
+      let best = null;
+      rows.forEach(r => { try { if (d[1](r) && r.price > 0 && (!best || (r.mc || 0) > (best.mc || 0))) best = r; } catch (e) {} });
+      if (!best) return;
+      const up = (best.chg || 0) >= 0, chg = best.chg != null ? (Math.round(best.chg * 100) / 100) : "";
+      el.style.display = "";
+      el.innerHTML = '<button class="lrn-exbtn" data-exsym="' + escAttr(best.sym) + '" title="פתח גרף" style="font-size:12px;border:1px solid var(--line);background:var(--panel2);border-radius:999px;padding:3px 10px;color:var(--ink);cursor:pointer">📍 עכשיו: <b>' + escAttr(best.sym) + '</b> <span style="color:' + (up ? "#22c55e" : "#ef4444") + '">' + (up ? "+" : "") + chg + "%</span></button>";
+    });
+    document.querySelectorAll("#page .lrn-exbtn").forEach(b => b.onclick = () => openChart(b.dataset.exsym, "D"));
+  }
+
+  // ---- interactive candle lesson: click a diagram → zoom into the LOWER timeframe and watch the
+  //      small candles that make up the bar. Teaches WHY each type means what it means. ----
+  const CL_NAME = { "1": "נר 1 · פנימי", "2U": "נר 2U · כיווני מעלה", "2D": "נר 2D · כיווני מטה", "3": "נר 3 · חיצוני" };
+  const CL_TEXT = {
+    "1": '🚫 <b>בפנים אין כיוון.</b> המחיר מתנדנד בתוך הטווח של הנר הקודם — עולה, יורד, ושוב, בלי הכרעה. לכן <b>לא סוחרים בהתכנסות</b>: אין יתרון, רק רעש. מחכים לפריצה.',
+    "2U": '💪🟢 <b>פריצה בעוצמה.</b> הנרות הקטנים בונים לחץ ואז פורצים <b>מעל הגבוה הקודם</b> — הקונים לקחו שליטה. כיוון ברור מעלה.',
+    "2D": '💪🔴 <b>שבירה בעוצמה.</b> הנרות הקטנים שוברים <b>מתחת לנמוך הקודם</b> — המוכרים לקחו שליטה. כיוון ברור מטה.',
+    "3": '🔄 <b>התרחבות מחיר.</b> קודם המחיר עשה <b>נמוך חדש</b> (🔴), ואז <b>התהפך</b> ועשה <b>גבוה חדש</b> (🟢). הנר לקח את שני הצדדים — עוצמה מקסימלית, אבל צריך לזהות את ההיפוך.'
+  };
+  // נר 3 יכול להיווצר גם בכיוון ההפוך — קודם גבוה חדש ואז היפוך מטה לנמוך חדש
+  const CL_TEXT3_DOWN = '🔄 <b>התרחבות מחיר — הכיוון ההפוך.</b> הפעם קודם <b>גבוה חדש</b> (🟢), ואז <b>התהפך</b> ועשה <b>נמוך חדש</b> (🔴). זה עדיין נר 3 — לקח את שני הצדדים — רק שהסגירה מטה.';
+  // internal lower-TF price path (y in a 0..260 stage · higher y = lower price). walls: prior high y=54, low y=206
+  const CL_PATH = { "1": [150,118,152,124,156,126,150,130], "2U": [160,150,134,112,86,58,42,30], "2D": [100,112,132,160,188,214,230,242], "3": [120,150,182,214,236,180,110,40] };
+  const CL_PATH3_DOWN = [156,126,94,62,40,96,166,236];   // נר 3 הפוך: קודם גבוה חדש ואז שבירה לנמוך חדש
+  function _internalCandles(type, variant) {
+    const hiY = 54, loY = 206, x0 = 70, dx = 42, W = 440, H = 264;
+    const walls =
+      '<line x1="30" y1="' + hiY + '" x2="' + (W - 20) + '" y2="' + hiY + '" stroke="#6b7699" stroke-width="1.5" stroke-dasharray="6 5"/>' +
+      '<line x1="30" y1="' + loY + '" x2="' + (W - 20) + '" y2="' + loY + '" stroke="#6b7699" stroke-width="1.5" stroke-dasharray="6 5"/>' +
+      '<text x="' + (W / 2) + '" y="' + (hiY - 7) + '" fill="#9aa6c6" font-size="12" text-anchor="middle">גבוה קודם</text>' +
+      '<text x="' + (W / 2) + '" y="' + (loY + 18) + '" fill="#9aa6c6" font-size="12" text-anchor="middle">נמוך קודם</text>';
+    const down3 = (type === "3" && variant === "down");
+    const pts = down3 ? CL_PATH3_DOWN : CL_PATH[type]; let cndls = "";
+    for (let i = 0; i < pts.length; i++) {
+      const open = i === 0 ? pts[0] : pts[i - 1], close = pts[i];
+      const up = close < open, col = up ? "#22c55e" : "#ef4444";
+      const bt = Math.min(open, close), bb = Math.max(open, close), cx = x0 + i * dx;
+      const wt = bt - (7 + (i % 3) * 4), wb = bb + (7 + ((i + 1) % 3) * 4);
+      cndls += '<g class="cl-icandle" style="--d:' + (i * 0.26).toFixed(2) + 's">' +
+        '<line x1="' + cx + '" y1="' + wt + '" x2="' + cx + '" y2="' + wb + '" stroke="' + col + '" stroke-width="2"/>' +
+        '<rect x="' + (cx - 9) + '" y="' + bt + '" width="18" height="' + Math.max(4, bb - bt) + '" rx="2" fill="' + col + '"/></g>';
+    }
+    let marks = "";
+    if (down3) marks =
+      '<text class="cl-mark" x="' + (x0 + 4 * dx) + '" y="24" fill="#22c55e" font-size="12" text-anchor="middle">גבוה חדש</text>' +
+      '<text class="cl-mark" x="' + (x0 + 5 * dx) + '" y="118" fill="#f2b64a" font-size="12" text-anchor="middle">היפוך ↓</text>' +
+      '<text class="cl-mark" x="' + (x0 + 7 * dx) + '" y="256" fill="#ef4444" font-size="12" text-anchor="middle">נמוך חדש</text>';
+    else if (type === "3") marks =
+      '<text class="cl-mark" x="' + (x0 + 4 * dx) + '" y="256" fill="#ef4444" font-size="12" text-anchor="middle">נמוך חדש</text>' +
+      '<text class="cl-mark" x="' + (x0 + 5 * dx) + '" y="176" fill="#f2b64a" font-size="12" text-anchor="middle">היפוך ↑</text>' +
+      '<text class="cl-mark" x="' + (x0 + 7 * dx) + '" y="30" fill="#22c55e" font-size="12" text-anchor="middle">גבוה חדש</text>';
+    else if (type === "2U") marks = '<text class="cl-mark" x="' + (x0 + 7 * dx) + '" y="26" fill="#22c55e" font-size="13" text-anchor="middle">פריצה! 🚀</text>';
+    else if (type === "2D") marks = '<text class="cl-mark" x="' + (x0 + 7 * dx) + '" y="258" fill="#ef4444" font-size="13" text-anchor="middle">שבירה! 💥</text>';
+    else marks = '<text class="cl-mark" x="' + (x0 + 3.5 * dx) + '" y="95" fill="#9aa6c6" font-size="14" text-anchor="middle">↔ בלי כיוון</text>';
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" width="100%" style="max-width:520px">' + walls + cndls + marks + "</svg>";
+  }
+  let _clTimers = [];
+  function _clClear() { _clTimers.forEach(clearTimeout); _clTimers = []; }
+  function runCandleLesson(type, stage, callout, tfEl) {
+    _clClear();
+    tfEl.textContent = "🔭 מסגרת זמן גבוהה";
+    callout.innerHTML = "זה <b>" + CL_NAME[type] + "</b> במסגרת זמן גבוהה. בוא נצלול פנימה ונראה מאילו נרות קטנים הוא מורכב.";
+    stage.className = "cl-stage";
+    stage.innerHTML = _candleDiagram(type, true).replace("max-width:230px", "max-width:340px");
+    // quick formation (~1s) → seamless "dive in" → the lower-TF frame "arrives" and settles
+    const ZOOM = 1200, INNER = ZOOM + 460;
+    _clTimers.push(setTimeout(() => { stage.classList.add("cl-diving"); tfEl.textContent = "🔎 זום אין → מסגרת זמן נמוכה"; callout.innerHTML = "צוללים פנימה…"; }, ZOOM));
+    _clTimers.push(setTimeout(() => {
+      stage.classList.remove("cl-diving"); stage.classList.add("cl-arriving");
+      tfEl.textContent = "🕯️ מסגרת זמן נמוכה — מה קורה בפנים";
+      stage.innerHTML = _internalCandles(type);
+      _clTimers.push(setTimeout(() => stage.classList.remove("cl-arriving"), 520));
+    }, INNER));
+    _clTimers.push(setTimeout(() => { callout.innerHTML = CL_TEXT[type]; }, INNER + 8 * 260 + 300));
+    // נר 3 נוצר לשני הכיוונים — אחרי הסיפור העולה (נמוך→היפוך→גבוה) מציגים בלופ גם את ההפוך (גבוה→היפוך→נמוך)
+    if (type === "3") {
+      const REVEAL = 8 * 260 + 300, HOLD = 3400;
+      let showDown = true;
+      const cycle = () => {
+        stage.innerHTML = _internalCandles("3", showDown ? "down" : "up");
+        tfEl.textContent = showDown ? "🕯️ מסגרת זמן נמוכה — הכיוון ההפוך ↓" : "🕯️ מסגרת זמן נמוכה — מה קורה בפנים";
+        callout.innerHTML = showDown ? CL_TEXT3_DOWN : CL_TEXT["3"];   // callout matches the story on screen (no lag)
+        _clTimers.push(setTimeout(() => { showDown = !showDown; cycle(); }, REVEAL + HOLD));
+      };
+      _clTimers.push(setTimeout(cycle, INNER + REVEAL + HOLD));
+    }
+  }
+  function openCandleLesson(type) {
+    modal("🔬 " + CL_NAME[type] + " — מבט מבפנים",
+      '<div class="cl-wrap"><div class="cl-tf" id="clTf"></div><div class="cl-stage" id="clStage"></div><div class="cl-callout" id="clCallout"></div>' +
+      '<div style="margin-top:14px"><button class="btn primary" id="clReplay">▶ הפעל שוב</button></div></div>', "candlelesson");
+    const stage = $("#clStage"), callout = $("#clCallout"), tfEl = $("#clTf");
+    runCandleLesson(type, stage, callout, tfEl);
+    { const rp = $("#clReplay"); if (rp) rp.onclick = () => runCandleLesson(type, stage, callout, tfEl); }
+  }
+
+  // ===== Candle drawing board (admin teaching tool) ==========================
+  // Draw candles by hand for explanations: press-hold to open a candle at the current Y (= open price),
+  // drag up/down to shape body + wicks (green = close above open, red = below), release to commit and
+  // auto-advance one column to the right. Values are stored NORMALIZED (0=top .. 1=bottom of the board)
+  // so they survive resize. Admin-only for now.
+  const DRAW_TFS = ["4H", "D", "W", "M", "Q", "Y"];
+  const DRAW_COLORS = ["#ffffff", "#ffd54a", "#26a69a", "#ef5350", "#5b8cff", "#ff8f3f", "#c77dff"];
+  const DRAW_WIDTHS = [2, 4, 8];
+  const _newPanel = tf => ({ candles: [], strokes: [], undoOrder: [], nextCol: 0, cur: null, curStroke: null, tf: tf });
+  const _drawBoard = {
+    gridN: 20, gridOn: true, split: false, active: 0, _ros: null,
+    mode: "candle", penColor: "#ffd54a", penWidth: 4,   // freehand pen: mode / color / thickness
+    panels: [_newPanel("D"), _newPanel("W")],
+  };
+  // approximate bars-per-year per timeframe → the aggregation ratio between two timeframes
+  const _TF_BPY = { "4H": 500, "D": 252, "W": 52, "M": 12, "Q": 4, "Y": 1 };
+  function _drawRatio(lowTf, highTf) { return Math.max(1, Math.round((_TF_BPY[lowTf] || 1) / (_TF_BPY[highTf] || 1))); }
+  // in split mode the two panels are LINKED: the lower timeframe is drawable, the higher one is built
+  // automatically by aggregating groups of `ratio` lower candles (OHLC roll-up). null = not linked (same TF / single).
+  function _drawLinkRoles(B) {
+    if (!B.split) return null;
+    const ra = _TF_BPY[B.panels[0].tf] || 1, rb = _TF_BPY[B.panels[1].tf] || 1;
+    if (ra === rb) return null;
+    const lowIdx = ra > rb ? 0 : 1, highIdx = ra > rb ? 1 : 0;   // lower TF = MORE bars/year
+    return { lowIdx: lowIdx, highIdx: highIdx, ratio: _drawRatio(B.panels[lowIdx].tf, B.panels[highIdx].tf) };
+  }
+  // roll up N lower-TF candles into one higher-TF candle (normalized coords: smaller y = higher price)
+  function _aggCandles(low, ratio) {
+    const out = [];
+    for (let i = 0; i < low.length; i += ratio) {
+      const chunk = low.slice(i, i + ratio); if (!chunk.length) break;
+      let hi = chunk[0].high, lo = chunk[0].low;
+      chunk.forEach(c => { if (c.high < hi) hi = c.high; if (c.low > lo) lo = c.low; });
+      out.push({ col: out.length, open: chunk[0].open, close: chunk[chunk.length - 1].close, high: hi, low: lo });
+    }
+    return out;
+  }
+  function renderDrawBoard() {
+    if (!_snIsAdmin()) return '<div class="page-head"><h1>✏️ שרטוט נרות</h1><div class="sub">הכלי זמין לניהול בלבד.</div></div>';
+    const B = _drawBoard;
+    const head = '<div class="page-head"><h1>✏️ שרטוט נרות — לוח הסבר</h1><div class="sub">' +
+      '<b>לחץ והחזק</b> על הלוח כדי לפתוח נר, <b>הזז מעלה/מטה</b> כדי לעצב גוף ופתילים — ' +
+      '<span class="pos">ירוק</span> מעל הפתיחה, <span class="neg">אדום</span> מתחת. <b>שחרר</b> לסגירה. ' +
+      'ב<b>פיצול מסך</b> הלוחות <b>מקושרים</b>: מציירים על הטיימפריים הנמוך, והגבוה נבנה אוטומטית מהאגרגציה (למשל 5 יומי = נר שבועי אחד).</div></div>';
+    const gridBtns = [10, 20, 50, 100].map(n => '<button class="flow-tf-btn' + (n === B.gridN ? " on" : "") + '" data-drawgrid="' + n + '">' + n + "</button>").join("");
+    const modeBtns = '<span class="draw-modes flow-tf">' +
+      '<button class="flow-tf-btn' + (B.mode === "candle" ? " on" : "") + '" data-drawmode="candle">🕯️ נר</button>' +
+      '<button class="flow-tf-btn' + (B.mode === "pen" ? " on" : "") + '" data-drawmode="pen">✏️ עט</button></span>';
+    const penCtl = B.mode === "pen"
+      ? '<span class="draw-pen-ctl">' +
+          DRAW_COLORS.map(c => '<button class="draw-swatch' + (c === B.penColor ? " on" : "") + '" data-drawcolor="' + c + '" style="background:' + c + '" title="' + c + '"></button>').join("") +
+          '<input type="color" id="drawColorCustom" value="' + B.penColor + '" class="draw-swatch-custom" title="צבע מותאם">' +
+          '<span class="draw-widths">' + DRAW_WIDTHS.map(w => '<button class="draw-wbtn' + (w === B.penWidth ? " on" : "") + '" data-drawwidth="' + w + '" title="עובי ' + w + '"><span style="height:' + w + 'px"></span></button>').join("") + "</span>" +
+        "</span>"
+      : "";
+    const toolbar = '<div class="panel draw-toolbar">' +
+      modeBtns + penCtl +
+      '<span class="draw-sep"></span>' +
+      '<button class="btn ghost" id="drawGridToggle">' + (B.gridOn ? "▦ גריד מוצג" : "▦ גריד מוסתר") + "</button>" +
+      '<span class="flow-ctrl-lbl">קוביות:</span><span class="flow-tf">' + gridBtns + "</span>" +
+      '<button class="btn ghost' + (B.split ? " on" : "") + '" id="drawSplit">' + (B.split ? "◧ פיצול פעיל" : "▭ פיצול מסך") + "</button>" +
+      '<span class="muted" id="drawStatus" style="font-size:12px"></span>' +
+      '<span style="margin-inline-start:auto"></span>' +
+      '<button class="btn ghost" id="drawUndo">↶ בטל</button>' +
+      '<button class="btn ghost" id="drawClear">🗑 נקה</button>' +
+      '<button class="btn ghost" id="drawExport">📷 שמור PNG</button>' +
+      "</div>";
+    const tfSel = idx => '<select class="draw-tf" data-drawtf="' + idx + '">' + DRAW_TFS.map(t => '<option value="' + t + '"' + (B.panels[idx].tf === t ? " selected" : "") + ">" + t + "</option>").join("") + "</select>";
+    const link = _drawLinkRoles(B);
+    const panelHtml = (idx, sideLbl) => {
+      const auto = link && idx === link.highIdx, low = link && idx === link.lowIdx;
+      const note = auto ? ' <span class="draw-autotag">🔗 אוטומטי · ' + link.ratio + "× " + B.panels[link.lowIdx].tf + "</span>"
+        : (low ? ' <span class="muted" style="font-weight:400;font-size:11px">✍️ צייר כאן</span>' : "");
+      return '<div class="draw-panel' + (auto ? " draw-auto" : "") + '">' +
+        '<div class="draw-phead"><span>' + sideLbl + note + '</span><span class="muted" style="font-weight:400">TF:</span>' + tfSel(idx) + "</div>" +
+        '<canvas class="draw-canvas" data-drawpanel="' + idx + '"></canvas></div>';
+    };
+    const board = B.split
+      ? '<div class="panel draw-boardwrap draw-split">' + panelHtml(0, "🖼️ ימני") + panelHtml(1, "🖼️ שמאלי") + "</div>"
+      : '<div class="panel draw-boardwrap">' + panelHtml(0, "🖼️ לוח") + "</div>";
+    return head + toolbar + board;
+  }
+  function wireDrawBoard() {
+    if (!_snIsAdmin()) return;
+    const B = _drawBoard;
+    const canvases = Array.from(document.querySelectorAll("[data-drawpanel]"));
+    if (!canvases.length) return;
+    if (B._ros) { B._ros.forEach(ro => { try { ro.disconnect(); } catch (e) {} }); }
+    B._ros = [];
+    const handles = [];
+    const link = _drawLinkRoles(B);   // split: lower TF drawable → higher TF auto-aggregated
+    const slotW = W => W / B.gridN;
+    // zoom: more slots = smaller candles = more room on the right (zoom OUT) · fewer = bigger candles (zoom IN)
+    function setGridN(n) {
+      n = Math.max(4, Math.min(240, Math.round(n)));
+      if (n === B.gridN) return;
+      B.gridN = n;
+      B.panels.forEach(p => { if (p.nextCol > B.gridN) p.nextCol = B.gridN; });
+      handles.forEach(h => h.draw());
+      if (link) redrawPanel(link.highIdx);
+      status();
+      document.querySelectorAll("[data-drawgrid]").forEach(x => x.classList.toggle("on", +x.dataset.drawgrid === B.gridN));
+    }
+    const _zoomStep = () => Math.max(1, Math.round(B.gridN * 0.1));
+    function status() {
+      const el = document.getElementById("drawStatus"); if (!el) return;
+      el.textContent = B.split
+        ? B.panels.map((p, i) => (p.tf || ("לוח" + (i + 1))) + ": " + p.candles.length + " נרות").join("  ·  ")
+        : (B.panels[0].candles.length + " נרות · הבא: " + Math.min(B.panels[0].nextCol + 1, B.gridN) + "/" + B.gridN);
+    }
+    canvases.forEach(cv => {
+      const idx = +cv.dataset.drawpanel, S = B.panels[idx], ctx = cv.getContext("2d");
+      let W = 0, H = 0;
+      function setup() { const r = cv.getBoundingClientRect(); if (!r.width || !r.height) return; const dpr = window.devicePixelRatio || 1; cv.width = Math.round(r.width * dpr); cv.height = Math.round(r.height * dpr); W = r.width; H = r.height; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw(); }
+      function drawGrid() { if (!B.gridOn) return; const cw = slotW(W); ctx.strokeStyle = "rgba(255,255,255,.09)"; ctx.lineWidth = 1; ctx.beginPath(); for (let x = 0; x <= W + 0.5; x += cw) { const px = Math.round(x) + 0.5; ctx.moveTo(px, 0); ctx.lineTo(px, H); } for (let y = 0; y <= H + 0.5; y += cw) { const py = Math.round(y) + 0.5; ctx.moveTo(0, py); ctx.lineTo(W, py); } ctx.stroke(); }
+      function drawCandle(c) { const cw = slotW(W), xc = (c.col + 0.5) * cw, bw = Math.max(3, cw * 0.6); const yO = c.open * H, yC = c.close * H, yH = c.high * H, yL = c.low * H; const col = c.close <= c.open ? "#26a69a" : "#ef5350"; ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = Math.max(1, cw * 0.09); ctx.beginPath(); ctx.moveTo(xc, yH); ctx.lineTo(xc, yL); ctx.stroke(); const top = Math.min(yO, yC); ctx.fillRect(xc - bw / 2, top, bw, Math.max(1.5, Math.abs(yC - yO))); }
+      function drawStroke(st) { if (!st || !st.pts.length) return; ctx.strokeStyle = st.color; ctx.lineWidth = st.width; ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.beginPath(); for (let i = 0; i < st.pts.length; i++) { const X = st.pts[i].x * W, Y = st.pts[i].y * H; if (i === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y); } if (st.pts.length === 1) ctx.lineTo(st.pts[0].x * W + 0.1, st.pts[0].y * H + 0.1); ctx.stroke(); }
+      function draw() { ctx.clearRect(0, 0, W, H); ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H); drawGrid(); S.candles.forEach(drawCandle); if (S.cur) drawCandle(S.cur); S.strokes.forEach(drawStroke); if (S.curStroke) drawStroke(S.curStroke); }
+      const pos = e => { const r = cv.getBoundingClientRect(); return Math.max(0, Math.min(H, e.clientY - r.top)) / H; };
+      const pos2 = e => { const r = cv.getBoundingClientRect(); return { x: Math.max(0, Math.min(W, e.clientX - r.left)) / W, y: Math.max(0, Math.min(H, e.clientY - r.top)) / H }; };
+      cv.addEventListener("pointerdown", e => {
+        B.active = idx; try { cv.setPointerCapture(e.pointerId); } catch (x) {} e.preventDefault();
+        if (B.mode === "pen") { S.curStroke = { color: B.penColor, width: B.penWidth, pts: [pos2(e)] }; draw(); return; }
+        if (link && idx === link.highIdx) { snToast("הלוח הגבוה נבנה אוטומטית — צייר על הטיימפריים הנמוך"); return; }
+        if (S.nextCol >= B.gridN) { snToast("הלוח מלא — נקה או הגדל את מספר הקוביות"); return; }
+        const n = pos(e); S.cur = { col: S.nextCol, open: n, high: n, low: n, close: n }; draw();
+      });
+      cv.addEventListener("pointermove", e => {
+        if (S.curStroke) { S.curStroke.pts.push(pos2(e)); draw(); return; }
+        if (!S.cur) return; const n = pos(e); S.cur.close = n; S.cur.high = Math.min(S.cur.high, n); S.cur.low = Math.max(S.cur.low, n); draw();
+        if (link && idx === link.lowIdx) syncHigher();   // LIVE: the higher-TF candle updates as you draw
+      });
+      function finish() {
+        if (S.curStroke) { if (S.curStroke.pts.length) { S.strokes.push(S.curStroke); S.undoOrder.push("s"); } S.curStroke = null; draw(); status(); return; }
+        if (!S.cur) return; S.candles.push(S.cur); S.nextCol++; S.undoOrder.push("c"); S.cur = null; draw(); status();
+        if (link && idx === link.lowIdx) syncHigher();   // roll the new candle up into the higher timeframe
+      }
+      cv.addEventListener("pointerup", finish);
+      cv.addEventListener("pointercancel", finish);
+      // mouse wheel = dynamic zoom · wheel back (toward you, scroll down) → more room on the right · forward → less
+      cv.addEventListener("wheel", e => { e.preventDefault(); setGridN(B.gridN + (e.deltaY > 0 ? _zoomStep() : -_zoomStep())); }, { passive: false });
+      if (window.ResizeObserver) { const ro = new ResizeObserver(() => setup()); ro.observe(cv); B._ros.push(ro); }
+      handles.push({ idx: idx, cv: cv, draw: draw });
+      setup();
+    });
+    status();
+    const redrawPanel = i => { const h = handles.find(x => x.idx === i); if (h) h.draw(); };
+    function syncHigher() { if (!link) return; const lo = B.panels[link.lowIdx], hi = B.panels[link.highIdx]; const src = lo.cur ? lo.candles.concat([lo.cur]) : lo.candles; hi.candles = _aggCandles(src, link.ratio); hi.nextCol = hi.candles.length; hi.cur = null; redrawPanel(link.highIdx); }
+    syncHigher();   // initial roll-up so the higher panel reflects existing lower candles
+    { const g = document.getElementById("drawGridToggle"); if (g) g.onclick = () => { B.gridOn = !B.gridOn; reRender(); }; }
+    document.querySelectorAll("[data-drawgrid]").forEach(b => b.onclick = () => setGridN(+b.dataset.drawgrid));
+    // keyboard +/- zoom (draw board only): + → more room / smaller candles (zoom out) · - → bigger candles (zoom in)
+    if (B._keyHandler) document.removeEventListener("keydown", B._keyHandler);
+    B._keyHandler = e => {
+      if (e.target && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!document.querySelector("[data-drawpanel]")) return;   // left the draw board
+      if (e.key === "+" || e.key === "=") { setGridN(B.gridN + _zoomStep()); e.preventDefault(); }
+      else if (e.key === "-" || e.key === "_") { setGridN(B.gridN - _zoomStep()); e.preventDefault(); }
+    };
+    document.addEventListener("keydown", B._keyHandler);
+    { const sp = document.getElementById("drawSplit"); if (sp) sp.onclick = () => { B.split = !B.split; reRender(); }; }
+    document.querySelectorAll("[data-drawtf]").forEach(sel => sel.onchange = () => { const p = B.panels[+sel.dataset.drawtf]; if (p) { p.tf = sel.value; if (B.split) reRender(); else status(); } });
+    // pen: mode toggle (structural → reRender), color + width (live, no reRender so drawing is preserved)
+    document.querySelectorAll("[data-drawmode]").forEach(b => b.onclick = () => { B.mode = b.dataset.drawmode; reRender(); });
+    document.querySelectorAll("[data-drawcolor]").forEach(b => b.onclick = () => { B.penColor = b.dataset.drawcolor; document.querySelectorAll("[data-drawcolor]").forEach(x => x.classList.toggle("on", x === b)); const cc = document.getElementById("drawColorCustom"); if (cc) cc.value = b.dataset.drawcolor; });
+    { const cc = document.getElementById("drawColorCustom"); if (cc) cc.oninput = () => { B.penColor = cc.value; document.querySelectorAll("[data-drawcolor]").forEach(x => x.classList.remove("on")); }; }
+    document.querySelectorAll("[data-drawwidth]").forEach(b => b.onclick = () => { B.penWidth = +b.dataset.drawwidth; document.querySelectorAll("[data-drawwidth]").forEach(x => x.classList.toggle("on", x === b)); });
+    { const u = document.getElementById("drawUndo"); if (u) u.onclick = () => { const S = B.panels[B.active]; if (!S || !S.undoOrder.length) return; const last = S.undoOrder.pop(); if (last === "s") S.strokes.pop(); else { S.candles.pop(); S.nextCol = Math.max(0, S.nextCol - 1); } redrawPanel(B.active); if (link && B.active === link.lowIdx) syncHigher(); status(); }; }
+    { const c = document.getElementById("drawClear"); if (c) c.onclick = () => { const S = B.panels[B.active]; if (S) { S.candles = []; S.strokes = []; S.undoOrder = []; S.nextCol = 0; S.cur = null; S.curStroke = null; redrawPanel(B.active); if (link && B.active === link.lowIdx) syncHigher(); status(); } }; }
+    { const x = document.getElementById("drawExport"); if (x) x.onclick = () => {
+        try {
+          const cvs = Array.from(document.querySelectorAll("[data-drawpanel]"));
+          if (!cvs.length) return;
+          if (cvs.length === 1) { const a = document.createElement("a"); a.href = cvs[0].toDataURL("image/png"); a.download = "stratninja-candles.png"; a.click(); return; }
+          const gap = Math.round(14 * (window.devicePixelRatio || 1));
+          const ordered = cvs.slice().reverse();   // RTL: leftmost panel first in the image
+          const h = Math.max.apply(null, ordered.map(c => c.height));
+          const w = ordered.reduce((s, c) => s + c.width, 0) + gap * (ordered.length - 1);
+          const tmp = document.createElement("canvas"); tmp.width = w; tmp.height = h;
+          const tc = tmp.getContext("2d"); tc.fillStyle = "#0B1020"; tc.fillRect(0, 0, w, h);
+          let xx = 0; ordered.forEach(c => { tc.drawImage(c, xx, 0); xx += c.width + gap; });
+          const a = document.createElement("a"); a.href = tmp.toDataURL("image/png"); a.download = "stratninja-candles-split.png"; a.click();
+        } catch (er) { snToast("ייצוא נכשל"); }
+      }; }
+  }
+
+  // ---------- router ----------
+  // ---- admin usage-analytics dashboard ("מטריצת שימוש") ------------------------
+  let _anaDays = 7;
+  const _ANA_PAGE_HE = { market: "סקירת שוק", sp500: "S&P 500", sectors: "המשכיות זמנית", today: "לאן הכסף הולך", scanner: "סורק עסקאות", gappers: "גאפרים", favorites: "מועדפים", journal: "יומן מסחר", learn: "לימוד", draw: "שרטוט נרות", analytics: "אנליטיקס" };
+  const _ANA_CLICK_HE = { share_alert: "שיתוף התראה", open_chart: "פתיחת גרף", fav_refresh: "רענון מועדפים", fav_chartgrid: "גרפים (מועדפים)", fav_copy: "העתקת מועדפים", journal_refresh_prices: "רענון מחירים (יומן)", journal_chartgrid: "גרפים (יומן)", news: "חדשות", share_screen: "שיתוף מסך", request_form: "טופס בקשות", suggest_ticker: "הצעת מניה", alerts_center: "מרכז התראות", fav_preset_filter: "סינון לפי סריקה", preset_save: "שמירת פריסט" };
+  function _anaBars(counts, label, limit) {
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, limit || 12);
+    if (!entries.length) return '<div class="muted" style="font-size:12px">אין נתונים בטווח</div>';
+    const max = entries[0][1] || 1;
+    const lbl = label || (k => k);
+    return '<div style="display:flex;flex-direction:column;gap:7px">' + entries.map(([k, v]) =>
+      '<div><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px"><span>' + escHtml(lbl(k)) + "</span><b>" + v + "</b></div>" +
+      '<div style="height:8px;background:var(--panel2);border-radius:5px;overflow:hidden"><div style="height:100%;width:' + Math.round(v / max * 100) + '%;background:var(--accent);border-radius:5px"></div></div></div>').join("") + "</div>";
+  }
+  function renderAnalytics() {
+    if (!_snIsAdmin()) return '<div class="page-head"><h1>📈 מטריצת שימוש</h1><div class="sub">האזור זמין לניהול בלבד.</div></div>';
+    const chip = (d, l) => '<button class="btn ghost' + (_anaDays === d ? " on" : "") + '" data-anarange="' + d + '" style="font-size:12px">' + l + "</button>";
+    return '<div class="page-head"><h1>📈 מטריצת שימוש</h1><div class="sub">מה משתמשים עושים באתר — צפיות בעמודים ולחיצות על פיצ׳רים. עוזר לראות מה פופולרי ואיפה כדאי לשפר.</div></div>' +
+      '<div class="panel"><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">' +
+        '<span class="muted" style="font-size:12px">טווח:</span>' + chip(1, "היום") + chip(7, "7 ימים") + chip(30, "30 יום") +
+        '<button class="btn ghost" id="anaRefresh" style="font-size:12px;margin-inline-start:auto">🔄 רענן</button></div>' +
+        '<div id="anaSummary" class="muted" style="font-size:13px">טוען…</div></div>' +
+      '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px">' +
+        '<div class="panel"><h3>📄 עמודים הכי נצפים</h3><div id="anaPages">—</div></div>' +
+        '<div class="panel"><h3>🖱️ פיצ׳רים הכי בשימוש</h3><div id="anaClicks">—</div></div>' +
+        '<div class="panel"><h3>👤 משתמשים פעילים</h3><div id="anaUsers">—</div></div>' +
+        '<div class="panel"><h3>🎁 הטבת גולשים (קוד קהילה)</h3><div id="anaNinja">—</div></div>' +
+      "</div>";
+  }
+  async function wireAnalytics() {
+    if (!_snIsAdmin()) return;
+    document.querySelectorAll("[data-anarange]").forEach(b => b.onclick = () => { _anaDays = +b.dataset.anarange; reRender(); });
+    { const rb = document.getElementById("anaRefresh"); if (rb) rb.onclick = () => reRender(); }
+    const setTxt = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+    let client = null; try { client = window.SNAuth && SNAuth.getClient && SNAuth.getClient(); } catch (e) {}
+    if (!client) { setTxt("anaSummary", "צריך להיות מחובר כאדמין כדי לראות נתונים."); return; }
+    // all-visitors ninja-deal counters (a separate server counter — counts logged-OUT visitors too,
+    // unlike usage_events). Runs independently so it shows even when usage_events is empty.
+    (async () => {
+      try {
+        const { data: cdata } = await client.from("counters").select("name,n");
+        const cm = {}; (cdata || []).forEach(r => cm[r.name] = +r.n || 0);
+        const totOpens = cm["ninja_deal_open"] || 0, totCopies = cm["ninja_code_copy"] || 0;
+        // per-day buckets ("ninja_deal_open:YYYY-MM-DD", UTC) → sum the selected range (_anaDays days incl. today)
+        const _dayKeys = []; for (let i = 0; i < _anaDays; i++) _dayKeys.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
+        const _sumRange = base => _dayKeys.reduce((s, dk) => s + (cm[base + ":" + dk] || 0), 0);
+        const opens = _sumRange("ninja_deal_open"), copies = _sumRange("ninja_code_copy");
+        const rangeLbl = _anaDays === 1 ? "היום" : _anaDays + " ימים";
+        setTxt("anaNinja",
+          '<div style="display:flex;flex-direction:column;gap:9px">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center"><span>👀 לחיצות על הנינג׳ה</span><b style="font-size:20px">' + opens + "</b></div>" +
+            '<div style="display:flex;justify-content:space-between;align-items:center"><span>📋 העתקות הקוד</span><b style="font-size:20px">' + copies + "</b></div>" +
+            '<div class="muted" style="font-size:11px">' + (opens ? "יחס העתקה " + Math.round(copies / opens * 100) + "% · " : "") + "טווח " + rangeLbl + " · כל הגולשים</div>" +
+            '<div class="muted" style="font-size:11px;border-top:1px solid var(--line);padding-top:7px">סה״כ מאז ההשקה: <b>' + totOpens + '</b> לחיצות · <b>' + totCopies + "</b> העתקות</div>" +
+            '<div class="muted" style="font-size:10px;opacity:.7">הפילוח היומי נאסף מ-30/10/2026 ואילך</div>' +
+          "</div>");
+      } catch (e) { setTxt("anaNinja", '<div class="muted" style="font-size:12px">אין נתונים עדיין — ודא שהרצת את counters.sql ב-Supabase</div>'); }
+    })();
+    const since = new Date(Date.now() - _anaDays * 86400000).toISOString();
+    let rows = [];
+    try {
+      const { data, error } = await client.from("usage_events").select("event,page,user_id,ts,meta").gte("ts", since).order("ts", { ascending: false }).limit(20000);
+      if (error) throw error;
+      rows = data || [];
+    } catch (e) { setTxt("anaSummary", "שגיאה בטעינה: " + (e.message || e) + " — ודא שהרצת את usage_events.sql."); return; }
+    if (!rows.length) { setTxt("anaSummary", "אין עדיין נתונים בטווח הזה. הנתונים מצטברים ככל שמשתמשים מחוברים גולשים באתר."); ["anaPages", "anaClicks", "anaUsers"].forEach(i => setTxt(i, '<div class="muted" style="font-size:12px">—</div>')); return; }
+    const pages = {}, clicks = {}, users = {}, emailMap = {};
+    rows.forEach(r => {
+      const ev = r.event || "";
+      if (ev.indexOf("page:") === 0) pages[ev.slice(5)] = (pages[ev.slice(5)] || 0) + 1;
+      else if (ev.indexOf("click:") === 0) clicks[ev.slice(6)] = (clicks[ev.slice(6)] || 0) + 1;
+      if (r.user_id) {
+        users[r.user_id] = (users[r.user_id] || 0) + 1;
+        if (!emailMap[r.user_id] && r.meta && r.meta.email) emailMap[r.user_id] = r.meta.email;   // newest-first → keep the latest email
+      }
+    });
+    setTxt("anaSummary", "<b>" + rows.length + "</b> אירועים · <b>" + Object.keys(users).length + "</b> משתמשים פעילים · טווח " + _anaDays + " ימים");
+    setTxt("anaPages", _anaBars(pages, k => _ANA_PAGE_HE[k] || k));
+    setTxt("anaClicks", _anaBars(clicks, k => _ANA_CLICK_HE[k] || k));
+    setTxt("anaUsers", _anaBars(users, k => emailMap[k] || ("…" + String(k).slice(0, 8)), 15));   // show email when known, else short id
+  }
+
+  // ===== "סקירת שוק" — one channel: market overview (first) + sector-breadth / sector-flow / continuity / breadth =====
+  let pulseTab = "market";
+  const PULSE_TABS = [["market", "🌐 סקירת שוק"], ["sp500", "📊 רוחב סקטוריאלי"], ["today", "💸 תזרים סקטוריאלי"], ["most2s", "⚡ אנרגיה כיוונית"], ["sectors", "🗂️ המשכיות"], ["breadth", "📉 רוחב שוק"]];
+  const _pulseRender = { market: () => renderMarket(), sp500: () => renderSp500(), today: () => renderToday(), most2s: () => renderMost2s(), sectors: () => renderSectors(), breadth: () => renderBreadth() };
+  const _pulseWire = { market: () => wireMarket(), sp500: () => wireSp500(), today: () => wireToday(), most2s: () => wireMost2s(), sectors: () => wireSectors(), breadth: () => wireBreadth() };
+  function renderPulse() {
+    const tab = _pulseRender[pulseTab] ? pulseTab : "market";
+    const bar = '<div class="pulse-tabs">' + PULSE_TABS.map(([k, l]) =>
+      '<button class="pulse-tab' + (tab === k ? " on" : "") + '" data-pulsetab="' + k + '">' + l + "</button>").join("") + "</div>";
+    return bar + _pulseRender[tab]();
+  }
+  function wirePulse() {
+    document.querySelectorAll("[data-pulsetab]").forEach(b => b.onclick = () => { if (pulseTab === b.dataset.pulsetab) return; pulseTab = b.dataset.pulsetab; reRender(); try { window.scrollTo(0, 0); } catch (e) {} });
+    const tab = _pulseRender[pulseTab] ? pulseTab : "market";
+    if (_pulseWire[tab]) _pulseWire[tab]();
+  }
+  // ===== "איפה ה-2'ים" — sectoral map of directional (2U/2D) bars across timeframes =====
+  // Answers Rob Smith's "WHERE ARE THE MOST 2's": per GICS sector × timeframe, how many member
+  // stocks print a directional 2-bar right now, split 2U (bullish) vs 2D (bearish). The biggest
+  // cells = where the directional energy is. 100% client-side off SCAN.rows — each row already
+  // carries r[tf].t ("1"/"2U"/"2D"/"3") for D/W/M/Q/Y, so no server/feed change is needed.
+  let m2Uni = "sp";                         // "sp" = S&P 500 only · "all" = full scanner universe
+  let m2Tf = "all";                         // TF filter: "all" (weighted smart-money) or one of D/W/M/Q/Y
+  const M2_TFS = ["D", "W", "M", "Q", "Y"];
+  const M2_RGB = { pos: "38,166,154", neg: "239,83,80", flat: "120,130,150" };   // TradingView green/red
+  function m2Rows() {
+    const all = (SCAN && SCAN.rows) || [];
+    if (m2Uni === "sp") { const sp = all.filter(r => r.sp); if (sp.length) return sp; }
+    return all;
+  }
+  function m2Aggregate(rows) {
+    const agg = {}, order = [];
+    rows.forEach(r => {
+      const s = r.sec; if (!s || s === "אחר" || s === "מדדים") return;
+      let o = agg[s];
+      if (!o) { o = agg[s] = { n: 0, tot2: 0, tf: {} }; M2_TFS.forEach(tf => o.tf[tf] = { u: 0, d: 0, n: 0 }); order.push(s); }
+      o.n++;
+      M2_TFS.forEach(tf => {
+        const t = (r[tf] || {}).t, c = o.tf[tf]; c.n++;
+        if (t === "2U") { c.u++; o.tot2++; } else if (t === "2D") { c.d++; o.tot2++; }
+      });
+    });
+    return { agg: agg, secs: order.filter(s => agg[s].n >= 4).sort((a, b) => agg[b].tot2 - agg[a].tot2) };
+  }
+  function renderMost2s() {
+    const head = '<div class="page-head compact"><h1>⚡ אנרגיה כיוונית · איפה ה-2\'ים <span class="mkt-live">' + (LIVE && LIVE.updated ? "🟢 חי" : "🧪 דמו") + "</span></h1></div>";
+    if (!(SCAN && SCAN.rows && SCAN.rows.length))
+      return head + '<div class="panel"><div class="muted" style="padding:16px">טוען נתוני סורק…</div></div>';
+    const rows = m2Rows();
+    const r = m2Aggregate(rows), agg = r.agg, secs = r.secs;
+    if (!secs.length) return head + '<div class="panel"><div class="muted" style="padding:16px">אין מספיק נתונים כרגע.</div></div>';
+    // verdict: hottest cell (most 2s), most-directional TF, overall lean + per-TF totals
+    let hot = { n: -1 }, tfTot = {}, totU = 0, totD = 0;
+    M2_TFS.forEach(tf => tfTot[tf] = 0);
+    secs.forEach(s => M2_TFS.forEach(tf => {
+      const c = agg[s].tf[tf], tot = c.u + c.d;
+      tfTot[tf] += tot; totU += c.u; totD += c.d;
+      if (tot > hot.n) hot = { n: tot, sec: s, tf: tf };
+    }));
+    let bestTf = M2_TFS[0]; M2_TFS.forEach(tf => { if (tfTot[tf] > tfTot[bestTf]) bestTf = tf; });
+    const leanTxt = totU > totD * 1.1 ? "הטיה שורית 🟢" : totD > totU * 1.1 ? "הטיה דובית 🔴" : "מאוזן ⚖️";
+    // SMART-MONEY score per sector: net directional (2U−2D) proportion, WEIGHTED by timeframe —
+    // higher TFs count more because a sector aligned to 2U on Monthly/Quarterly/Yearly = institutional
+    // accumulation (see the Strat timeframe philosophy), not a one-day pop. Range ≈ −1..+1.
+    const M2_W = { D: 1, W: 1.5, M: 2.5, Q: 3.5, Y: 4 };
+    const score = {};
+    secs.forEach(s => { let sc = 0, w = 0; M2_TFS.forEach(tf => { const c = agg[s].tf[tf]; if (!c.n) return; sc += M2_W[tf] * ((c.u - c.d) / c.n); w += M2_W[tf]; }); score[s] = w ? sc / w : 0; });
+    // TF FILTER: "all" ranks by the weighted smart-money score; a specific TF ranks by THAT timeframe's
+    // net-2U proportion, so the top card = the sector with the most 2s on the chosen TF (Adi: "ביומי
+    // אנרגיה, בשבועי טכנולוגיה, בחודשי פיננסים").
+    const tfOn = M2_TFS.indexOf(m2Tf) >= 0 ? m2Tf : null;   // null = "all" (weighted)
+    const sTf = (s, tf) => { const c = agg[s].tf[tf]; return c.n ? (c.u - c.d) / c.n : 0; };
+    const rankScore = s => tfOn ? sTf(s, tfOn) : score[s];
+    const ranked = secs.slice().sort((a, b) => rankScore(b) - rankScore(a));   // strongest inflow first
+    const alignHi = s => ["M", "Q", "Y"].filter(tf => agg[s].tf[tf].u > agg[s].tf[tf].d);   // higher TFs net-bullish
+    const isFresh = s => { const t = agg[s].tf; return ((t.D.u > t.D.d) || (t.W.u > t.W.d)) && alignHi(s).length >= 2; };   // short TFs entering NOW into an aligned higher-TF trend
+    const strongLab = sc => sc >= 0.4 ? "זרימה חזקה 🔥" : sc >= 0.2 ? "זרימה חיובית" : "זרימה מתונה";
+    const inThr = tfOn ? 0.1 : 0.07;
+    const inflow = ranked.filter(s => rankScore(s) >= inThr).slice(0, 4);
+    const outflow = ranked.slice().reverse().filter(s => rankScore(s) <= -inThr).slice(0, 3);
+    const smCard = s => {
+      const etf = etfFor(s);
+      const hHtml = '<div class="m2-sm-h"><span class="m2-sm-nm">' + escHtml(secHe(s)) + "</span>" + (etf ? '<span class="m2-etf">' + etf + "</span>" : "") + (!tfOn && isFresh(s) ? '<span class="m2-sm-fresh">🆕 כניסה טרייה</span>' : "") + "</div>";
+      if (tfOn) {
+        const c = agg[s].tf[tfOn], pct = c.n ? Math.round(100 * c.u / c.n) : 0;
+        return '<div class="m2-sm-card" data-m2sec="' + escAttr(s) + '" data-m2tf="' + tfOn + '" title="לחץ לרשימת המניות">' + hHtml +
+          '<div class="m2-sm-sc">▲' + c.u + ' <span class="m2-sm-d2">▼' + c.d + '</span></div>' +
+          '<div class="m2-sm-tfs">' + pct + "% מהסקטור בנר 2U · " + strongLab(sTf(s, tfOn)) + "</div></div>";
+      }
+      const hi = alignHi(s).map(tf => TF_HE[tf] || tf);
+      return '<div class="m2-sm-card' + (isFresh(s) ? " fresh" : "") + '" data-m2sec="' + escAttr(s) + '" data-m2tf="' + (alignHi(s)[0] || "D") + '" title="לחץ לרשימת המניות">' + hHtml +
+        '<div class="m2-sm-sc">+' + Math.round(score[s] * 100) + ' <span class="m2-sm-lab">' + strongLab(score[s]) + "</span></div>" +
+        '<div class="m2-sm-tfs">' + (hi.length ? "יישור זמנים גבוהים: " + hi.join(" · ") : "מונע ע\"י זמנים קצרים") + "</div></div>";
+    };
+    const smTtl = tfOn ? ("💰 לאן הכסף החכם נכנס · " + (TF_HE[tfOn] || tfOn)) : "💰 לאן הכסף החכם נכנס עכשיו";
+    const smSub = tfOn ? ("הסקטורים עם הכי הרבה 2U בטיימפריים ה" + (TF_HE[tfOn] || tfOn) + " — לחץ \"הכל\" לדירוג משוקלל-זמן.") : "דירוג סקטורים לפי זרימה כיוונית משוקללת-זמן — ככל שהזמנים הגבוהים (חודשי · רבעוני · שנתי) מיושרים ל-2U, כך הכניסה מוסדית יותר.";
+    // Per-TF leader → marked with a GLOWING box in the grid (Adi: replaces the old "מוביל לפי זמן" /
+    // "כסף יוצא מ" text rows — same signal, zero extra height). Only when that leader is net-bullish.
+    const tfLeadSec = {};
+    M2_TFS.forEach(tf => { let best = null, bv = 0; secs.forEach(s => { const c = agg[s].tf[tf]; if (!c.n) return; const net = c.u - c.d; if (net > 0 && net / c.n > bv) { bv = net / c.n; best = s; } }); if (best) tfLeadSec[tf] = best; });
+    const smBand = '<div class="m2-smart"><div class="m2-sm-ttl">' + smTtl + "</div>" +
+      '<div class="m2-sm-sub">' + smSub + "</div>" +
+      (inflow.length ? '<div class="m2-sm-grid">' + inflow.map(smCard).join("") + "</div>" : '<div class="muted" style="padding:8px 2px">אין כרגע זרימה כיוונית חיובית בולטת.</div>') +
+      "</div>";
+    const uni = '<div class="m2-uni">' +
+      '<button class="uni-btn' + (m2Uni === "sp" ? " on" : "") + '" data-m2uni="sp">S&P 500</button>' +
+      '<button class="uni-btn' + (m2Uni === "all" ? " on" : "") + '" data-m2uni="all">כל היקום</button></div>';
+    const tfbar = '<div class="m2-tfbar"><span class="m2-tfbar-lbl">סינון זמן:</span>' +
+      [["all", "הכל"]].concat(M2_TFS.map(tf => [tf, TF_HE[tf] || tf])).map(p => '<button class="m2-tfchip' + (m2Tf === p[0] ? " on" : "") + '" data-m2tfpick="' + p[0] + '">' + p[1] + "</button>").join("") + "</div>";
+    let v1k, v1v;
+    if (tfOn) { const L = ranked[0], c = L ? agg[L].tf[tfOn] : null; v1k = "המוביל ב" + (TF_HE[tfOn] || tfOn); v1v = L ? secHe(L) + " (▲" + c.u + ")" : "—"; }
+    else { v1k = "הכי הרבה 2'ים"; v1v = secHe(hot.sec) + " · " + (TF_HE[hot.tf] || hot.tf) + " (" + hot.n + ")"; }
+    const verdict = '<div class="cm-verdict m2-verdict">' +
+      '<span class="cmv-item"><span class="cmv-k">' + v1k + '</span><span class="cmv-v pos">' + v1v + "</span></span>" +
+      '<span class="cmv-item"><span class="cmv-k">הזמן הכי כיווני</span><span class="cmv-v">' + (TF_HE[bestTf] || bestTf) + "</span></span>" +
+      '<span class="cmv-item"><span class="cmv-k">מאזן השוק</span><span class="cmv-v">▲' + totU + " / ▼" + totD + " · " + leanTxt + "</span></span></div>";
+    const cell = (c, tf, sec) => {
+      const tot = c.u + c.d, net = c.u - c.d;
+      const key = net > 0 ? "pos" : net < 0 ? "neg" : "flat";
+      const act = c.n ? tot / c.n : 0, sat = tot ? Math.min(0.5, 0.08 + act * 0.6) : 0;
+      const bg = tot ? "background:rgba(" + M2_RGB[key] + "," + sat.toFixed(3) + ")" : "";
+      const colCls = tfOn ? (tf === tfOn ? " m2-col-on" : " m2-col-dim") : "";
+      const leadCls = tfLeadSec[tf] === sec ? " m2-lead" : "";
+      return '<td class="m2-cell' + (net > 0 ? " pos" : net < 0 ? " neg" : "") + colCls + leadCls + '" data-m2sec="' + escAttr(sec) + '" data-m2tf="' + tf + '" style="' + bg + '" title="' + escAttr(secHe(sec) + " · " + (TF_HE[tf] || tf) + (tfLeadSec[tf] === sec ? " — ✨ המוביל בטיימפריים זה" : "") + " — לחץ לרשימת המניות") + '">' +
+        (tot ? '<span class="m2-u">▲' + c.u + '</span><span class="m2-d">▼' + c.d + "</span>" : '<span class="m2-z">—</span>') + "</td>";
+    };
+    const thead = '<tr><th class="m2-sec-h">סקטור</th>' + M2_TFS.map(tf => '<th' + (tfOn && tf === tfOn ? ' class="m2-col-on"' : "") + ">" + (TF_HE[tf] || tf) + "</th>").join("") + "</tr>";
+    const body = ranked.map(s => {
+      const o = agg[s], etf = etfFor(s), rc = score[s] >= 0.07 ? " m2-in" : score[s] <= -0.07 ? " m2-out" : "";
+      return "<tr" + (rc ? ' class="' + rc.trim() + '"' : "") + '><td class="m2-sec"><span class="m2-secnm">' + escHtml(secHe(s)) + "</span>" + (etf ? '<span class="m2-etf">' + etf + "</span>" : "") + "</td>" +
+        M2_TFS.map(tf => cell(o.tf[tf], tf, s)).join("") + "</tr>";
+    }).join("");
+    const legend = '<div class="m2-legend"><span><b class="m2-u">▲</b> 2U שורי</span><span><b class="m2-d">▼</b> 2D דובי</span><span>עוצמת צבע התא = איזה חלק מהסקטור בנר כיווני</span><span>✨ מסגרת זוהרת = הסקטור המוביל בטיימפריים</span><span class="muted">' + rows.length + " מניות · לחץ על תא לרשימה</span></div>";
+    return head + '<div class="panel m2-panel"><div class="m2-head"><h3>🗺️ מפת ה-2\'ים · סקטור × טיימפריים</h3>' + uni + "</div>" +
+      tfbar + smBand + verdict +
+      '<div class="tablewrap"><table class="cmap-table m2-table">' + thead + body + "</table></div>" +
+      legend + "</div>";
+  }
+  function wireMost2s() {
+    document.querySelectorAll("[data-m2uni]").forEach(b => b.onclick = () => { const u = b.dataset.m2uni; if (u === m2Uni) return; m2Uni = u; reRender(); });
+    document.querySelectorAll("[data-m2tfpick]").forEach(b => b.onclick = () => { const t = b.dataset.m2tfpick; if (t === m2Tf) return; m2Tf = t; reRender(); });
+    document.querySelectorAll(".m2-cell[data-m2sec], .m2-sm-card[data-m2sec], .m2-sm-ochip[data-m2sec], .m2-tflead-item[data-m2sec]").forEach(el => el.onclick = () => _m2Drill(el.dataset.m2sec, el.dataset.m2tf));
+  }
+  function _m2Drill(sec, tf) {
+    const list = m2Rows().filter(r => r.sec === sec && ((r[tf] || {}).t === "2U" || (r[tf] || {}).t === "2D"));
+    if (!list.length) return;
+    const up = list.filter(r => (r[tf] || {}).t === "2U"), dn = list.filter(r => (r[tf] || {}).t === "2D");
+    const line = r => {
+      const chg = (r.c != null ? r.c : (r.tech && r.tech.chg != null ? r.tech.chg : 0)), cls = chg >= 0 ? "pos" : "neg";
+      return '<div class="m2-dr-row" data-chart="' + escAttr(r.s) + '" data-tf="' + tf + '"><span class="m2-dr-sym">' + escHtml(r.s) + '</span><span class="m2-dr-nm muted">' + escHtml(r.name || r.nm || "") + '</span><span class="m2-dr-chg ' + cls + '">' + (chg >= 0 ? "+" : "") + (+chg).toFixed(2) + "%</span></div>";
+    };
+    const syms = arr => arr.map(r => r.s).join(", ");
+    const sect = (arr, lbl, cls) => arr.length ? '<div class="m2-dr-sec"><div class="m2-dr-h ' + cls + '">' + lbl + " · " + arr.length +
+      '<button class="m2-cpy" data-cpy="' + escAttr(syms(arr)) + '" title="העתק את הטיקרים">📋</button></div>' + arr.map(line).join("") + "</div>" : "";
+    const body = '<div class="drill-bar"><button class="btn ghost" id="m2Grid" style="font-size:12px;font-weight:600">📊 תצוגת גרפים</button>' +
+      '<button class="btn ghost" data-cpy="' + escAttr(syms(list)) + '" style="font-size:12px;font-weight:600">📋 העתק טיקרים (' + list.length + ')</button></div>' +
+      '<div class="m2-drill">' + sect(up, "🔼 2U שורי", "pos") + sect(dn, "🔽 2D דובי", "neg") + "</div>";
+    modal("2️⃣ " + secHe(sec) + " · " + (TF_HE[tf] || tf) + " · " + list.length + " מניות בנר 2", body, "m2drill");
+    const gb = document.getElementById("m2Grid");
+    if (gb) gb.onclick = () => openChartGrid(list.map(r => ({ sym: r.s, sector: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0) || 0, chg: r.c || (r.tech && r.tech.chg != null ? r.tech.chg : 0) })), { title: secHe(sec) + " · " + (TF_HE[tf] || tf) + " · 2'ים" });
+    (document.getElementById("pgModal") || document).querySelectorAll("[data-cpy]").forEach(b => b.onclick = (ev) => {
+      ev.stopPropagation();
+      const txt = b.getAttribute("data-cpy") || "", n = txt ? txt.split(",").length : 0;
+      copyToClipboard(txt, () => { snToast("📋 הועתקו " + n + " טיקרים"); const o = b.innerHTML; b.innerHTML = "✓ הועתק"; setTimeout(() => { b.innerHTML = o; }, 1500); });
+    });
+  }
+
+  const PAGES = {
+    // home: { render: renderHome, wire: wireHome },   // "מרכז בקרה" retired 2026-11-01 — nav removed, default landing is now סקירת שוק (market). renderHome/wireHome kept for easy revival.
+    market: { render: renderMarket, wire: wireMarket },
+    pulse: { render: renderPulse, wire: wirePulse },
+    analytics: { render: renderAnalytics, wire: wireAnalytics },
+    draw: { render: renderDrawBoard, wire: wireDrawBoard },
+    today: { render: renderToday, wire: wireToday },
+    sp500: { render: renderSp500, wire: wireSp500 },
+    scanner: { render: renderScanner, wire: wireScanner },
+    most2s: { render: renderMost2s, wire: wireMost2s },
+    sectors: { render: renderSectors, wire: wireSectors },
+    breadth: { render: renderBreadth, wire: wireBreadth },
+    gappers: { render: renderGappers, wire: wireGappers },
+    favorites: { render: renderFavorites, wire: wireFavorites },
+    // Learn content moved to Strat School (school.stratninja.win). The old nav tab already links there;
+    // this redirects any lingering #learn bookmark/link to the school instead of the stale in-app page.
+    learn: { render: function () { try { window.location.replace("https://school.stratninja.win"); } catch (e) { try { window.location.href = "https://school.stratninja.win"; } catch (e2) {} } return '<div class="page-head"><h1>🎓 עובר ל-Strat School…</h1><div class="sub">תוכן הלימוד עבר לבית הספר. אם לא הועברת אוטומטית — <a href="https://school.stratninja.win" target="_blank" rel="noopener">כניסה ל-Strat School →</a></div></div>'; }, wire: function () {} },
+    news: { render: renderNews, wire: wireNews },
+    community: { render: renderCommunity, wire: wireCommunity },
+    giveaway: { render: function () { return window.Giveaway ? window.Giveaway.render() : '<div class="page-head"><h1>🎁 הגרלות</h1></div>'; }, wire: function () { if (window.Giveaway) window.Giveaway.wire(); } },
+    live: { render: function () { return window.Live ? window.Live.render() : '<div class="page-head"><h1>🔴 שידור חי</h1></div>'; }, wire: function () { if (window.Live) window.Live.wire(); } },
+    vods: { render: function () { return window.LiveVods ? window.LiveVods.render() : '<div class="page-head"><h1>📼 שידורים קודמים</h1></div>'; }, wire: function () { if (window.LiveVods) window.LiveVods.wire(); } },
+    // alerts: { render: renderAlerts, wire: wireAlerts },  // hidden per Adi 2026-07-05; re-enable on request
+  };
+  const state = { page: "market" };
+
+  function reRender() {
+    const p = PAGES[state.page]; if (!p) return;
+    const _sy = window.scrollY || window.pageYOffset || 0;   // preserve scroll across in-place re-renders (e.g. changing a filter)
+    try { const _ob = document.querySelector(".fpop.open .fpop-body"); _fbarScroll = _ob ? _ob.scrollTop : 0; } catch (e) { _fbarScroll = 0; }   // preserve the open filter-popover's inner scroll
+    try { document.body.setAttribute("data-page", state.page === "pulse" ? (pulseTab || "market") : state.page); } catch (e) {}   // pulse → expose the active sub-tab so per-page CSS (compaction) still applies
+    $("#page").innerHTML = guideSection(state.page) + p.render();   // guide-video area at the TOP (most viewers don't scroll down)
+    if (p.wire) p.wire();
+    wireStars($("#page"));
+    wireCharts($("#page"));
+    wireNinja($("#page"));
+    runFlicker();   // Koyfin-style subtle flash on any value that changed since the last render
+    if (_sy) { try { window.scrollTo(0, _sy); } catch (e) {} }   // stay where the user was (filtering shouldn't jump to top)
+  }
+
+  // Koyfin-style tick flash: after a render, any [data-flick] cell whose value changed vs the last
+  // render gets a brief green/red background that fades over ~1s. Keys are stable per logical cell, so
+  // the value map survives full re-renders; first sighting never flashes (no phantom flash on page load).
+  const _flickLast = Object.create(null);
+  let _flickReady = false;   // don't flash on the very first paint after (re)load
+  function runFlicker() {
+    const nodes = document.querySelectorAll("[data-flick]");   // #page tables + the persistent top ticker
+    nodes.forEach(el => {
+      const key = el.getAttribute("data-flick");
+      const txt = (el.textContent || "").trim();
+      const prev = _flickLast[key];
+      if (_flickReady && prev !== undefined && prev !== txt) {
+        const nv = parseFloat(txt.replace(/[^0-9.\-]/g, "")), pv = parseFloat(prev.replace(/[^0-9.\-]/g, ""));
+        const dir = (!isNaN(nv) && !isNaN(pv) && nv !== pv) ? (nv > pv ? "up" : "dn") : "up";
+        el.classList.remove("flick-up", "flick-dn");
+        void el.offsetWidth;   // restart the animation on a reused node
+        el.classList.add(dir === "dn" ? "flick-dn" : "flick-up");
+      }
+      _flickLast[key] = txt;
+    });
+    _flickReady = true;
+  }
+
+  function setPage(name) {
+    // market-overview + the sector-internals views all live inside one 'pulse' channel as tabs — route old names there
+    if (name === "market" || name === "sp500" || name === "today" || name === "most2s" || name === "sectors" || name === "breadth") { pulseTab = name; name = "pulse"; }
+    // LEAVING the LIVE page → stop the Cloudflare player so there is no background video/audio. Must run
+    // for EVERY destination (incl. the journal, which only hides #page, and the guest→login path below).
+    if (state.page === "live" && name !== "live" && window.Live && window.Live.teardown) window.Live.teardown();
+    if (state.page === "vods" && name !== "vods" && window.LiveVods && window.LiveVods.teardown) window.LiveVods.teardown();   // stop VOD playback on leave
+    // PUBLIC LIVE guest (not logged in, entered via /live): may view ONLY the live page — any other
+    // page keeps its login gate. This never affects logged-in users (flag is false for them).
+    if (window.__snGuestLive && name !== "live") {
+      if (window.__snShowLanding) window.__snShowLanding();
+      else if (window.SNAuth && SNAuth.signInWithGoogle) SNAuth.signInWithGoogle();
+      return;
+    }
+    document.querySelectorAll(".side-nav a").forEach(a => a.classList.toggle("active", a.dataset.page === name));
+    const jc = $("#journalContainer"), pg = $("#page");
+    if (name === "journal") { pg.classList.add("hidden"); jc.classList.remove("hidden"); state.page = "journal"; if (window.Journal && window.Journal.onEnter) window.Journal.onEnter(); }
+    else { jc.classList.add("hidden"); pg.classList.remove("hidden"); state.page = PAGES[name] ? name : "market"; reRender(); try { window.scrollTo(0, 0); } catch (e) {} }   // navigating to a page starts at the top
+    if (state.page === "scanner" || state.page === "market" || state.page === "pulse" || state.page === "most2s") {
+      loadScanner();
+      if (state.page === "pulse") { loadLive(); loadFlow(); loadBreadth(); }   // whichever tab is active may need these
+    }
+    // on any chart-capable page, warm the TradingView library in the background so grids open fast
+    if (["scanner", "pulse", "gappers", "favorites", "market"].indexOf(state.page) >= 0) warmTradingView();
+    // remember the exact view — for the pulse channel save the active SUB-TAB so a refresh returns to it
+    try { localStorage.setItem("sn_last_page", state.page === "pulse" ? pulseTab : state.page); } catch (e) {}
+    snTrack("page:" + state.page);   // usage analytics — which pages get visited
+  }
+  window.setPageExternal = setPage;
+
+  // read a big PUBLIC Supabase row through the Vercel edge-cache proxy (/api/feed) so Supabase is hit
+  // ~once per cache window GLOBALLY, not once per visitor. Falls back to a DIRECT Supabase read on any
+  // failure (proxy down/cold/not-yet-deployed). Returns the PostgREST array [{data}] — same shape as direct.
+   async function snCachedFetch(table, id) {
+    try {
+      const r = await fetch("/api/feed?t=" + table + "&id=" + id);
+      if (r.ok) return await r.json();
+    } catch (e) {}
+    return null;
+  }
+  async function loadLive() {
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!cfg || !cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) return;
+      const j = await snCachedFetch("market_snapshot", "latest");
+      if (j && j[0] && j[0].data) { LIVE = j[0].data; _liveTs = Date.now(); updateTicker(); if (state.page === "pulse" || state.page === "market" || state.page === "today") reRender(); }
+    } catch (e) { /* keep demo data */ }
+  }
+
+  let _scanLoaded = false;
+  async function fetchScanner() {
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!cfg || !cfg.SUPABASE_URL) return;
+      const j = await snCachedFetch("scanner_data", "latest");
+      if (j && j[0] && j[0].data) {
+        SCAN = j[0].data;
+        // merge the SMA-flatness map (pushed as a separate "flat" row to keep the main feed small) by symbol
+        try {
+          const fj = await snCachedFetch("scanner_data", "flat");
+          const fm = fj && fj[0] && fj[0].data && fj[0].data.flat; if (fm && SCAN && SCAN.rows) SCAN.rows.forEach(row => { if (row.tech && fm[row.s]) row.tech.flat = fm[row.s]; });
+        } catch (e) { /* flat map optional — filter just shows "—" until present */ }
+        applyLivePrices();     // overlay the live price/% onto the fresh scan (Strat cells untouched)
+        if (state.page === "pulse" || state.page === "scanner" || state.page === "sectors" || state.page === "market" || state.page === "today" || state.page === "favorites") reRender();
+        checkPresetAlerts();   // fire preset × favorites alerts on fresh scan data
+      }
+    } catch (e) { /* keep demo */ }
+  }
+  async function loadScanner() {
+    if (_scanLoaded) return;
+    _scanLoaded = true;
+    fetchScanner();
+  }
+  // yesterday's snapshot — loaded lazily the first time the scanner "📅 אתמול" view is opened
+  let _ydayLoading = false, _ydayLoaded = false;
+  async function fetchYesterday() {
+    if (SCAN_YDAY || _ydayLoading) return;
+    _ydayLoading = true;
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!cfg || !cfg.SUPABASE_URL) return;
+      const j = await snCachedFetch("scanner_data", "yesterday");
+      if (j && j[0] && j[0].data) SCAN_YDAY = j[0].data;
+      _ydayLoaded = true;
+      if (state.page === "scanner" && scanView === "yday") reRender();
+    } catch (e) { /* stay on whatever the view shows */ } finally { _ydayLoading = false; }
+  }
+  // ---- live prices overlay (id='prices' feed, ~1-min fresh) — keeps the DISPLAYED price/% current
+  // without recomputing the heavy Strat analysis (bar types / FTFC stay on their 15-min cadence) ----
+  let PRICES = null;
+  // Live prices only from the RTH open onward. BEFORE the open the scanner shows the last COMPLETED
+  // daily session (yesterday) — so the displayed price/% must stay on that SAME session for coherence,
+  // instead of overlaying a pre-market live quote onto yesterday's Strat cells (per Adi). DST-safe (ET).
+  function _usMarketOpenYet() {
+    try {
+      const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const dow = et.getDay();                       // 0=Sun … 6=Sat
+      if (dow === 0 || dow === 6) return false;      // weekend → no live session, show last close
+      return (et.getHours() * 60 + et.getMinutes()) >= 9 * 60 + 30;   // 9:30 ET open → live from here through the ET day
+    } catch (e) { return true; }                     // TZ math failed → fail open (keep prior live behavior)
+  }
+  function applyLivePrices() {
+    // mutate row.p (price) + row.c (daily %), and stretch today's daily HIGH/LOW to include the live
+    // price so intraday extremes stay consistent (price can't exceed the recorded high / drop below the
+    // recorded low). Never touch the Strat bar types / ftfc / tech.
+    if (!_usMarketOpenYet()) return false;   // pre-market/overnight → keep yesterday's completed-session price/%
+    if (!PRICES || !(SCAN && SCAN.rows)) return false;
+    let changed = false;
+    SCAN.rows.forEach(row => {
+      const lp = PRICES[row.s];
+      if (lp && lp[0]) {
+        row.p = lp[0];
+        // guard a split / ticker-change discontinuity (e.g. PSKY = Paramount Skydance): the live % is
+        // computed vs a prev-close on a different (unadjusted) price scale than the live quote → an absurd
+        // ~100% reading. Trust the feed's own daily chg (from self-consistent aggregates) when they disagree wildly.
+        if (lp[1] != null && !(Math.abs(lp[1]) > 50 && row.c != null && Math.abs(lp[1] - row.c) > 40)) row.c = lp[1];
+        if (row.D) {   // keep the daily wick extremes in sync with the live price (for the period-open "wick touch" test)
+          if (row.D.hi != null && lp[0] > row.D.hi) row.D.hi = lp[0];
+          if (row.D.lo != null && lp[0] < row.D.lo) row.D.lo = lp[0];
+        }
+        changed = true;
+      }
+    });
+    return changed;
+  }
+  async function loadPrices() {
+    try {
+      const cfg = window.SN_CONFIG;
+      if (!cfg || !cfg.SUPABASE_URL) return;
+      const j = await snCachedFetch("market_snapshot", "prices");
+      const prices = j && j[0] && j[0].data && j[0].data.prices;
+      if (!prices || !Object.keys(prices).length) return;
+      PRICES = prices;
+      if (applyLivePrices() && (state.page === "pulse" || state.page === "scanner" || state.page === "sectors" || state.page === "market" || state.page === "today")) reRender();
+    } catch (e) { /* keep last */ }
+  }
+
+  // ---- backend outage banner ---------------------------------------------------
+  // When Supabase (the data backend) is unreachable — e.g. a provider outage / weekend
+  // maintenance that returns a 522 — the whole site can't load data. Instead of a blank
+  // or a raw error, show a friendly notice so users KNOW it's a known issue, not their fault.
+  // This lives entirely in the client (served by Vercel), so it works even when Supabase is 100% down.
+  let _beFails = 0, _beDown = false;
+  function _snBackendBanner(show) {
+    let el = document.getElementById("sn-backend-banner");
+    if (show) {
+      if (!el) {
+        el = document.createElement("div");
+        el.id = "sn-backend-banner";
+        el.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:99999;background:#7a1f24;color:#fff;" +
+          "padding:10px 16px;font-size:14px;line-height:1.5;text-align:center;box-shadow:0 2px 12px rgba(0,0,0,.4);" +
+          "font-family:system-ui,'Segoe UI',Arial,sans-serif;direction:rtl");
+        el.innerHTML = "⚠️ <b>תקלה זמנית בשרת הנתונים</b> — ייתכן שהאתר לא מציג נתונים מעודכנים כרגע " +
+          "(תחזוקה/תקלה אצל ספק הנתונים, קורה לרוב בסופי שבוע). אנחנו מודעים ועובדים על זה · " +
+          "<button id='sn-backend-retry' style='background:#fff;color:#7a1f24;border:0;border-radius:7px;" +
+          "padding:4px 12px;font-weight:700;cursor:pointer;margin-inline-start:6px'>נסה שוב</button>";
+        document.body.appendChild(el);
+        const rb = el.querySelector("#sn-backend-retry");
+        if (rb) rb.onclick = () => { rb.textContent = "בודק…"; _snBackendHealthTick(); };
+      }
+      el.style.display = "";
+    } else if (el) {
+      el.remove();
+    }
+  }
+  async function _snBackendHealthTick() {
+    const cfg = window.SN_CONFIG;
+    if (!cfg || !cfg.SUPABASE_URL) return;
+    let ok = false;
+    try {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), 9000);
+      const r = await fetch(cfg.SUPABASE_URL + "/rest/v1/market_snapshot?select=id&limit=1",
+        { cache: "no-store", signal: ctrl.signal, headers: { apikey: cfg.SUPABASE_ANON_KEY, Authorization: "Bearer " + cfg.SUPABASE_ANON_KEY } });
+      clearTimeout(to);
+      ok = r.ok;
+    } catch (e) { ok = false; }
+    if (ok) {
+      _beFails = 0;
+      if (_beDown) { _beDown = false; _snBackendBanner(false); try { loadScan(); loadPrices(); } catch (e) {} }  // recovered → refetch in place
+    } else {
+      _beFails++;
+      if (_beFails >= 2 && !_beDown) { _beDown = true; _snBackendBanner(true); }   // 2 strikes → it's a real outage, not a blip
+    }
+  }
+
+  // ---- lightweight usage analytics ---------------------------------------------
+  // Records which features/pages logged-in users actually use, so the admin dashboard can
+  // show what's popular and where to improve. Batched (flush every ~20s / on page-hide) so it
+  // never adds per-click load on Supabase. Logged-in only; failures are swallowed (never block UI).
+  const _trackQ = [];
+  let _trackTimer = null; const _trackLast = {};
+  function snTrack(event, meta) {
+    try {
+      if (!event || !(window.SNAuth && SNAuth.user && SNAuth.user())) return;   // logged-in users only
+      const now = Date.now();
+      if (_trackLast[event] && now - _trackLast[event] < 1500) return;          // de-dupe rapid repeats
+      _trackLast[event] = now;
+      _trackQ.push({ event: String(event).slice(0, 80), page: state.page || "", ts: new Date().toISOString(), meta: meta || null });
+      if (_trackQ.length >= 25) _flushTrack();
+      else if (!_trackTimer) _trackTimer = setTimeout(_flushTrack, 20000);
+    } catch (e) {}
+  }
+  async function _flushTrack() {
+    clearTimeout(_trackTimer); _trackTimer = null;
+    if (!_trackQ.length) return;
+    let client = null, uid = null, email = null;
+    try { client = window.SNAuth && SNAuth.getClient && SNAuth.getClient(); const u = SNAuth.user(); uid = u && u.id; email = (u && u.email) || null; } catch (e) {}
+    if (!client || !uid) { _trackQ.length = 0; return; }
+    // stash the email in meta (jsonb) so the admin usage matrix can show names instead of raw ids — no schema change
+    const batch = _trackQ.splice(0, _trackQ.length).map(e => ({ user_id: uid, event: e.event, page: e.page, ts: e.ts, meta: Object.assign({}, e.meta || {}, email ? { email: email } : {}) }));
+    try { await client.from("usage_events").insert(batch); } catch (e) { /* table missing / offline → drop silently */ }
+  }
+  window.snTrack = snTrack;                                          // so other modules (journal) can log too
+  window.snToast = snToast;                                          // so other modules (giveaway) can toast too
+  document.addEventListener("visibilitychange", () => { if (document.hidden) _flushTrack(); });
+  window.addEventListener("pagehide", _flushTrack);
+  // curated feature-click tracking (page views are logged in setPage). Names stay stable for the dashboard.
+  const _TRACK_CLICKS = [
+    ["[data-shalert]", "click:share_alert"], ["[data-jchart]", "click:open_chart"], ["[data-chart]", "click:open_chart"],
+    ["#favRefresh", "click:fav_refresh"], ["#favGrid", "click:fav_chartgrid"], ["#favCopy", "click:fav_copy"],
+    ["#openPxRefresh", "click:journal_refresh_prices"], ["#openPosGrid", "click:journal_chartgrid"],
+    ["#sideNews", "click:news"], ["#sideCam", "click:share_screen"], ["#sideRequest", "click:request_form"],
+    ["#sideSuggest", "click:suggest_ticker"], ["#sideAlerts", "click:alerts_center"], ["[data-favpreset]", "click:fav_preset_filter"],
+    [".fav-pfilter-chip", "click:fav_preset_filter"], ["[data-savepreset]", "click:preset_save"],
+  ];
+  function _wireTrackClicks() {
+    document.addEventListener("click", e => {
+      try {
+        if (!e.target || !e.target.closest) return;
+        for (let i = 0; i < _TRACK_CLICKS.length; i++) { if (e.target.closest(_TRACK_CLICKS[i][0])) { snTrack(_TRACK_CLICKS[i][1]); break; } }
+      } catch (err) {}
+    }, true);
+  }
+
+  // ---- Hebrew news feed (opens from the sidebar; not a permanent floating box) ----
+  async function loadFlow() {
+    try {
+      const cfg = window.SN_CONFIG; if (!cfg || !cfg.SUPABASE_URL) return;
+      const j = await snCachedFetch("market_snapshot", "flow");
+      if (j && j[0] && j[0].data) { FLOW = j[0].data; if (state.page === "today") reRender(); }
+    } catch (e) {}
+  }
+  let NEWS = null, _newsOpen = false;
+  try { _newsOpen = localStorage.getItem("sn_news_open") === "1"; } catch (e) {}
+  async function loadNews() {
+    try {
+      const cfg = window.SN_CONFIG; if (!cfg || !cfg.SUPABASE_URL) return;
+      const j = await snCachedFetch("market_snapshot", "news");
+      if (j && j[0] && j[0].data) { NEWS = j[0].data; if (_newsOpen) renderNewsFeed(); if (state.page === "news") reRender(); updateNewsNav(); }
+    } catch (e) {}
+  }
+  function updateNewsNav() {
+    const b = document.getElementById("sideNews"); if (!b) return;
+    b.classList.toggle("active", _newsOpen);
+  }
+  function toggleNews() {
+    _newsOpen = !_newsOpen;
+    try { localStorage.setItem("sn_news_open", _newsOpen ? "1" : "0"); } catch (e) {}
+    if (_newsOpen) { if (!NEWS) loadNews(); else renderNewsFeed(); }
+    else { const box = document.getElementById("newsFeed"); if (box) box.classList.add("hidden"); }
+    updateNewsNav();
+  }
+  function newsSession() {
+    try {
+      const et = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+      const m = et.getHours() * 60 + et.getMinutes(), wd = et.getDay();
+      if (wd === 0 || wd === 6) return "🔴 השוק סגור (סופ״ש)";
+      if (m >= 240 && m < 570) return "🟡 פרה-מרקט";
+      if (m >= 570 && m < 960) return "🟢 שוק פתוח";
+      if (m >= 960 && m < 1200) return "🟡 אפטר-מרקט";
+      return "🔴 השוק סגור";
+    } catch (e) { return ""; }
+  }
+  function timeAgoHe(iso) {
+    if (!iso) return "";
+    const d = new Date(iso.length <= 19 ? iso + "Z" : iso), s = (Date.now() - d.getTime()) / 1000;
+    if (isNaN(s)) return "";
+    if (s < 90) return "עכשיו";
+    if (s < 3600) return "לפני " + Math.round(s / 60) + " ד׳";
+    if (s < 86400) return "לפני " + Math.round(s / 3600) + " ש׳";
+    return "לפני " + Math.round(s / 86400) + " י׳";
+  }
+  function renderNewsFeed() {
+    const box = document.getElementById("newsFeed");
+    if (!box || !NEWS) return;
+    box.classList.remove("hidden");
+    box.className = "news-feed";
+    const list = (NEWS.cards || []).map(c =>
+      '<a class="nf-item" href="' + escAttr(c.url || "#") + '" target="_blank" rel="noopener">' +
+      '<div class="nf-he">' + (c.he || c.en || "") + "</div>" +
+      '<div class="nf-meta">' + ((c.tk || []).slice(0, 3).map(t => '<span class="nf-tk">' + escAttr(t) + "</span>").join("")) +
+      '<span class="nf-src">' + escAttr(c.pub || "") + "</span><span class=\"nf-time\">" + timeAgoHe(c.ts) + "</span></div></a>").join("");
+    box.innerHTML =
+      '<div class="nf-head"><span class="nf-title">🗞️ חדשות בזמן אמת</span>' +
+      '<button class="nf-min" id="nfClose" title="סגור">✕</button></div>' +
+      '<a class="nf-cta" href="https://www.patreon.com/14520383/join" target="_blank" rel="noopener">' +
+        '<span class="nf-cta-ico">🎓</span>' +
+        '<span class="nf-cta-txt"><b>רוצה להבין את הגרפים טוב יותר?</b><span>הצטרף לקורס ולקהילת StratNinja →</span></span>' +
+      "</a>" +
+      '<div class="nf-status">' + newsSession() + " · עודכן " + timeAgoHe(NEWS.updated) + "</div>" +
+      '<div class="nf-list">' + (list || '<div class="muted" style="padding:12px">אין חדשות כרגע.</div>') + "</div>";
+    const cl = document.getElementById("nfClose"); if (cl) cl.onclick = () => toggleNews();
+  }
+
+  // ===== NEWS as a full PAGE (mockup): AI summary + earnings + sentiment feed + economic calendar =====
+  // Consumes server fields when present (NEWS.summary / card.sent / NEWS.earnings / NEWS.calendar),
+  // with graceful client-side fallbacks (keyword sentiment + a LIVE-data summary) so it's useful either way.
+  function _newsSent(c) {
+    if (c.sent) return c.sent;   // server-provided wins
+    const t = ((c.he || "") + " " + (c.en || "")).toLowerCase();
+    if (/קופ|מזנק|זינוק|מרקיע|עליי|עולה|שיא|חזק|רווח|beat|surge|soar|jump|rall|rise|gain|record|upgrade|tops|strong/.test(t)) return "bull";
+    if (/צונח|נופל|צולל|ירידה|יורד|חולש|אזהר|הפסד|קריס|miss|plunge|fall|drop|sink|slump|warn|cut|downgrade|tumble|slide|weak/.test(t)) return "bear";
+    return "neu";
+  }
+  function _newsClientSummary() {
+    const idx = (window.LIVE && LIVE.indices) || [], get = s => idx.find(x => x.sym === s);
+    const spy = get("SPY"), vixo = (window.LIVE && LIVE.vix) || {}, br = (window.LIVE && LIVE.breadth) || {};
+    if (!spy) return "טוען נתוני שוק…";
+    const dir = spy.chg > 0.15 ? "בעליות קלות" : spy.chg < -0.15 ? "בירידות" : "ללא כיוון ברור";
+    const vixTxt = (vixo.chg != null) ? (vixo.chg > 0 ? " ה-VIX עולה — עצבנות גוברת בשוק." : " ה-VIX יורד — רוגע יחסי.") : "";
+    const brTxt = (br.above != null && br.total) ? (" רוחב השוק: " + Math.round(100 * br.above / br.total) + "% מהמניות מעל הפתיחה.") : "";
+    return "המדדים נסחרים " + dir + "." + vixTxt + brTxt;
+  }
+  function _newsClientBullets() {
+    const secs = ((window.LIVE && LIVE.sectors) || []).filter(s => s.chg != null).slice().sort((a, b) => b.chg - a.chg);
+    if (!secs.length) return [];
+    const out = [], top = secs[0], bot = secs[secs.length - 1];
+    if (top && top.chg > 0) out.push("הכסף זורם ל" + secHe(top.name) + " (" + (top.chg >= 0 ? "+" : "") + top.chg.toFixed(2) + "%).");
+    if (bot && bot.chg < 0) out.push("חולשה בסקטור " + secHe(bot.name) + " (" + bot.chg.toFixed(2) + "%).");
+    return out;
+  }
+  function _newsSummaryHtml(n) {
+    const idx = (window.LIVE && LIVE.indices) || [], get = s => idx.find(x => x.sym === s), vixo = (window.LIVE && LIVE.vix) || {};
+    const chip = (s, v) => (v != null) ? '<span>' + s + '<b>' + v + "</b></span>" : "";
+    const spy = get("SPY"), qqq = get("QQQ"), dia = get("DIA");
+    const ground = '<div class="ai-gt"><span class="lab">נתוני אמת:</span>' +
+      (spy ? chip("SPY", spy.price) : "") + (qqq ? chip("QQQ", qqq.price) : "") + (dia ? chip("DIA", dia.price) : "") +
+      (vixo.level != null ? chip("VIX", vixo.level) : "") + "</div>";
+    const s = n.summary; let text, bullets;
+    if (s && s.text) { text = escHtml(s.text); bullets = (s.bullets || []).map(escHtml); }
+    else { text = escHtml(_newsClientSummary()); bullets = _newsClientBullets().map(escHtml); }
+    const pts = bullets.length ? '<div class="ai-pts">' + bullets.map(b => '<div class="ai-pt"><span class="b">▸</span><span>' + b + "</span></div>").join("") + "</div>" : "";
+    return '<section class="ai-card"><div class="ai-h"><span class="ai-ic">🤖</span><h2>סיכום השוק</h2><span class="ai-tag">⚡ AI</span></div>' +
+      "<p>" + text + "</p>" + pts + ground + "</section>";
+  }
+  function _newsEarningsHtml(earn) {
+    if (!earn || !earn.length) return "";
+    const cards = earn.slice(0, 8).map(e => {
+      const beat = e.beat !== false, rxCls = (e.rx != null && e.rx < 0) ? "down" : "up";
+      const rxTxt = (e.rx != null) ? ((e.rx >= 0 ? "+" : "") + e.rx + "%") : "";
+      return '<div class="ecard"><div class="etop"><span class="esym">' + escHtml(e.sym || "") + '</span><span class="ebm ' + (beat ? "beat" : "miss") + '">' + (beat ? "BEAT ▲" : "MISS ▼") + "</span></div>" +
+        (rxTxt ? '<div class="erx ' + rxCls + '">' + rxTxt + "</div>" : "") +
+        (e.eps != null ? '<div class="erow"><span class="el">EPS</span><span class="ev">' + escHtml(String(e.eps)) + (e.epsEst != null ? ' <span class="es">/ ' + escHtml(String(e.epsEst)) + "</span>" : "") + "</span></div>" : "") +
+        (e.rev ? '<div class="erow"><span class="el">הכנסות</span><span class="ev">' + escHtml(String(e.rev)) + "</span></div>" : "") +
+        (e.yoy != null ? '<div class="erow"><span class="el">צמיחה YoY</span><span class="ev pos">' + (e.yoy >= 0 ? "+" : "") + e.yoy + "%</span></div>" : "") + "</div>";
+    }).join("");
+    return '<section class="earn-sec"><div class="earn-head"><h2>📊 דיווחי תוצאות</h2><span class="ec">הדוחות האחרונים</span><span class="eline"></span></div><div class="earn-grid num">' + cards + "</div></section>";
+  }
+  function _newsFeedHtml(cards) {
+    if (!cards.length) return '<div class="muted" style="padding:16px">אין חדשות כרגע.</div>';
+    return cards.map(c => {
+      const sent = _newsSent(c), sc = sent === "bull" ? "bull" : sent === "bear" ? "bear" : "neu";
+      const pill = sent === "bull" ? '<span class="npill bull">▲ חיובי</span>' : sent === "bear" ? '<span class="npill bear">▼ שלילי</span>' : '<span class="npill neu">● ניטרלי</span>';
+      const ticks = (c.tk || []).slice(0, 4).map(t => '<span class="ntk">' + escAttr(t) + "</span>").join("");
+      const src = (c.pub ? escHtml(c.pub) : "") + (c.ts ? (c.pub ? " · " : "") + timeAgoHe(c.ts) : "");
+      return '<a class="nart ' + sc + '" href="' + escAttr(c.url || "#") + '" target="_blank" rel="noopener"><span class="nsent"></span><div class="nbody">' +
+        '<div class="nmeta">' + pill + '<span class="nsrc">' + src + "</span></div>" +
+        "<h3>" + escHtml(c.he || c.en || "") + "</h3>" +
+        (ticks ? '<div class="nticks">' + ticks + "</div>" : "") + "</div></a>";
+    }).join("");
+  }
+  function _newsCalHtml(cal) {
+    if (!cal || !cal.length) return "";
+    const evs = cal.slice(0, 10).map(e => {
+      const imp = e.imp === "h" ? "h" : e.imp === "m" ? "m" : "l";
+      return '<div class="nev"><span class="nevt num">' + escHtml(e.time || "") + '</span><div class="nevm"><div class="nevn">' + escHtml(e.name || "") + "</div>" +
+        (e.note ? '<div class="nevd">' + escHtml(e.note) + "</div>" : "") + '</div><span class="nevimp ' + imp + '"><i></i><i></i><i></i></span></div>';
+    }).join("");
+    return '<aside class="news-cal"><div class="nch"><h2>יומן כלכלי</h2><span class="ncline"></span></div>' + evs + "</aside>";
+  }
+  function renderNews() {
+    if (!NEWS) loadNews();   // async; loadNews re-renders this page when data arrives
+    const n = NEWS || {};
+    const head = '<div class="page-head"><h1>🗞️ חדשות</h1><div class="sub">מה שחשוב לדעת היום — סיכום שוק, סנטימנט ואירועים כלכליים.</div></div>';
+    const status = n.updated ? '<div class="news-status">' + newsSession() + " · עודכן " + timeAgoHe(n.updated) + "</div>" : "";
+    const calHtml = _newsCalHtml(n.calendar);
+    const cols = '<div class="news-cols' + (calHtml ? "" : " nocal") + '"><div class="news-feedcol">' + _newsFeedHtml(n.cards || []) + "</div>" + calHtml + "</div>";
+    return head + status + _newsSummaryHtml(n) + _newsEarningsHtml(n.earnings) + cols;
+  }
+  function wireNews() { if (!NEWS) loadNews(); }
+
+  // ---- persistent live ticker (SPY / QQQ / BTC) ----
+  let _btc = null, _btcTs = 0, _liveTs = 0;
+  async function fetchBtc() {
+    if (_btc && Date.now() - _btcTs < 45000) return _btc;
+    try {
+      const r = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true");
+      if (r.ok) { const j = await r.json(); if (j && j.bitcoin) { _btc = { price: j.bitcoin.usd, chg: j.bitcoin.usd_24h_change }; _btcTs = Date.now(); } }
+    } catch (e) { /* keep last */ }
+    return _btc;
+  }
+  function tickerItem(sym, name, price, chg, chartSym, noDollar) {
+    const c = chg == null ? 0 : chg;
+    // VIX: rising volatility is "bad" (red), falling is "good" (green) — invert the color
+    const cls = noDollar ? (c > 0 ? "neg" : c < 0 ? "pos" : "zero") : (c > 0 ? "pos" : c < 0 ? "neg" : "zero");
+    const cs = (c >= 0 ? "+" : "") + c.toFixed(2) + "%";
+    const pxTxt = price == null ? "—" : (noDollar ? "" : "$") + Number(price).toLocaleString("en-US", { maximumFractionDigits: price >= 1000 ? 0 : 2 });
+    return '<span class="lt-item tsym clickable" data-chart="' + (chartSym || sym) + '" data-tf="D" title="' + name + '"><b class="lt-sym">' + sym + '</b><span class="lt-px" data-flick="ltp-' + sym + '">' + pxTxt + '</span><span class="' + cls + '" data-flick="ltc-' + sym + '">' + cs + "</span></span>";
+  }
+  async function updateTicker() {
+    const el = document.getElementById("liveTicker");
+    if (!el) return;
+    const btc = await fetchBtc();                                  // await BEFORE reading LIVE
+    const idx = (LIVE && LIVE.indices) ? LIVE.indices : [];        // read LIVE after await → no race
+    const spy = idx.find(x => x.sym === "SPY"), qqq = idx.find(x => x.sym === "QQQ");
+    const dia = idx.find(x => x.sym === "DIA"), iwm = idx.find(x => x.sym === "IWM");
+    let html = "";
+    if (spy) html += tickerItem("SPY", "S&P 500", spy.price, spy.chg);
+    if (qqq) html += tickerItem("QQQ", "NASDAQ 100", qqq.price, qqq.chg);
+    if (dia) html += tickerItem("DIA", "Dow Jones", dia.price, dia.chg);
+    if (iwm) html += tickerItem("IWM", "Russell 2000", iwm.price, iwm.chg);
+    if (LIVE && LIVE.vix) html += tickerItem("VIX", "Volatility", LIVE.vix.level, LIVE.vix.chg, "TVC:VIX", true);
+    if (btc) html += tickerItem("BTC", "Bitcoin", btc.price, btc.chg, "BINANCE:BTCUSD");
+    html += '<span class="lt-sync" id="ltSync"></span>';
+    el.innerHTML = html || '<span class="muted" style="font-size:12px;padding-inline-start:4px">טוען מחירים…</span>';
+    updateSync();
+    wireCharts(el);
+    runFlicker();   // flash the top-strip prices when they move
+  }
+  // freshness + next-scan countdown at the end of the ticker (updated every second).
+  // Reflects the SERVER scan cadence — market snapshot every 3 min, ticker prices refreshed with it.
+  function updateSync() {
+    const s = document.getElementById("ltSync");
+    if (!s) return;
+    const now = Date.now();
+    const upd = (LIVE && LIVE.updated) ? new Date(LIVE.updated) : null;
+    if (!upd) { s.innerHTML = '<span class="lt-dot zero"></span><span class="muted">טוען נתונים…</span>'; return; }
+    const hhmm = d => d.toLocaleTimeString("he-IL", { hour: "2-digit", minute: "2-digit" });
+    const scanTime = (SCAN && SCAN.updated) ? new Date(SCAN.updated) : null;
+    const tip = "מחירי מדדים/שוק מתעדכנים כל 3 דקות · סורק המניות כל 15 דקות (בשעות המסחר בלבד)."
+      + " מדדים נכון ל-" + upd.toLocaleString("he-IL")
+      + (scanTime ? " · מחירי מניות (סורק) נכון ל-" + scanTime.toLocaleString("he-IL") : "");
+    const ageMin = (now - upd.getTime()) / 60000;
+    if (ageMin > 8) {   // stale — market closed / no recent scan
+      s.innerHTML = '<span class="lt-dot stale" title="' + tip + '"></span><span class="lt-fresh">🕐 נכון ל-' + hhmm(upd) + '</span><span class="muted lt-next">· השוק סגור</span>';
+      return;
+    }
+    const CAD = 3 * 60 * 1000;   // matches the */3 market-snapshot cron
+    const next = Math.ceil(now / CAD) * CAD - now;
+    const nextTxt = Math.floor(next / 60000) + ":" + String(Math.floor(next / 1000) % 60).padStart(2, "0");
+    s.innerHTML = '<span class="lt-dot pos" title="' + tip + '"></span><span class="lt-fresh">🕐 עודכן ' + hhmm(upd) + '</span><span class="muted lt-next">· סריקה הבאה ~' + nextTxt + '</span>';
+  }
+  window._snUpdateTicker = updateTicker;
+  // ================= onboarding GUIDE (guided tour) =================
+  const GUIDE_STEPS = [
+    { page: null, ico: "👋", t: "ברוך הבא ל-StratNinja", d: "סיור קצר שיראה לך איפה כל דבר ואיך משתמשים באתר. אפשר לדלג בכל רגע — ותמיד לפתוח שוב מהכפתור 📖 שליד הלוגו." },
+    { page: "market", ico: "📊", t: "סקירת שוק", d: "תמונת השוק במבט אחד: לאן נעים המדדים, ה-VIX (מדד הפחד), רוחב השוק, מפת הנרות של The Strat, הסקטורים החזקים/חלשים והגאפרים של היום." },
+    { page: "sp500", ico: "🗺️", t: "S&P 500", d: "מפת חום של 500 החברות הגדולות — לראות בבירור לאן הכסף זורם היום, לפי סקטורים וגודל חברה." },
+    { page: "sectors", ico: "🗂️", t: "סקטורים", d: "פירוק לכל סקטור ותת-סקטור: מי מוביל, מי בפיגור, ואילו מניות בולטות בכל אחד." },
+    { page: "today", ico: "🎯", t: "לאן הכסף הולך", d: "קיצור דרך: האחזקה הבולטת בכל סקטור והתנועות החשובות — מכאן כדאי להתחיל את הבדיקה היומית." },
+    { page: "scanner", ico: "🔍", t: "סורק העסקאות — הלב של המערכת", d: "מסננים מניות לפי תבניות Strat, טיימפריימים, IN FORCE ופילטרים טכניים. הטבלה ממוינת לפי העולות/יורדות של היום. אפשר לשמור <b>סריקות מועדפות (PRESETS)</b> ולקבל 🔔 התראה כשמניה מהמועדפים נכנסת לסריקה." },
+    { page: "favorites", ico: "⭐", t: "מועדפים", d: "סמן ★ על כל מניה כדי להוסיף אותה לרשימת המעקב האישית — נשמרת בענן ומסתנכרנת בין כל המכשירים שלך." },
+    { page: "journal", ico: "📅", t: "יומן מסחר", d: "העלה דוח מהברוקר או הזן עסקאות ידנית — ותקבל דשבורד רווח/הפסד, לוח שנה וסטטיסטיקות אישיות, בסגנון Tradezella." },
+    { page: null, ico: "🗞️", t: "חדשות, שיתוף והתראות לפלאפון", d: "בסרגל הצד: 🗞️ חדשות שוק מתורגמות לעברית, ו-📷 שיתוף מסך. בסורק אפשר להפעיל <b>התראות לפלאפון (Push)</b> שיקפיצו אותך גם כשהאתר סגור." },
+    { page: null, ico: "🚀", t: "זהו — אתה מוכן!", d: "תמיד אפשר לפתוח את המדריך שוב מהכפתור 📖 שליד הלוגו. בהצלחה במסחר!" },
+  ];
+  let _guideIdx = 0;
+  function guideRender() {
+    const s = GUIDE_STEPS[_guideIdx], n = GUIDE_STEPS.length;
+    const isLast = _guideIdx === n - 1, isFirst = _guideIdx === 0;
+    const dots = GUIDE_STEPS.map((_, i) => '<span class="gd-dot' + (i === _guideIdx ? " on" : "") + '"></span>').join("");
+    let el = document.getElementById("snGuide");
+    if (!el) { el = document.createElement("div"); el.id = "snGuide"; el.className = "guide-wrap"; document.body.appendChild(el); }
+    el.innerHTML =
+      '<div class="guide-card">' +
+        '<button class="guide-x" id="gdX" title="סגור">✕</button>' +
+        '<div class="gd-ico">' + s.ico + "</div>" +
+        '<div class="gd-step">שלב ' + (_guideIdx + 1) + " מתוך " + n + "</div>" +
+        '<h3 class="gd-title">' + s.t + "</h3>" +
+        '<p class="gd-text">' + s.d + "</p>" +
+        '<div class="gd-dots">' + dots + "</div>" +
+        '<div class="gd-nav">' +
+          (isFirst ? '<span></span>' : '<button class="btn ghost" id="gdPrev">הקודם</button>') +
+          '<button class="btn primary" id="gdNext">' + (isLast ? "סיום ✓" : "הבא →") + "</button>" +
+        "</div>" +
+      "</div>";
+    el.querySelector("#gdX").onclick = guideClose;
+    el.querySelector("#gdNext").onclick = () => { if (isLast) guideClose(); else guideGo(_guideIdx + 1); };
+    const pv = el.querySelector("#gdPrev"); if (pv) pv.onclick = () => guideGo(_guideIdx - 1);
+  }
+  function guideGo(i) {
+    _guideIdx = Math.max(0, Math.min(GUIDE_STEPS.length - 1, i));
+    const p = GUIDE_STEPS[_guideIdx].page;
+    if (p) setPage(p);
+    guideRender();
+  }
+  function guideStart() { _guideIdx = 0; const p = GUIDE_STEPS[0].page; if (p) setPage(p); guideRender(); }
+  function guideClose() { const el = document.getElementById("snGuide"); if (el) el.remove(); try { localStorage.setItem("sn_guide_seen", "1"); } catch (e) {} }
+  window.SNGuide = {
+    start: guideStart,
+    autoStartIfNew: function () {
+      let seen; try { seen = localStorage.getItem("sn_guide_seen"); } catch (e) {}
+      if (seen) return;
+      try { localStorage.setItem("sn_guide_seen", "1"); } catch (e) {}  // set immediately so it auto-runs only once
+      setTimeout(() => { if (document.getElementById("page")) guideStart(); }, 500);
+    },
+  };
+
+  // ================= 52-week-high celebration widget =================
+  // A small floating card that celebrates one stock at a new 52-week high at a time,
+  // rotating every 30s with a countdown bar showing when the next one appears.
+  const ATH_SECS = 30;
+  let _athList = [], _athIdx = 0, _athTimer = null, _athMin = false;
+  try { _athMin = localStorage.getItem("sn_ath_min") === "1"; } catch (e) {}
+  // clicking the widget → scanner, pre-filtered to stocks at a 52-week high, sorted high-first
+  function goScanner52wHigh() {
+    try {
+      resetScan();
+      techState.techOpen = true;
+      techState.ext52 = "high"; techState.ext52From = ""; techState.ext52To = 1;
+      scanSort.col = "dhi52"; scanSort.dir = -1;   // closest to the 52-week high first
+    } catch (e) {}
+    setPage("scanner");
+  }
+  function _athStocks() {
+    if (!(SCAN && SCAN.rows && SCAN.rows.length)) return [];
+    // S&P 500 only (r.sp) + within EXT52_PCT of the high → the sidebar count now MATCHES the S&P breadth
+    // panel's "בשיא 52ש׳" (Adi 2026-10-13). Sorted closest-to-high first (matches the scanner's sort).
+    return SCAN.rows.filter(r => { const k = r.tech; return r.sp && k && k.dhi52 != null && k.dhi52 >= -EXT52_PCT; })
+      .map(r => ({ sym: r.s, sec: r.sec, ind: r.ind, price: r.p || (r.tech ? r.tech.px : 0),
+        chg: r.c != null ? r.c : (r.tech ? r.tech.chg : 0), dhi52: r.tech.dhi52 }))
+      .sort((a, b) => (b.dhi52 == null ? -999 : b.dhi52) - (a.dhi52 == null ? -999 : a.dhi52));
+  }
+  function _athEl() {
+    let e = document.getElementById("athCeleb");
+    if (!e) { e = document.createElement("div"); e.id = "athCeleb"; document.body.appendChild(e); }
+    return e;
+  }
+  function _athShow(i) {
+    if (!_athList.length) { const e = document.getElementById("athCeleb"); if (e) e.remove(); return; }
+    _athIdx = ((i % _athList.length) + _athList.length) % _athList.length;
+    const s = _athList[_athIdx];
+    const e = _athEl();
+    if (_athMin) {
+      // collapsed pill — always visible so it can be re-opened
+      e.className = "ath-celeb ath-mini";
+      e.onclick = null;
+      e.innerHTML = '<button class="ath-mini-btn" id="athExpand" title="הצג שיאי 52 שבועות">🚀 שיא 52ש׳ · <b>' + s.sym + "</b> ▲</button>";
+      { const ex = document.getElementById("athExpand"); if (ex) ex.onclick = () => { _athMin = false; try { localStorage.setItem("sn_ath_min", "0"); } catch (e2) {} _athShow(_athIdx); }; }
+      clearTimeout(_athTimer);
+      _athTimer = setTimeout(() => _athShow(_athIdx + 1), ATH_SECS * 1000);
+      return;
+    }
+    e.className = "ath-celeb";
+    e.innerHTML =
+      '<button class="ath-x" id="athMin" title="מזער">▬</button>' +
+      '<div class="ath-badge">🚀 שיא 52 שבועות!</div>' +
+      '<div class="ath-main"><span class="ath-sym tsym clickable" data-chart="' + s.sym + '" data-tf="D">' + s.sym + "</span>" +
+        '<span class="ath-price">' + money(s.price) + " " + pct(s.chg == null ? 0 : s.chg) + "</span></div>" +
+      '<div class="ath-sub">' + (secHe(s.sec) || "") + (s.ind ? " · " + s.ind : "") + ' <span class="muted">· ' + (_athIdx + 1) + "/" + _athList.length + "</span></div>" +
+      '<div class="ath-cta">כל השיאים בסורק ←</div>' +
+      '<div class="ath-timer"><span class="ath-timerbar" id="athBar"></span></div>';
+    wireCharts(e);
+    // whole card → scanner filtered to 52-week highs; ticker keeps its own chart click
+    e.onclick = () => goScanner52wHigh();
+    { const sym = e.querySelector(".ath-sym"); if (sym) sym.addEventListener("click", ev => ev.stopPropagation()); }
+    { const mn = document.getElementById("athMin"); if (mn) mn.onclick = ev => { ev.stopPropagation(); _athMin = true; try { localStorage.setItem("sn_ath_min", "1"); } catch (e2) {} _athShow(_athIdx); }; }
+    const bar = document.getElementById("athBar");
+    if (bar) { bar.style.transition = "none"; bar.style.width = "100%"; void bar.offsetWidth; bar.style.transition = "width " + ATH_SECS + "s linear"; bar.style.width = "0%"; }
+    clearTimeout(_athTimer);
+    _athTimer = setTimeout(() => _athShow(_athIdx + 1), ATH_SECS * 1000);
+  }
+  // render the sidebar 52W item for the CURRENT rotation index (cycles through all the 52-week-high names)
+  let _athSideIdx = 0, _athSideTimer = null;
+  function _athSideShow() {
+    const el = document.getElementById("sideAth52");
+    if (!el) return;
+    const n = _athList.length;
+    if (!n) { el.style.display = "none"; el.classList.remove("ath52-live"); if (_athSideTimer) { clearInterval(_athSideTimer); _athSideTimer = null; } return; }
+    el.style.display = "";
+    el.classList.add("ath52-live");
+    _athSideIdx = ((_athSideIdx % n) + n) % n;
+    const s = _athList[_athSideIdx];
+    el.innerHTML = '<span class="ath52-ico">🚀</span><span class="lbl"><span class="ath52-t">' + escHtml(s.sym) +
+      '</span> · שיא 52ש׳<span class="ath52-badge" id="sideAth52n">' + n + "</span></span>";
+    el.title = n + " מניות בשיא 52 שבועות — מוצגת: " + s.sym + " · לחץ לסינון בסורק";
+    el.onclick = () => goScanner52wHigh();
+  }
+  function refreshAthCeleb() {
+    if (!document.body.classList.contains("in-app")) return;   // app pages only
+    _athList = _athStocks();
+    // Floating bottom-left pill retired (Adi 2026-09-30) → a permanent sidebar item just BELOW
+    // 🔔 מרכז התראות (#sideAth52), visible everywhere; cycles through the 52-week-high names (like the old pill).
+    const e = document.getElementById("athCeleb"); if (e) e.remove();
+    clearTimeout(_athTimer);
+    _athSideShow();
+    if (_athList.length > 1 && !_athSideTimer) {
+      _athSideTimer = setInterval(() => { _athSideIdx++; _athSideShow(); }, 7000);   // rotate every 7s
+    } else if (_athList.length <= 1 && _athSideTimer) {
+      clearInterval(_athSideTimer); _athSideTimer = null;
+    }
+  }
+
+  // merged "בקשות והצעות" — pick feature-request OR suggest-a-ticker
+  function openRequestChooser() {
+    modal("💬 בקשות והצעות מהקהל",
+      '<div class="req-chooser">' +
+      '<p class="muted" style="margin:0 0 4px">מה תרצה לשלוח?</p>' +
+      '<button class="btn primary" id="rqFeature">💬 בקשת פיצ\'ר / שיפור לאתר</button>' +
+      '<button class="btn ghost" id="rqTicker">⭐ הצעת מניה לסורק</button>' +
+      "</div>");
+    { const f = document.getElementById("rqFeature"); if (f) f.onclick = () => { closeModal(); openRequestForm(); }; }
+    { const t = document.getElementById("rqTicker"); if (t) t.onclick = () => { closeModal(); openSuggestTicker(); }; }
+  }
+  // floating action dock (theme / share / draw) with a collapse toggle
+  function initFloatDock() {
+    const dock = document.getElementById("snDock"); if (!dock) return;
+    const setThemeIcon = () => {
+      const b = document.getElementById("snDockTheme"); if (!b) return;
+      const light = document.documentElement.getAttribute("data-theme") === "light";
+      b.textContent = light ? "☀️" : "🌙"; b.title = light ? "עבור למצב כהה" : "עבור למצב בהיר";
+    };
+    setThemeIcon();
+    { const t = document.getElementById("snDockTheme"); if (t) t.onclick = () => { try { if (window.snToggleTheme) snToggleTheme(); } catch (e) {} setThemeIcon(); }; }
+    /* palette toggle removed 2026-11-01 — "pro" (futuristic) is now the fixed site look (forced in index.html before-paint) */
+    { const c = document.getElementById("snDockCam"); if (c) c.onclick = () => captureShare(); }
+    { const d = document.getElementById("snDockDraw"); if (d) d.onclick = () => setPage("draw"); }
+    { const bl = document.getElementById("snDockBell"); if (bl) bl.onclick = () => openAlertsFeed("feed"); }
+    updateAlertBell();   // paint the dock badge on load
+    // display density (comfortable / compact / dense) — user-selectable, persisted, applies site-wide
+    const DENS = ["comfortable", "compact", "dense"], DENS_HE = { comfortable: "רגיל", compact: "קומפקטי", dense: "צפוף" };
+    let dens = "compact"; try { dens = localStorage.getItem("sn_density") || "compact"; } catch (e) {}
+    const applyDens = () => { try { document.documentElement.setAttribute("data-density", dens); } catch (e) {} };
+    applyDens();
+    { const db = document.getElementById("snDockDensity"); if (db) db.onclick = () => { dens = DENS[(DENS.indexOf(dens) + 1) % DENS.length]; applyDens(); try { localStorage.setItem("sn_density", dens); } catch (e) {} try { if (window.snToast || snToast) snToast("תצוגה: " + DENS_HE[dens]); } catch (e) {} }; }
+    const tg = document.getElementById("snDockToggle");
+    const apply = col => { dock.classList.toggle("collapsed", col); document.body.classList.toggle("dock-collapsed", col); if (tg) tg.textContent = col ? "›" : "‹"; };   // collapsing the dock also hides the floating 52w-high badge
+    let col = false; try { col = localStorage.getItem("sn_dock_col") === "1"; } catch (e) {}
+    apply(col);
+    if (tg) tg.onclick = () => { col = !col; apply(col); try { localStorage.setItem("sn_dock_col", col ? "1" : "0"); } catch (e) {} };
+    try { if (window.SNAuth && SNAuth.onChange) SNAuth.onChange(setThemeIcon); } catch (e) {}
+  }
+  function initNav() {
+    document.querySelectorAll(".side-nav a[data-page]").forEach(a => a.onclick = () => setPage(a.dataset.page));
+    applyNewbieBadge();   // remove the "התחל כאן" badge on load if the user already dismissed it
+    { const gb = document.getElementById("guideBtn"); if (gb) gb.onclick = () => guideStart(); }
+    if (window.Prefs) window.Prefs.onChange(() => { if (state.page === "favorites" || state.page === "alerts") reRender(); });
+    let last = "market";
+    try { last = localStorage.getItem("sn_last_page") || "market"; } catch (e) {}   // default landing = סקירת שוק (was "home"/מרכז בקרה, retired 2026-11-01)
+    // direct entry / refresh on /live (served via the vercel rewrite) or #live → open the live page
+    var _wantLive = false;
+    try { _wantLive = /^\/live\/?$/.test(location.pathname) || /(^|#)live$/.test(location.hash); } catch (e) {}
+    if (_wantLive) setPage("live");
+    else setPage((PAGES[last] || last === "journal" || _pulseRender[last]) ? last : "market");   // _pulseRender[last] → a pulse sub-tab (sectors/today/…)
+    if (/[?&](s|p)=/.test(location.search)) setTimeout(checkSharedPresetInUrl, 1500);   // shared preset (?s=<code> short link, or ?p= long) — wait for cloud prefs to settle first
+    loadLive();
+    setInterval(loadLive, 60000);
+    loadScanner();                                   // ensure scan data (for alerts) even off the scanner page
+    setInterval(() => { if (_scanLoaded) fetchScanner(); }, 300000);   // refresh scan + re-check alerts every 5 min
+    loadPrices();                                    // live displayed prices (id='prices'), refreshed every 60s
+    setInterval(loadPrices, 60000);
+    updateTicker();
+    setInterval(updateTicker, 60000);
+    setInterval(updateSync, 1000);
+    startCtaRotator();
+    { const cam = document.getElementById("sideCam"); if (cam) cam.onclick = () => captureShare(); }
+    { const nb = document.getElementById("sideNews"); if (nb) nb.onclick = () => setPage("news"); }
+    { const sa = document.getElementById("sideAlerts"); if (sa) sa.onclick = () => openAlertsFeed("feed"); }
+    // merged "בקשות והצעות" — one entry that offers both the feature-request form and the suggest-ticker flow
+    { const sr = document.getElementById("sideRequest"); if (sr) sr.onclick = () => openRequestChooser(); }
+    { const sy = document.getElementById("sideSync"); if (sy) sy.onclick = () => openCloudSync(); }
+    { const sg = document.getElementById("sideSuggest"); if (sg) sg.onclick = () => openSuggestTicker(); }
+    { const cm = document.getElementById("sideCommunity"); if (cm) cm.onclick = () => setPage("community"); }
+    { const ca = document.getElementById("sideCommAdmin"); if (ca) ca.onclick = () => setPage("community"); }
+    // universe toggle (rendered on the market overview + continuity Candle Map) → delegated so any instance works
+    document.addEventListener("click", e => { const b = e.target.closest && e.target.closest("[data-uni]"); if (b) _setUniverse(b.dataset.uni); });
+    // ── floating action dock (theme / share / draw) + collapse ──
+    initFloatDock();
+    // reveal the admin-only bits for Adi (and whenever auth state changes). Draw is now the DOCK pencil.
+    const _revealAdmin = () => { const adm = _snIsAdmin(); ["sideCommAdmin", "snDockDraw", "navGiveaway"].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = adm ? "" : "none"; }); const _cm = document.getElementById("sideCommunity"); if (_cm) _cm.style.display = adm ? "none" : "";   /* admins use the "· ניהול" entry (same page) — hide the duplicate plain one (Adi) */ if (adm) updateCommAdminBadge(); };   // navGiveaway = admin-only (Adi runs giveaways via screen-share); מטריצת שימוש עברה לתוך פאנל הניהול
+    _revealAdmin();
+    try { if (window.SNAuth && SNAuth.onChange) SNAuth.onChange(_revealAdmin); } catch (e) {}
+    setInterval(() => { if (_snIsAdmin()) updateCommAdminBadge(); }, 180000);   // refresh the pending-approval count every 3 min
+    updateAlertBell();
+    loadNews();
+    setInterval(loadNews, 300000);   // refresh the news feed every 5 min
+    _snBackendHealthTick();                       // show a friendly banner if the data backend is unreachable
+    setInterval(_snBackendHealthTick, 90000);     // re-check every 90s (auto-clears when it recovers)
+    _wireTrackClicks();                           // usage analytics — curated feature-click tracking
+    snTrack("app:open");                          // session-start signal (logged-in users)
+    setTimeout(() => { try { _autoEnsurePush(); } catch (e) {} }, 3500);   // keep phone-push subscription fresh (auto-heal)
+    // 52-week-high celebration: boot once scan data is present AND the app is visible,
+    // then refresh each minute
+    const _athBoot = setInterval(() => {
+      if (SCAN && SCAN.rows && SCAN.rows.length && document.body.classList.contains("in-app")) { clearInterval(_athBoot); refreshAthCeleb(); }
+    }, 1500);
+    setInterval(refreshAthCeleb, 60000);
+    // market open/close chime — prime audio on first interaction, then poll every 20s.
+    // Also re-check when the tab regains focus (background tabs throttle timers, so a poll
+    // may be skipped right at 16:30 — this catches it the moment you come back).
+    document.addEventListener("pointerdown", _primeAudio, { once: true });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) _marketBellTick(); });
+    _marketBellTick();
+    setInterval(_marketBellTick, 20000);
+    // ESC closes any open modal (chart-grid, all-timeframes, single chart, alerts, share…)
+    document.addEventListener("keydown", e => { if (e.key === "Escape" && document.getElementById("pgModal")) closeModal(); });
+    _setupStarDrag();   // drag over stars to mark/unmark many at once
+  }
+  // rotating motivational lines in the "join community" banner.
+  // The ninja-deal teaser appears TWICE per cycle (positions 5 & 11) so it's caught more often (Adi).
+  const _ctaNinja = '<span style="color:#e8c877;font-weight:600;text-shadow:0 0 5px rgba(255,205,80,.28);letter-spacing:.2px">🎁 פספסתם את הנינג׳ה שמחלק הטבה בלעדית? הוא יקפוץ שוב מחר ✨</span>';
+  const CTA_MSGS = [
+    '<span class="cta-trophy">🏆</span> הצטרף לקהילת הדיסקורד של StratNinja',
+    "רוצה סוף־סוף להבין מה באמת קורה בגרפים? 📊",
+    "לסחור לבד זה יקר — טעות אחת מכסה שנה של קהילה 🤝",
+    "עוד מתלבט על העסקה? תשמע דעה שנייה לפני שתלחץ 💬",
+    _ctaNinja,                                                     // appearance #1 (~position 5)
+    "סטאפים, ניתוחים ולייבים — כל יום, בזמן אמת",
+    "נינג׳ות לא סוחרות לבד ⚔️ בוא תצטרף",
+    "חדשות בוקר, סורקים וכלים אוטומטיים — הכל במקום אחד 🚀",
+    "השוק לא מחכה לאף אחד — אתה עדיין בחוץ? ⏰",
+    "המנויים כבר בפנים. אתה עדיין קורא באנרים 👀",
+    _ctaNinja,                                                     // appearance #2 (~position 11)
+  ];
+  function startCtaRotator() {
+    const el = document.getElementById("ctaText");
+    if (!el) return;
+    let i = 0;
+    setInterval(() => {
+      const e = document.getElementById("ctaText");
+      if (!e) return;
+      i = (i + 1) % CTA_MSGS.length;
+      e.style.transition = "opacity .35s"; e.style.opacity = "0";
+      setTimeout(() => { e.innerHTML = CTA_MSGS[i]; e.style.opacity = "1"; }, 350);
+    }, 60000);
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", initNav);
+  else initNav();
+})();

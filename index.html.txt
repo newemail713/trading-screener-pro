@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl" data-pal="pro" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trading Screener Pro · The Strat</title>
+  <link rel="icon" href="ninja-icon.png">
+  <link rel="preconnect" href="https://googleapis.com">
+  <link href="https://googleapis.com/css2?family=Heebo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="share-fonts.css">
+  <link rel="stylesheet" href="redesign.css">
+  <script src="https://cloudflare.com" defer></script>
+</head>
+<body class="in-app" data-page="market">
+  <!-- אזורים נסתרים לתאימות מלאה עם המנוע הקיים -->
+  <div id="landing" class="hidden"></div>
+  <div id="journalContainer" class="hidden"></div>
+
+  <div id="appRoot" class="scanner-app">
+    <aside class="sidebar">
+      <div class="side-brand">
+        <img src="ninja-icon.png" alt="Logo" style="width:34px;height:34px;border-radius:9px">
+        <div>
+          <b>Screener Pro</b>
+          <div class="tag">THE STRAT</div>
+        </div>
+      </div>
+
+      <nav class="side-nav">
+        <div class="nav-group-label">תמונת השוק</div>
+        <a data-page="pulse" class="active"><span class="nav-emoji">📊</span> <span class="lbl">סקירת שוק</span></a>
+        <a data-page="news" id="sideNews"><span class="nav-emoji">🗞️</span> <span class="lbl">חדשות</span></a>
+
+        <div class="nav-group-label">איתור הזדמנויות</div>
+        <a data-page="scanner"><span class="nav-emoji">🔍</span> <span class="lbl">סורק עסקאות</span></a>
+
+        <div class="nav-group-label">סביבת העבודה שלי</div>
+        <a data-page="favorites"><span class="nav-emoji">⭐</span> <span class="lbl">מועדפים</span></a>
+        <a id="sideAlerts"><span class="nav-emoji">🔔</span> <span class="lbl">מרכז התראות</span></a>
+        <a id="sideAth52" style="display:none"><span class="ath52-ico">🚀</span> <span class="lbl">שיא 52ש׳</span></a>
+      </nav>
+    </aside>
+
+    <main class="main">
+      <div class="top-strip">
+        <div id="liveTicker" class="live-ticker">טוען נתוני שוק חיים…</div>
+        <div class="sn-dock" id="snDock">
+          <div class="snd-icons">
+            <button class="snd-btn" id="snDockTheme" title="מצב כהה / בהיר">🌙</button>
+            <button class="snd-btn" id="snDockDensity" title="צפיפות תצוגה">⇳</button>
+            <button class="snd-btn" id="snDockCam" title="צילום ושיתוף">📷</button>
+            <button class="snd-btn snd-bell" id="snDockBell" title="מרכז התראות">🔔<span class="snd-badge" id="alBadgeDock"></span></button>
+          </div>
+          <button class="snd-btn snd-toggle" id="snDockToggle" title="מזער">‹</button>
+        </div>
+      </div>
+
+      <div id="page"></div>
+    </main>
+  </div>
+
+  <script>
+    window.SN_CONFIG = { LOCAL_MODE: true };
+    window.snToggleTheme = function () {
+      const html = document.documentElement;
+      const next = html.getAttribute("data-theme") === "light" ? "dark" : "light";
+      html.setAttribute("data-theme", next);
+      try { localStorage.setItem("sn_theme", next); } catch (e) {}
+    };
+    try {
+      const savedTheme = localStorage.getItem("sn_theme");
+      if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
+    } catch (e) {}
+  </script>
+  <script src="prefs.js"></script>
+  <script src="data-bridge.js"></script>
+  <script src="pages.js"></script>
+</body>
+</html>

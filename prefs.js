@@ -1,0 +1,151 @@
+/* StratNinja Platform — user preferences (favorites + alerts).
+ * Stored in localStorage under one key; cloud-synced per user via cloudsync.js
+ * (table user_prefs). Emits change events so pages can re-render live.
+ */
+window.Prefs = (function () {
+  "use strict";
+  const KEY = "stratninja_prefs_v1";
+  const listeners = [];
+
+  function read() {
+    try { return JSON.parse(localStorage.getItem(KEY)) || { favorites: [], alerts: [] }; }
+    catch (e) { return { favorites: [], alerts: [] }; }
+  }
+  function write(d) {
+    localStorage.setItem(KEY, JSON.stringify(d));
+    listeners.forEach(f => { try { f(); } catch (e) {} });
+  }
+  function uid() { return "a" + Date.now() + Math.floor(Math.random() * 1000); }
+
+  return {
+    KEY: KEY,
+    favorites() { return read().favorites || []; },
+    isFav(sym) { return this.favorites().indexOf(sym) >= 0; },
+    toggleFav(sym) {
+      const d = read(); d.favorites = d.favorites || [];
+      const i = d.favorites.indexOf(sym);
+      if (i >= 0) d.favorites.splice(i, 1); else d.favorites.push(sym);
+      write(d);
+    },
+    alerts() { return read().alerts || []; },
+    addAlert(a) {
+      const d = read(); d.alerts = d.alerts || [];
+      a.id = uid(); a.created = new Date().toISOString();
+      d.alerts.push(a); write(d); return a;
+    },
+    deleteAlert(id) { const d = read(); d.alerts = (d.alerts || []).filter(x => x.id !== id); write(d); },
+    // scanner panel visibility (null = default: all panels shown)
+    scanPanels() { return read().scanPanels || null; },
+    setScanPanels(obj) { const d = read(); d.scanPanels = obj; write(d); },
+    // saved scan presets ("must-have scans") — [{id,name,cfg}]
+    scanPresets() { return read().scanPresets || []; },
+    saveScanPreset(name, cfg) {
+      const d = read(); d.scanPresets = d.scanPresets || [];
+      const i = d.scanPresets.findIndex(p => p.name === name);
+      if (i >= 0) { d.scanPresets[i].cfg = cfg; write(d); return d.scanPresets[i]; }
+      const rec = { id: uid(), name: name, cfg: cfg }; d.scanPresets.push(rec); write(d); return rec;
+    },
+    deleteScanPreset(id) { const d = read(); d.scanPresets = (d.scanPresets || []).filter(p => p.id !== id); write(d); },
+    duplicateScanPreset(id) {
+      const d = read(); d.scanPresets = d.scanPresets || [];
+      const src = d.scanPresets.find(p => p.id === id);
+      if (!src) return null;
+      const base = src.name + " (עותק)"; let name = base, i = 2;
+      while (d.scanPresets.some(p => p.name === name)) { name = base + " " + i; i++; }
+      const rec = { id: uid(), name: name, cfg: JSON.parse(JSON.stringify(src.cfg)) };  // clone cfg; alert NOT copied
+      d.scanPresets.push(rec); write(d); return rec;
+    },
+    togglePresetAlert(id) { const d = read(); const p = (d.scanPresets || []).find(x => x.id === id); if (p) { p.alert = !p.alert; write(d); } return p ? p.alert : false; },
+    // phone-push per preset — separate from the desktop alert. Default ON (phone !== false) for
+    // backward-compat; turn OFF to keep an alert on the desktop feed only (avoid phone overload).
+    presetPhoneOn(id) { const p = (read().scanPresets || []).find(x => x.id === id); return p ? (p.phone !== false) : false; },
+    togglePresetPhone(id) { const d = read(); const p = (d.scanPresets || []).find(x => x.id === id); if (!p) return false; p.phone = (p.phone === false); write(d); return p.phone !== false; },
+    // manual CATEGORY per preset (reversal/intraday/ftfc/…); "" clears it (→ "ללא קטגוריה"). Used to
+    // group/triage a flood of alerts in the popup + feed. Stored on the preset so it syncs with the cloud.
+    presetCat(id) { const p = (read().scanPresets || []).find(x => x.id === id); return p ? (p.cat || "") : ""; },
+    setPresetCat(id, cat) { const d = read(); const p = (d.scanPresets || []).find(x => x.id === id); if (!p) return ""; if (cat) p.cat = cat; else delete p.cat; write(d); return p.cat || ""; },
+    // user-defined CUSTOM alert categories (plain strings; the string is both the key and the label).
+    // Stored in the prefs blob so they sync to the cloud alongside the presets.
+    alertCats() { return read().alertCats || []; },
+    addAlertCat(name) {
+      const d = read(); d.alertCats = d.alertCats || [];
+      const nm = String(name || "").trim(); if (!nm) return d.alertCats;
+      if (!d.alertCats.some(c => c === nm)) d.alertCats.push(nm);
+      write(d); return d.alertCats;
+    },
+    removeAlertCat(name) {
+      const d = read(); const nm = String(name || "").trim();
+      d.alertCats = (d.alertCats || []).filter(c => c !== nm);
+      (d.scanPresets || []).forEach(p => { if (p.cat === nm) delete p.cat; });   // detach from presets that used it
+      if (d.catLabels) delete d.catLabels[nm];                                    // drop any display-name override
+      write(d); return d.alertCats;
+    },
+    // display-name OVERRIDES per category key (built-in or custom) — lets any category be renamed without
+    // changing its key (so preset.cat stays valid). "" clears the override (back to the default label).
+    catLabels() { return read().catLabels || {}; },
+    setCatLabel(key, label) {
+      const d = read(); d.catLabels = d.catLabels || {};
+      const k = String(key || ""); if (!k) return d.catLabels;
+      const l = String(label || "").trim();
+      if (l) d.catLabels[k] = l; else delete d.catLabels[k];
+      write(d); return d.catLabels;
+    },
+    // reorder presets to the given id order (any id not listed is appended at the end)
+    setScanPresetsOrder(ids) {
+      const d = read(); const arr = d.scanPresets || []; const byId = {};
+      arr.forEach(p => { byId[p.id] = p; });
+      const next = ids.map(id => byId[id]).filter(Boolean);
+      arr.forEach(p => { if (next.indexOf(p) < 0) next.push(p); });
+      d.scanPresets = next; write(d);
+    },
+    // remove exact duplicates (same cfg) — keeps the one with the cleaner name (no trailing " N",
+    // i.e. the original over a restore-merge copy). Returns how many were removed.
+    dedupeScanPresets() {
+      const d = read(); const arr = d.scanPresets || [];
+      const hasSuffix = n => /\s\d+$/.test(n || "");
+      const order = arr.map((p, i) => ({ p, i })).sort((a, b) => (hasSuffix(a.p.name) ? 1 : 0) - (hasSuffix(b.p.name) ? 1 : 0) || a.i - b.i);
+      const seen = {}; const keep = []; let removed = 0;
+      order.forEach(o => { const k = JSON.stringify(o.p.cfg); if (seen[k]) { removed++; } else { seen[k] = 1; keep.push(o.p); } });
+      keep.sort((a, b) => arr.indexOf(a) - arr.indexOf(b));   // restore the original display order
+      d.scanPresets = keep; write(d); return removed;
+    },
+    // rename a preset by id (keeps the name unique)
+    renameScanPreset(id, name) {
+      const d = read(); const arr = d.scanPresets || [];
+      const p = arr.find(x => x.id === id); if (!p) return null;
+      let nm = String(name || "").trim(); if (!nm) return p;
+      const base = nm; let i = 2;
+      while (arr.some(x => x.id !== id && x.name === nm)) { nm = base + " " + i; i++; }
+      p.name = nm; write(d); return p;
+    },
+    // import a shared preset (fresh id + unique name; alert NOT carried over)
+    importScanPreset(name, cfg) {
+      const d = read(); d.scanPresets = d.scanPresets || [];
+      const base = name || "פריסט משותף"; let nm = base, i = 2;
+      while (d.scanPresets.some(p => p.name === nm)) { nm = base + " " + i; i++; }
+      const rec = { id: uid(), name: nm, cfg: JSON.parse(JSON.stringify(cfg)) };
+      d.scanPresets.push(rec); write(d); return rec;
+    },
+    // alert feed — fired (preset × favorite) matches
+    alertFeed() { return read().alertFeed || []; },
+    feedHas(pid, sym, date) { return (read().alertFeed || []).some(e => e.pid === pid && e.sym === sym && e.date === date); },
+    feedAdd(entry) { const d = read(); d.alertFeed = d.alertFeed || []; d.alertFeed.unshift(entry); if (d.alertFeed.length > 200) d.alertFeed = d.alertFeed.slice(0, 200); write(d); },
+    feedUnread() { return (read().alertFeed || []).filter(e => !e.read).length; },
+    feedMarkRead() { const d = read(); (d.alertFeed || []).forEach(e => e.read = true); write(d); },
+    feedClear() { const d = read(); d.alertFeed = []; write(d); },
+    // Web Push subscriptions (per device) — the server pushes phone alerts to these
+    pushSubs() { return read().pushSubs || []; },
+    addPushSub(sub) {
+      const d = read(); d.pushSubs = d.pushSubs || [];
+      if (!d.pushSubs.some(s => s.endpoint === sub.endpoint)) { d.pushSubs.push(sub); write(d); }
+    },
+    removePushSub(endpoint) { const d = read(); d.pushSubs = (d.pushSubs || []).filter(s => s.endpoint !== endpoint); write(d); },
+    // scheduled reminder pushes (pre-market 11:30 + market-open 16:30). Default ON; users can opt out.
+    pushSchedule() { const v = read().pushSchedule; return v !== false; },
+    setPushSchedule(on) { const d = read(); d.pushSchedule = !!on; write(d); },
+    sqzAlert() { return !!read().sqzAlert; },                         // 🧨 push when a favorite's TTM Squeeze FIRES (opt-in, default off)
+    setSqzAlert(on) { const d = read(); d.sqzAlert = !!on; write(d); },
+    onChange(f) { listeners.push(f); },
+    notify() { listeners.forEach(f => { try { f(); } catch (e) {} }); },  // used by cloudsync after a pull
+  };
+})();
