@@ -9,61 +9,140 @@ import numpy as np
 
 os.makedirs("data", exist_ok=True)
 
-TICKERS = [
-    "A","AAPL","ABBV","ABNB","ABT","ACGL","ACN","ADBE","ADI","ADM","ADP","ADSK","AEE","AEP","AES","AFL","AIG","AIZ","AJG","AKAM",
-    "ALB","ALGN","ALL","ALLE","AMAT","AMCR","AMD","AME","AMGN","AMP","AMT","AMZN","ANET","AON","AOS","APA","APD","APH","APO","APP",
-    "APTV","ARE","ARES","ATO","AVB","AVGO","AVY","AWK","AXON","AXP","AZO","BA","BAC","BALL","BAX","BBY","BDX","BE","BEN","BF-B",
-    "BG","BIIB","BKNG","BKR","BLDR","BLK","BMY","BNY","BR","BRK-B","BRO","BSX","BX","BXP","C","CAG","CAH","CARR","CASY","CAT",
-    "CB","CBOE","CBRE","CCI","CCL","CDNS","CDW","CEG","CF","CFG","CHD","CHRW","CHTR","CI","CIEN","CINF","CL","CLX","CMCSA","CME",
-    "CMG","CMI","CMS","CNC","CNP","COF","COHR","COIN","COO","COP","COR","COST","CPAY","CPB","CPRT","CPT","CRL","CRM","CRWD","CSCO",
-    "CSGP","CSX","CTAS","CTSH","CVS","CVNA","CVX","D","DAL","DASH","DD","DDOG","DE","DECK","DELL","DG","DGX","DHI","DHR","DIS",
-    "DLR","DLTR","DOC","DOV","DOW","DPZ","DRI","DTE","DUK","DVA","DVN","DXCM","EA","EBAY","ECL","ED","EFX","EG","EIX",
-    "EL","ELV","EME","EMR","EOG","EPAM","EQIX","EQR","EQT","ERIE","ES","ESS","ETN","ETR","EVRG","EW","EXC","EXE","EXPD","EXPE",
-    "EXR","F","FANG","FAST","FCX","FDS","FDX","FE","FERG","FFIV","FICO","FIS","FISV","FITB","FLEX","FIX","FOX","FOXA","FRT",
-    "FSLR","FTNT","FTV","GD","GDDY","GE","GEHC","GEN","GEV","GILD","GIS","GL","GLW","GM","GNRC","GOOG","GOOGL","GPC","GPN","GRMN",
-    "GS","GWW","HAL","HAS","HBAN","HCA","HD","HIG","HII","HLT","HOLX","HON","HOOD","HPE","HPQ","HRL","HSIC","HST","HSY",
-    "HUBB","HUM","HWM","IBM","ICE","IDXX","IEX","IFF","ILMN","INCY","INTC","INTU","INVH","IP","IQV","IR","IRM","ISRG","IT","ITW",
-    "IVZ","J","JBHT","JBL","JCI","JKHY","JNJ","JPM","KDP","KEY","KEYS","KHC","KIM","KKR","KLAC","KMB","KMI","KO","KR","L",
-    "LDOS","LEN","LH","LHX","LII","LIN","LITE","LLY","LMT","LNT","LOW","LRCX","LULU","LUV","LVS","LW","LYB","LYV","MA","MAA",
-    "MAR","MAS","MCD","MCHP","MCK","MCO","MDLZ","MDT","MET","META","MGM","MHK","MKC","MLM","MMM","MNST","MO","MOH","MOS","MPC",
-    "MPWR","MRK","MRNA","MRVL","MRSH","MS","MSCI","MSFT","MSI","MTB","MTCH","MTD","MU","NCLH","NDAQ","NDSN","NEE","NEM","NFLX","NI",
-    "NKE","NOC","NOW","NRG","NSC","NTAP","NTRS","NUE","NVDA","NVR","NWS","NWSA","NXPI","O","ODFL","OKE","OMC","ON","ORCL","ORLY",
-    "OTIS","OXY","PANW","PAYC","PAYX","PCAR","PCG","PEG","PEP","PFE","PFG","PG","PGR","PH","PHM","PKG","PLD","PLTR","PM",
-    "PNC","PNR","PNW","PODD","POOL","PPG","PPL","PRU","PSA","PSX","PTC","PWR","PYPL","QCOM","QRVO","RCL","REG","REGN","RF","RJF",
-    "RL","RMD","ROK","ROL","ROP","ROST","RSG","RTX","RVTY","SBAC","SBUX","SCHW","SHW","SJM","SLB","SMCI","SNA","SNDK","SNPS",
-    "SO","SOLV","SPG","SPGI","SRE","STE","STLD","STT","STX","STZ","SWK","SWKS","SYF","SYK","SYY","T","TAP","TDG","TDY","TECH",
-    "TEL","TER","TFC","TGT","TJX","TKO","TMO","TMUS","TPR","TRGP","TRMB","TROW","TRV","TSCO","TSLA","TSN","TT","TTWO","TWLO","TXN",
-    "TXT","TYL","UAL","UBER","UDR","UHS","ULTA","UNH","UNP","UPS","URI","USB","V","VEEV","VICI","VLO","VLTO","VMC","VRSK",
-    "VRSN","VRT","VRTX","VST","VTR","VTRS","VZ","WAB","WAT","WDAY","WDC","WEC","WELL","WFC","WM","WMB","WMT","WRB","WSM",
-    "WST","WTW","WY","WYNN","XEL","XOM","XYL","XYZ","YUM","ZBH","ZBRA","ZTS"
-]
+SECTOR_MAP = {
+    # Technology
+    "AAPL":"Technology","MSFT":"Technology","NVDA":"Technology","AVGO":"Technology","ORCL":"Technology","CRM":"Technology",
+    "AMD":"Technology","ADBE":"Technology","CSCO":"Technology","ACN":"Technology","IBM":"Technology","INTU":"Technology",
+    "TXN":"Technology","QCOM":"Technology","AMAT":"Technology","NOW":"Technology","PANW":"Technology","ADI":"Technology",
+    "LRCX":"Technology","MU":"Technology","KLAC":"Technology","SNPS":"Technology","CDNS":"Technology","CRWD":"Technology",
+    "MSI":"Technology","APH":"Technology","NXPI":"Technology","FTNT":"Technology","ADSK":"Technology","ROP":"Technology",
+    "PLTR":"Technology","ANET":"Technology","DELL":"Technology","SMCI":"Technology","FICO":"Technology","MPWR":"Technology",
+    "TEL":"Technology","CTSH":"Technology","IT":"Technology","HPQ":"Technology","HPE":"Technology","CDW":"Technology",
+    "ON":"Technology","GLW":"Technology","KEYS":"Technology","NTAP":"Technology","TYL":"Technology","PTC":"Technology",
+    "TER":"Technology","STX":"Technology","WDC":"Technology","ZBRA":"Technology","SWKS":"Technology","QRVO":"Technology",
+    "AKAM":"Technology","EPAM":"Technology","FFIV":"Technology","GEN":"Technology","JBL":"Technology","CIEN":"Technology",
+    "COHR":"Technology","LITE":"Technology","SNDK":"Technology","APP":"Technology","MCHP":"Technology",
+
+    # Financials
+    "BRK-B":"Financials","JPM":"Financials","V":"Financials","MA":"Financials","BAC":"Financials","WFC":"Financials",
+    "GS":"Financials","MS":"Financials","SPGI":"Financials","BLK":"Financials","AXP":"Financials","C":"Financials",
+    "SCHW":"Financials","PGR":"Financials","CB":"Financials","MMC":"Financials","FI":"Financials","FISV":"Financials",
+    "BX":"Financials","ICE":"Financials","CME":"Financials","KKR":"Financials","AON":"Financials","MCO":"Financials",
+    "USB":"Financials","PNC":"Financials","AJG":"Financials","TRV":"Financials","APO":"Financials","COF":"Financials",
+    "AFL":"Financials","ALL":"Financials","AIG":"Financials","MET":"Financials","PRU":"Financials","BK":"Financials",
+    "BNY":"Financials","AMP":"Financials","MSCI":"Financials","COIN":"Financials","HOOD":"Financials","FIS":"Financials",
+    "ACGL":"Financials","TFC":"Financials","DFS":"Financials","NDAQ":"Financials","HIG":"Financials","WTW":"Financials",
+    "RJF":"Financials","MTB":"Financials","FITB":"Financials","STT":"Financials","BRO":"Financials","HBAN":"Financials",
+    "CBOE":"Financials","CINF":"Financials","RF":"Financials","CFG":"Financials","NTRS":"Financials","KEY":"Financials",
+    "SYF":"Financials","WRB":"Financials","PFG":"Financials","L":"Financials","TROW":"Financials","FDS":"Financials",
+    "EG":"Financials","ERIE":"Financials","AIZ":"Financials","GL":"Financials","IVZ":"Financials","BEN":"Financials",
+    "ARES":"Financials","CPAY":"Financials","MRSH":"Financials",
+
+    # Health Care
+    "LLY":"Health Care","UNH":"Health Care","JNJ":"Health Care","ABBV":"Health Care","MRK":"Health Care","TMO":"Health Care",
+    "ABT":"Health Care","DHR":"Health Care","ISRG":"Health Care","AMGN":"Health Care","PFE":"Health Care","SYK":"Health Care",
+    "BSX":"Health Care","VRTX":"Health Care","ELV":"Health Care","MDT":"Health Care","BMY":"Health Care","GILD":"Health Care",
+    "REGN":"Health Care","CI":"Health Care","CVS":"Health Care","ZTS":"Health Care","BDX":"Health Care","MCK":"Health Care",
+    "HCA":"Health Care","EW":"Health Care","COR":"Health Care","GEHC":"Health Care","IDXX":"Health Care","IQV":"Health Care",
+    "RMD":"Health Care","A":"Health Care","CNC":"Health Care","DXCM":"Health Care","MTD":"Health Care","CAH":"Health Care",
+    "HUM":"Health Care","BIIB":"Health Care","STE":"Health Care","WAT":"Health Care","ZBH":"Health Care","BAX":"Health Care",
+    "HOLX":"Health Care","ALGN":"Health Care","PODD":"Health Care","COO":"Health Care","DGX":"Health Care","LH":"Health Care",
+    "MOH":"Health Care","VTRS":"Health Care","INCY":"Health Care","TECH":"Health Care","RVTY":"Health Care","CRL":"Health Care",
+    "HSIC":"Health Care","UHS":"Health Care","DVA":"Health Care","SOLV":"Health Care","MRNA":"Health Care","ILMN":"Health Care",
+    "VEEV":"Health Care",
+
+    # Consumer Discretionary
+    "AMZN":"Consumer Discretionary","TSLA":"Consumer Discretionary","HD":"Consumer Discretionary","MCD":"Consumer Discretionary",
+    "LOW":"Consumer Discretionary","BKNG":"Consumer Discretionary","TJX":"Consumer Discretionary","NKE":"Consumer Discretionary",
+    "SBUX":"Consumer Discretionary","CMG":"Consumer Discretionary","ORLY":"Consumer Discretionary","MAR":"Consumer Discretionary",
+    "ABNB":"Consumer Discretionary","GM":"Consumer Discretionary","AZO":"Consumer Discretionary","HLT":"Consumer Discretionary",
+    "F":"Consumer Discretionary","ROST":"Consumer Discretionary","DHI":"Consumer Discretionary","LEN":"Consumer Discretionary",
+    "RCL":"Consumer Discretionary","YUM":"Consumer Discretionary","LULU":"Consumer Discretionary","TSCO":"Consumer Discretionary",
+    "DECK":"Consumer Discretionary","PHM":"Consumer Discretionary","DRI":"Consumer Discretionary","EBAY":"Consumer Discretionary",
+    "GRMN":"Consumer Discretionary","NVR":"Consumer Discretionary","EXPE":"Consumer Discretionary","ULTA":"Consumer Discretionary",
+    "DPZ":"Consumer Discretionary","CCL":"Consumer Discretionary","LVS":"Consumer Discretionary","APTV":"Consumer Discretionary",
+    "BBY":"Consumer Discretionary","POOL":"Consumer Discretionary","TPR":"Consumer Discretionary","LKQ":"Consumer Discretionary",
+    "MGM":"Consumer Discretionary","NCLH":"Consumer Discretionary","WYNN":"Consumer Discretionary","HAS":"Consumer Discretionary",
+    "RL":"Consumer Discretionary","MHK":"Consumer Discretionary","DASH":"Consumer Discretionary","CVNA":"Consumer Discretionary",
+    "WSM":"Consumer Discretionary","KMX":"Consumer Discretionary","BWA":"Consumer Discretionary",
+
+    # Communication Services
+    "META":"Communication Services","GOOGL":"Communication Services","GOOG":"Communication Services","NFLX":"Communication Services",
+    "DIS":"Communication Services","CMCSA":"Communication Services","VZ":"Communication Services","T":"Communication Services",
+    "TMUS":"Communication Services","CHTR":"Communication Services","EA":"Communication Services","TTWO":"Communication Services",
+    "WBD":"Communication Services","OMC":"Communication Services","LYV":"Communication Services","MTCH":"Communication Services",
+    "FOXA":"Communication Services","FOX":"Communication Services","NWSA":"Communication Services","NWS":"Communication Services",
+    "TKO":"Communication Services","IPG":"Communication Services",
+
+    # Industrials
+    "GE":"Industrials","CAT":"Industrials","RTX":"Industrials","UNP":"Industrials","HON":"Industrials","ETN":"Industrials",
+    "BA":"Industrials","LMT":"Industrials","ADP":"Industrials","UPS":"Industrials","DE":"Industrials","TT":"Industrials",
+    "PH":"Industrials","GD":"Industrials","TDG":"Industrials","WM":"Industrials","CTAS":"Industrials","ITW":"Industrials",
+    "NOC":"Industrials","EMR":"Industrials","CSX":"Industrials","FDX":"Industrials","NSC":"Industrials","CARR":"Industrials",
+    "PCAR":"Industrials","URI":"Industrials","GWW":"Industrials","JCI":"Industrials","PWR":"Industrials","CMI":"Industrials",
+    "RSG":"Industrials","FAST":"Industrials","AME":"Industrials","ODFL":"Industrials","VRSK":"Industrials","LHX":"Industrials",
+    "OTIS":"Industrials","IR":"Industrials","GEV":"Industrials","EFX":"Industrials","HWM":"Industrials","ROK":"Industrials",
+    "AXON":"Industrials","DAL":"Industrials","UAL":"Industrials","LUV":"Industrials","DOV":"Industrials","XYL":"Industrials",
+    "HUBB":"Industrials","FTV":"Industrials","WAB":"Industrials","BR":"Industrials","VLTO":"Industrials","EXPD":"Industrials",
+    "CPRT":"Industrials","PAYX":"Industrials","J":"Industrials","LDOS":"Industrials","TXT":"Industrials","MAS":"Industrials",
+    "LII":"Industrials","SNA":"Industrials","IEX":"Industrials","NDSN":"Industrials","SWK":"Industrials","CHRW":"Industrials",
+    "JBHT":"Industrials","BLDR":"Industrials","ALLE":"Industrials","AOS":"Industrials","HII":"Industrials","GNRC":"Industrials",
+    "EME":"Industrials","FERG":"Industrials","FIX":"Industrials","FLEX":"Industrials","VRT":"Industrials","PAYC":"Industrials",
+    "CSGP":"Industrials","ROL":"Industrials","UBER":"Industrials","XYZ":"Industrials","TRMB":"Industrials",
+
+    # Consumer Staples
+    "PG":"Consumer Staples","COST":"Consumer Staples","WMT":"Consumer Staples","KO":"Consumer Staples","PEP":"Consumer Staples",
+    "PM":"Consumer Staples","MDLZ":"Consumer Staples","MO":"Consumer Staples","CL":"Consumer Staples","TGT":"Consumer Staples",
+    "KMB":"Consumer Staples","GIS":"Consumer Staples","STZ":"Consumer Staples","SYY":"Consumer Staples","KDP":"Consumer Staples",
+    "MNST":"Consumer Staples","KR":"Consumer Staples","HSY":"Consumer Staples","ADM":"Consumer Staples","KHC":"Consumer Staples",
+    "EL":"Consumer Staples","CHD":"Consumer Staples","MKC":"Consumer Staples","CLX":"Consumer Staples","TSN":"Consumer Staples",
+    "DLTR":"Consumer Staples","DG":"Consumer Staples","CAG":"Consumer Staples","SJM":"Consumer Staples","HRL":"Consumer Staples",
+    "TAP":"Consumer Staples","CPB":"Consumer Staples","LW":"Consumer Staples","BG":"Consumer Staples","CASY":"Consumer Staples",
+    "BF-B":"Consumer Staples",
+
+    # Energy
+    "XOM":"Energy","CVX":"Energy","COP":"Energy","EOG":"Energy","SLB":"Energy","MPC":"Energy","PSX":"Energy","VLO":"Energy",
+    "WMB":"Energy","OKE":"Energy","OXY":"Energy","KMI":"Energy","HES":"Energy","HAL":"Energy","BKR":"Energy","DVN":"Energy",
+    "FANG":"Energy","TRGP":"Energy","EQT":"Energy","CTRA":"Energy","APA":"Energy","EXE":"Energy",
+
+    # Utilities
+    "NEE":"Utilities","SO":"Utilities","DUK":"Utilities","CEG":"Utilities","SRE":"Utilities","AEP":"Utilities","D":"Utilities",
+    "PCG":"Utilities","EXC":"Utilities","XEL":"Utilities","PEG":"Utilities","ED":"Utilities","WEC":"Utilities","AWK":"Utilities",
+    "EIX":"Utilities","DTE":"Utilities","ETR":"Utilities","FE":"Utilities","ES":"Utilities","PPL":"Utilities","AEE":"Utilities",
+    "CMS":"Utilities","CNP":"Utilities","ATO":"Utilities","NRG":"Utilities","LNT":"Utilities","EVRG":"Utilities","NI":"Utilities",
+    "PNW":"Utilities","AES":"Utilities","VST":"Utilities",
+
+    # Real Estate
+    "PLD":"Real Estate","AMT":"Real Estate","EQIX":"Real Estate","WELL":"Real Estate","SPG":"Real Estate","PSA":"Real Estate",
+    "O":"Real Estate","CCI":"Real Estate","DLR":"Real Estate","VICI":"Real Estate","CBRE":"Real Estate","EXR":"Real Estate",
+    "AVB":"Real Estate","IRM":"Real Estate","EQR":"Real Estate","SBAC":"Real Estate","WY":"Real Estate","VTR":"Real Estate",
+    "ARE":"Real Estate","ESS":"Real Estate","MAA":"Real Estate","INVH":"Real Estate","KIM":"Real Estate","DOC":"Real Estate",
+    "UDR":"Real Estate","CPT":"Real Estate","HST":"Real Estate","REG":"Real Estate","BXP":"Real Estate","FRT":"Real Estate",
+
+    # Materials
+    "LIN":"Materials","SHW":"Materials","APD":"Materials","FCX":"Materials","ECL":"Materials","NEM":"Materials","CTVA":"Materials",
+    "NUE":"Materials","DD":"Materials","DOW":"Materials","VMC":"Materials","MLM":"Materials","PPG":"Materials","IFF":"Materials",
+    "LYB":"Materials","STLD":"Materials","BALL":"Materials","AVY":"Materials","PKG":"Materials","IP":"Materials","CF":"Materials",
+    "ALB":"Materials","MOS":"Materials","EMN":"Materials","CE":"Materials","AMCR":"Materials","BE":"Materials","SOLV":"Materials",
+    "TWLO":"Technology","TTD":"Technology","GDDY":"Technology"
+}
+
+TICKERS = list(SECTOR_MAP.keys())
 
 INDICES = ["SPY", "QQQ", "DIA", "IWM", "^VIX"]
 SECTOR_ETFS = {
-    "XLK": "Technology", "XLF": "Financials", "XLV": "Health Care", "XLE": "Energy",
-    "XLY": "Consumer Discretionary", "XLC": "Communication Services", "XLI": "Industrials",
-    "XLP": "Consumer Staples", "XLB": "Materials", "XLRE": "Real Estate", "XLU": "Utilities"
+    "XLK": "Technology",
+    "XLF": "Financials",
+    "XLV": "Health Care",
+    "XLE": "Energy",
+    "XLY": "Consumer Discretionary",
+    "XLC": "Communication Services",
+    "XLI": "Industrials",
+    "XLP": "Consumer Staples",
+    "XLB": "Materials",
+    "XLRE": "Real Estate",
+    "XLU": "Utilities"
 }
-
-def get_sp500_meta():
-    meta = {}
-    try:
-        req = urllib.request.Request(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        html = urllib.request.urlopen(req, timeout=15).read().decode("utf-8")
-        tables = pd.read_html(html)
-        df_sp = tables[0]
-        for _, row in df_sp.iterrows():
-            sym = str(row["Symbol"]).strip().replace("-", ".")
-            meta[sym] = {
-                "sec": str(row.get("GICS Sector", "Technology")).strip(),
-                "ind": str(row.get("GICS Sub-Industry", "S&P 500")).strip()
-            }
-    except Exception:
-        pass
-    return meta
 
 def strat_bar(curr, prev):
     if prev is None:
@@ -95,6 +174,18 @@ def strat_bar(curr, prev):
         "lo": round(float(curr["Low"]), 2)
     }
 
+def build_tf_cell(sub_df):
+    if sub_df is None or len(sub_df) < 2:
+        return None
+    cc = strat_bar(sub_df.iloc[-1], sub_df.iloc[-2])
+    c1 = strat_bar(sub_df.iloc[-2], sub_df.iloc[-3]) if len(sub_df) >= 3 else None
+    c2 = strat_bar(sub_df.iloc[-3], sub_df.iloc[-4]) if len(sub_df) >= 4 else None
+    if c1:
+        cc["c1"] = {"t": c1["t"], "c": c1["c"], "sh": c1["sh"]}
+    if c2:
+        cc["c2"] = {"t": c2["t"], "c": c2["c"], "sh": c2["sh"]}
+    return cc
+
 def calc_rsi(s, period=14):
     delta = s.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
@@ -103,19 +194,29 @@ def calc_rsi(s, period=14):
     val = 100 - (100 / (1 + rs))
     return round(float(val.iloc[-1]), 1) if pd.notna(val.iloc[-1]) else None
 
+def calc_mfi(df, period=14):
+    tp = (df["High"] + df["Low"] + df["Close"]) / 3.0
+    mf = tp * df["Volume"]
+    pos = mf.where(tp > tp.shift(1), 0.0).rolling(period).sum()
+    neg = mf.where(tp < tp.shift(1), 0.0).rolling(period).sum()
+    mfr = pos / neg.replace(0, np.nan)
+    val = 100 - (100 / (1 + mfr))
+    return round(float(val.iloc[-1]), 1) if pd.notna(val.iloc[-1]) else None
+
 def analyze_df(df):
     if df is None or len(df) < 30:
         return None
     df = df.dropna(subset=["Open", "High", "Low", "Close"])
     if len(df) < 30:
         return None
-    d_curr, d_prev = df.iloc[-1], df.iloc[-2]
-    d_cell = strat_bar(d_curr, d_prev)
+
+    d_cell = build_tf_cell(df)
 
     def resample_strat(rule):
         r = df.resample(rule).agg({"Open": "first", "High": "max", "Low": "min", "Close": "last"}).dropna()
-        if len(r) < 2: return d_cell
-        return strat_bar(r.iloc[-1], r.iloc[-2])
+        if len(r) < 2:
+            return d_cell
+        return build_tf_cell(r)
 
     w_cell = resample_strat("W-FRI")
     m_cell = resample_strat("ME")
@@ -125,6 +226,7 @@ def analyze_df(df):
     dirs = [d_cell["c"], w_cell["c"], m_cell["c"], q_cell["c"], y_cell["c"]]
     ftfc = all(x == "up" for x in dirs) or all(x == "down" for x in dirs)
 
+    d_curr, d_prev = df.iloc[-1], df.iloc[-2]
     px = float(d_curr["Close"])
     prev_c = float(d_prev["Close"])
     chg = round((px - prev_c) / prev_c * 100, 2) if prev_c else 0.0
@@ -155,6 +257,18 @@ def analyze_df(df):
             dsma[str(p)] = round((px - ma) / ma * 100, 2) if ma else None
             above_ma[p] = px > ma
 
+    # Bollinger Bands (20, 2)
+    bb = None
+    if len(df) >= 20:
+        sma20 = float(df["Close"].rolling(20).mean().iloc[-1])
+        std20 = float(df["Close"].rolling(20).std().iloc[-1])
+        if std20 > 0:
+            upper = sma20 + 2 * std20
+            lower = sma20 - 2 * std20
+            pos = round((px - lower) / (upper - lower), 2)
+            bw = round((upper - lower) / sma20 * 100, 2)
+            bb = {"pos": pos, "bw": bw, "sq": bw < 6.0}
+
     c5 = round((px - float(df["Close"].iloc[-6])) / float(df["Close"].iloc[-6]) * 100, 2) if len(df) >= 6 else chg
     c20 = round((px - float(df["Close"].iloc[-21])) / float(df["Close"].iloc[-21]) * 100, 2) if len(df) >= 21 else chg
 
@@ -163,15 +277,14 @@ def analyze_df(df):
         "D": d_cell, "W": w_cell, "M": m_cell, "Q": q_cell, "Y": y_cell, "ftfc": ftfc,
         "above_ma": above_ma,
         "tech": {
-            "px": round(px, 2), "chg": chg, "rsi": calc_rsi(df["Close"]), "rvol": rvol,
-            "vol": vol, "avol30": int(avol30), "atr": round(atr, 2), "atrp": atrp,
-            "gap": gap, "dhi52": dhi52, "dlo52": dlo52, "dsma": dsma, "c5": c5, "c20": c20
+            "px": round(px, 2), "chg": chg, "rsi": calc_rsi(df["Close"]), "mfi": calc_mfi(df),
+            "rvol": rvol, "vol": vol, "avol30": int(avol30), "atr": round(atr, 2), "atrp": atrp,
+            "gap": gap, "dhi52": dhi52, "dlo52": dlo52, "dsma": dsma, "bb": bb, "c5": c5, "c20": c20
         }
     }
 
 def main():
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    sp_meta = get_sp500_meta()
     all_syms = list(set(TICKERS + INDICES + list(SECTOR_ETFS.keys())))
     raw = yf.download(all_syms, period="1y", interval="1d", group_by="ticker", threads=True, progress=False)
 
@@ -187,8 +300,7 @@ def main():
                 if mc and mc > 0:
                     mc_map[clean_s] = round(float(mc) / 1e9, 2)
                 last_p = getattr(fi, "last_price", None)
-                reg_p = getattr(fi, "regular_market_previous_close", None)
-                if last_p and reg_p and reg_p > 0:
+                if last_p and last_p > 0:
                     ext_map[clean_s] = {"px": round(float(last_p), 2)}
             except Exception:
                 pass
@@ -228,8 +340,7 @@ def main():
             ma_totals[p] += 1
             if is_ab: ma_counts[p] += 1
 
-        m_info = sp_meta.get(clean_sym, {"sec": "Technology", "ind": "S&P 500"})
-        sec_name = m_info["sec"]
+        sec_name = SECTOR_MAP.get(sym, "Technology")
         mc_val = mc_map.get(clean_sym, 25.0)
         px_now = ext_map.get(clean_sym, {}).get("px", res["px"])
         prices_map[clean_sym] = [px_now, res["chg"]]
@@ -240,7 +351,7 @@ def main():
         scan_rows.append({
             "s": clean_sym,
             "sec": sec_name,
-            "ind": m_info["ind"],
+            "ind": sec_name,
             "p": px_now,
             "c": res["chg"],
             "mc": mc_val,
@@ -260,7 +371,7 @@ def main():
             sectors_out.append({
                 "name": name, "etf": etf, "px": res["px"], "chg": res["chg"],
                 "chg5d": res["tech"]["c5"], "chg20d": res["tech"]["c20"],
-                "above": ab_s, "total": max(len(st_list), 1), "stocks": st_list[:25]
+                "above": ab_s, "total": max(len(st_list), 1), "stocks": st_list[:30]
             })
 
     sorted_by_chg = sorted(scan_rows, key=lambda x: x["c"], reverse=True)
@@ -301,7 +412,7 @@ def main():
 
     cards = []
     try:
-        req = urllib.request.Request("https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY,QQQ,NVDA,AAPL,MSFT,TSLA&region=US&lang=en-US", headers={"User-Agent": "Mozilla/5.0"})
+        req = urllib.request.Request("https://feeds.finance.yahoo.com/rss/2.0/headline?s=SPY,QQQ,NVDA,AAPL&region=US&lang=en-US", headers={"User-Agent": "Mozilla/5.0"})
         xml_data = urllib.request.urlopen(req, timeout=10).read()
         root = ET.fromstring(xml_data)
         for item in root.findall(".//item")[:20]:
