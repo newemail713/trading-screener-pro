@@ -9603,12 +9603,24 @@
   // read a big PUBLIC Supabase row through the Vercel edge-cache proxy (/api/feed) so Supabase is hit
   // ~once per cache window GLOBALLY, not once per visitor. Falls back to a DIRECT Supabase read on any
   // failure (proxy down/cold/not-yet-deployed). Returns the PostgREST array [{data}] — same shape as direct.
-   async function snCachedFetch(table, id) {
+  async function snCachedFetch(table, id) {
+    let file = "";
+    if (table === "scanner_data" && id === "latest") file = "data/scanner.json";
+    else if (table === "market_snapshot" && id === "latest") file = "data/market.json";
+    else if (table === "market_snapshot" && id === "prices") file = "data/prices.json";
+    else if (table === "market_snapshot" && id === "breadth") file = "data/breadth.json";
+    else if (table === "market_snapshot" && id === "news") file = "data/news.json";
+    if (!file) return null;
     try {
-      const r = await fetch("/api/feed?t=" + table + "&id=" + id);
-      if (r.ok) return await r.json();
+      const r = await fetch("./" + file + "?_t=" + Math.floor(Date.now() / 60000));
+      if (r.ok) {
+        const d = await r.json();
+        return [{ data: d }];
+      }
     } catch (e) {}
     return null;
+  }
+
   }
   async function loadLive() {
     try {
