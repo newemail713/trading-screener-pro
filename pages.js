@@ -9621,7 +9621,6 @@
     return null;
   }
 
-  }
   async function loadLive() {
     try {
       const cfg = window.SN_CONFIG;
